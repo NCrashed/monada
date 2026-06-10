@@ -1,0 +1,29 @@
+[package]
+name = "monada-fixed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+description = "Q32.32 deterministic fixed-point scalars, vectors, and trig for monada's sim core."
+documentation = "https://docs.rs/monada-fixed"
+keywords = ["fixed-point", "deterministic", "lockstep", "gamedev", "no_std"]
+categories = ["game-development", "no-std", "mathematics"]
+# build.rs bakes the sine lookup table as Q32.32 integer constants
+# (see build.rs for the cross-platform reproducibility argument).
+build = "build.rs"
+
+[features]
+default = []
+# Opt-in serde derives on Fixed / FixedVec* (raw i64 transparent).
+# monada-sim enables this for replay snapshots; the base crate stays
+# dependency-free and #![no_std].
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[lints]
+workspace = true

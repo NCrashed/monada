@@ -136,8 +136,17 @@ framebuffer (winit + softbuffer host, matching `roxlap-cave-demo`).
 - Multi-grid scene with `f64` world positions and per-grid rotation
   (`roxlap-scene` S2 + S5). A chess board is one grid; each piece is
   its own grid; pieces can rotate when captured.
-- KV6 sprites with KFA animation rigs (`roxlap-host` demo) — animated
-  units out of the box.
+- KV6 sprites with KFA bone rigs. roxlap supplies the *rig + render*
+  (the `roxlap-host` demo poses a rigged sprite from joint angles);
+  what it does **not** ship is the animation-*clip player* (keyframe
+  interpolation of baked `.kfa` curves) or scene-graph integration of
+  animated sprites — those are `monada-render` work, not inherited.
+  **For v0, units are 2D-style billboards: flat, camera-facing
+  single-layer KV6 (PNG → one-voxel-deep slab).** This stays
+  voxel-native (no triangle quads, pillar 3 intact), sidesteps the rig
+  + clip-player work, and fits a limited-art budget; KFA rigs and the
+  voxel-video format (§3.2) are the richer path layered in after the
+  game loop proves out.
 - Real-time voxel edits via `roxlap_formats::edit::*`. Carving
   terrain for buildings, craters, deformation on damage — all
   validated byte-equal against voxlap C's `setspans`.
@@ -167,11 +176,40 @@ framebuffer (winit + softbuffer host, matching `roxlap-cave-demo`).
   framebuffer. egui supplies widgets, layout, and accessibility for
   the cost of one heavy dep; the retro aesthetic is a *theme*, not
   a rendering technique.
-- Camera modes: top-down ortho-style (chess, RTS), free-fly
-  (inherited from roxlap demos), follow-unit (later).
-- Picking — screen-space click → grid/voxel/entity resolution.
-  roxlap's per-pixel z-buffer is the input; the resolver raycasts
-  through the inverse of the render transform.
+- Camera modes: top-down strategy view (chess, RTS), free-fly
+  (inherited from roxlap demos), follow-unit (later). The strategy
+  view is a **high-angle perspective camera tuned for frame rate, not
+  a true orthographic projection** — roxlap's opticast is perspective
+  by construction (a single eye point with diverging per-column rays),
+  so a steep, high camera is what delivers the AoE2/WC3 "top-down"
+  read without reworking the raycaster. The requirement is "a top-down
+  camera that renders fast enough to be enjoyable," and a tilted
+  perspective meets it; true ortho is explicitly *not* a goal.
+- Picking — screen-space click → grid/voxel/entity resolution. roxlap
+  has no built-in picker, but the pieces now exist and are validated:
+  - **The ray** for pixel `(px, py)` comes from the public camera
+    basis. Each backend has its own projection, so the unproject must
+    match the active one — the CPU opticast uses
+    `(px − hx)·right + (py − hy)·down + hz·forward` (voxlap
+    `setcamera`); the GPU marcher uses a vertical-FOV pinhole. Using
+    the wrong one drifts the hit off-pointer proportionally to distance
+    from screen centre. *(monada-render should expose one canonical
+    unproject that the renderer guarantees both backends honour, rather
+    than reconstructing per backend.)*
+  - **Tile/board selection:** intersect that ray with the ground
+    plane. No depth readback; sufficient for chess and grid-based RTS
+    placement.
+  - **Surface-exact hits:** roxlap's render facade now exposes
+    `SceneRenderer::pick_depth(x, y) → Option<f32>` — the per-pixel
+    world-t to the nearest grid surface. The world hit is
+    `cam.pos + t · normalize(ray)`; floor it (after the grid transform)
+    for the voxel. CPU reads its in-memory z-buffer for free; GPU
+    stages the depth buffer on demand (a click-time device poll, not
+    per frame). The depth is the *scene* pass's output, so overlay
+    sprites (a cursor) don't occlude the pick.
+  - Both routes are validated by a cursor/click prototype in
+    `roxlap-scene-demo` (top-down camera, `C` to enter) on both the CPU
+    and GPU backends.
 
 ### 3.3 Scripting layer
 
@@ -621,7 +659,7 @@ polish. Scope decided after M6 lands.
 
 | Risk | Mitigation |
 |---|---|
-| Nondeterminism creeps into `monada-sim` (a `HashMap` iteration, a `sin` call, a `thread_rng`) | `monada-oracle` runs on every PR. Clippy lint forbids `std::collections::HashMap` and `f32`/`f64` inside `monada-sim`. |
+| Nondeterminism creeps into `monada-sim` (a `HashMap` iteration, a `sin` call, a `thread_rng`) | `monada-oracle` runs on every PR across a Linux/macOS/Windows matrix. Clippy gates: workspace `clippy.toml` `disallowed-types` flags `HashMap`/`HashSet`; `monada-sim` additionally `#![deny(clippy::float_arithmetic, clippy::disallowed_types)]`. (No lint bans the float *type* — the hazard is float *arithmetic*, which `float_arithmetic` catches.) |
 | roxlap-scene's render path is not deterministic (and is not required to be) — render-side drift could desync from sim invisibly | Wall enforced at the module boundary: `monada-render` reads sim state only. Enforced at compile time via trait bounds. |
 | Rhai's interpreter becomes too slow as gameplay scales beyond chess | WASM backend is the planned escape hatch (M6). `monada-script`'s `ScriptBackend` trait abstraction exists from M2 so the swap does not cascade. |
 | KV6 authoring is a niche skill (voxel art bottleneck) | Procedural pieces (in-code) for v0. Authored art is M4 polish, not a blocker. The editor (M5) widens the authoring funnel. |
@@ -639,8 +677,10 @@ the architecture above realistic on a small team:
   additional engine work required.
 - roxlap's wasm pipeline gives monada browser play without
   additional toolchain investment.
-- Rust's type system enforces the sim/render wall — forbidding
-  `f32`/`f64` in sim crates is a single `#![deny]` attribute.
+- Rust's type system enforces the sim/render wall — and a single
+  `#![deny(clippy::float_arithmetic)]` in each sim crate forbids float
+  *operations* there (no lint can ban the `f32`/`f64` type itself, but
+  the arithmetic is the actual divergence hazard).
 - The dependency set is pure Rust end-to-end (Rhai, glam-based
   fixed-point, quinn for QUIC, winit + softbuffer for the host
   loop). One workspace, one toolchain, no FFI seams. The same

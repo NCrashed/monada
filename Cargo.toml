@@ -1,0 +1,62 @@
+[workspace]
+members = [
+    "crates/monada-fixed",
+    "crates/monada-sim",
+    "crates/monada-script",
+    "crates/monada-net",
+    "crates/monada-render",
+    "crates/monada-voxvideo",
+    "crates/monada-physics",
+    "crates/monada-host",
+    "crates/monada-web",
+    "crates/monada-format",
+    "crates/monada-editor",
+    "crates/monada-oracle",
+    "crates/monada-chess",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/NCrashed/monada"
+authors = ["Anton Gushcha <ncrashed@gmail.com>"]
+# Native dev + tests run on stable; the nightly pin in
+# rust-toolchain.toml exists only for the wasm threads path inherited
+# from roxlap (see roxlap's PORTING-WASM.md). No nightly-only feature
+# is used off the wasm32 target.
+rust-version = "1.77"
+readme = "README.md"
+
+[workspace.dependencies]
+# Render-side world math, lifted from roxlap's choice so the
+# sim->scene bridge (monada-render, M1) speaks the same primitives the
+# scene graph expects. NEVER pulled into monada-sim: sim coords are
+# Q32.32 (monada-fixed), floats live strictly on the render side of
+# the wall (DESIGN.md §3.1).
+glam = { version = "0.30", default-features = false, features = ["std", "serde"] }
+# Replay snapshots + state serialisation. Format-agnostic; downstream
+# picks bincode / postcard / etc.
+serde = { version = "1", default-features = false, features = ["derive"] }
+
+# Internal crates, referenced by path during local dev; the `version`
+# is what a future `cargo publish` records for downstream resolution
+# (mirrors roxlap's convention).
+monada-fixed = { path = "crates/monada-fixed", version = "0.0.1" }
+monada-sim = { path = "crates/monada-sim", version = "0.0.1" }
+monada-script = { path = "crates/monada-script", version = "0.0.1" }
+monada-net = { path = "crates/monada-net", version = "0.0.1" }
+monada-render = { path = "crates/monada-render", version = "0.0.1" }
+monada-voxvideo = { path = "crates/monada-voxvideo", version = "0.0.1" }
+monada-physics = { path = "crates/monada-physics", version = "0.0.1" }
+monada-format = { path = "crates/monada-format", version = "0.0.1" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Module-name redundancy is fine for small crates that may grow
+# (matches roxlap's stance).
+module_name_repetitions = "allow"

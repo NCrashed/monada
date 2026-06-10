@@ -1,0 +1,8 @@
+# monada determinism goldens — @generated, do not hand-edit.
+# Canonical CircleSim: seed "MONADA_0", 100 movers.
+# Regenerate with `cargo run -p monada-oracle -- --bless`.
+circle@0 = 4085228208043754834
+circle@1 = 4203083451758757778
+circle@30 = 12989070050077658665
+circle@150 = 7995104311006645468
+circle@600 = 2920854233001871778

@@ -1,0 +1,19 @@
+[package]
+name = "monada-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "monada WC3-World-Editor-class authoring tool: terrain, archetypes, triggers, visual scripting."
+publish = false
+
+[[bin]]
+name = "monada-editor"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

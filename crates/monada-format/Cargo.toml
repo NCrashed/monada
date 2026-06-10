@@ -1,0 +1,15 @@
+[package]
+name = "monada-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+description = "monada map archive (tar.zst): manifest schema, asset bundling, integrity hashing."
+
+[dependencies]
+
+[lints]
+workspace = true

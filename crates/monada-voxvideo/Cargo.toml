@@ -1,0 +1,15 @@
+[package]
+name = "monada-voxvideo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+description = "Voxel-video (.vvid) codec — KV6-delta frame-stream, 'MP4/GIF for voxels'."
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "monada-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "monada wasm32 host binary: same as monada-host with web transport. Mirrors roxlap-web."
+publish = false
+
+[[bin]]
+name = "monada-web"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

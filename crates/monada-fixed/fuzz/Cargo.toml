@@ -1,0 +1,38 @@
+[package]
+name = "monada-fixed-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+monada-fixed = { path = ".." }
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sqrt"
+path = "fuzz_targets/sqrt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mul_assoc"
+path = "fuzz_targets/mul_assoc.rs"
+test = false
+doc = false
+bench = false
+
+# Detached from the engine workspace: libfuzzer-sys requires nightly +
+# `-Zsanitizer` build flags that `cargo build --workspace` must not try
+# to apply. Driven only via `cargo +nightly fuzz run <target>`.
+[workspace]

@@ -1,0 +1,16 @@
+[package]
+name = "monada-physics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+description = "Voxel-native rigid-body solver: voxel-vs-voxel collision, edit-API destruction."
+
+[dependencies]
+monada-fixed = { workspace = true }
+
+[lints]
+workspace = true

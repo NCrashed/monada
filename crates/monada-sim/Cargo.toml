@@ -1,0 +1,27 @@
+[package]
+name = "monada-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+description = "monada deterministic simulation core: SoA archetypes, fixed-step ticker, RNG, state hashing."
+documentation = "https://docs.rs/monada-sim"
+keywords = ["deterministic", "lockstep", "ecs", "simulation", "gamedev"]
+categories = ["game-development", "simulation"]
+
+[dependencies]
+monada-fixed = { workspace = true, features = ["serde"] }
+# `std` brings serde's `Vec`/`String` impls (the workspace default has
+# default-features off); features are additive across the workspace.
+serde = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+# Snapshot round-trip test only; a human-readable format keeps replay
+# debugging legible. Not a runtime dependency.
+serde_json = "1"
+
+[lints]
+workspace = true

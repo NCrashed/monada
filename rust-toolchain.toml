@@ -1,0 +1,10 @@
+# Mirrors roxlap's pin: a nightly toolchain is required only for the
+# wasm-bindgen-rayon threading path (`-Z build-std` + `rust-src`),
+# inherited when monada-web reuses roxlap's wasm threads. Native
+# (non-wasm) builds and tests behave identically to stable — there are
+# no nightly-only features off the wasm32 target.
+[toolchain]
+channel = "nightly-2026-04-15"
+components = ["rustc", "cargo", "rust-src", "rustfmt", "clippy", "rust-analyzer"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

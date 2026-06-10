@@ -1,0 +1,22 @@
+[package]
+name = "monada-oracle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Cross-platform determinism harness for monada — runs a fixed scenario and diffs the state hash."
+# Test harness, not for downstream consumption (mirrors roxlap-oracle).
+publish = false
+
+[[bin]]
+name = "monada-oracle"
+path = "src/main.rs"
+
+[dependencies]
+monada-fixed = { workspace = true }
+monada-sim = { workspace = true }
+
+[lints]
+workspace = true

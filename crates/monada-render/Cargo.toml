@@ -1,0 +1,18 @@
+[package]
+name = "monada-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+description = "monada sim -> roxlap-scene translator: per-frame interpolation, picking, egui HUD."
+
+[dependencies]
+# Floats are permitted here — render state is throwaway and never
+# feeds back into sim (DESIGN.md §3.1). roxlap deps (roxlap-core,
+# roxlap-scene, roxlap-formats) are wired in at M1.
+
+[lints]
+workspace = true

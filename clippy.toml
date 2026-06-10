@@ -1,0 +1,18 @@
+# Determinism guardrails (DESIGN.md §3.1, §8).
+#
+# `disallowed-types` is a single workspace-wide config (clippy reads one
+# clippy.toml), so it nudges every crate away from hash-ordered
+# containers — iteration order leaks into state and desyncs lockstep.
+# `monada-sim` turns the matching lint into a hard error via its own
+# `#![deny(clippy::disallowed_types)]`; other crates only get a warning
+# (gated to an error in CI by `clippy -- -D warnings`) and may
+# `#[allow(...)]` locally with a justification on the render side of the
+# wall, where iteration order is throwaway.
+#
+# The float hazard is handled separately: there is no lint that bans the
+# `f32`/`f64` *type*, so `monada-sim` denies `clippy::float_arithmetic`
+# (the actual hazard — float *operations*) in its crate root instead.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "non-deterministic iteration order desyncs lockstep — use BTreeMap or an insertion-ordered IndexMap (DESIGN.md §3.1)" },
+    { path = "std::collections::HashSet", reason = "non-deterministic iteration order desyncs lockstep — use BTreeSet (DESIGN.md §3.1)" },
+]

@@ -1,0 +1,20 @@
+[package]
+name = "monada-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "monada native host binary: winit + softbuffer + render + net glue."
+# Application binary, not a library for downstream consumption.
+publish = false
+
+[[bin]]
+name = "monada-host"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

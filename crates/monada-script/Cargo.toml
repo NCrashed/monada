@@ -1,0 +1,15 @@
+[package]
+name = "monada-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+description = "monada scripting runtime (Rhai v0, WASM post-v0) + the host API wall."
+
+[dependencies]
+
+[lints]
+workspace = true
