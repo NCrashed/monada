@@ -499,6 +499,7 @@ dependencies = [
  "ahash",
  "emath",
  "epaint",
+ "log",
  "nohash-hasher",
 ]
 
@@ -518,6 +519,20 @@ dependencies = [
  "type-map",
  "web-time",
  "wgpu",
+]
+
+[[package]]
+name = "egui-winit"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a9c430f4f816340e8e8c1b20eec274186b1be6bc4c7dfc467ed50d57abc36c6"
+dependencies = [
+ "ahash",
+ "egui",
+ "log",
+ "raw-window-handle",
+ "web-time",
+ "winit",
 ]
 
 [[package]]
@@ -547,6 +562,7 @@ dependencies = [
  "ecolor",
  "emath",
  "epaint_default_fonts",
+ "log",
  "nohash-hasher",
  "parking_lot",
 ]
@@ -1040,6 +1056,7 @@ version = "0.0.1"
 name = "monada-host"
 version = "0.0.1"
 dependencies = [
+ "egui-winit",
  "monada-render",
  "monada-sim",
  "roxlap-core",
@@ -1705,14 +1722,14 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "roxlap-cavegen"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "roxlap-formats",
 ]
 
 [[package]]
 name = "roxlap-core"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "rayon",
  "roxlap-formats",
@@ -1720,13 +1737,15 @@ dependencies = [
 
 [[package]]
 name = "roxlap-formats"
-version = "0.6.1"
+version = "0.7.0"
 
 [[package]]
 name = "roxlap-gpu"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "bytemuck",
+ "egui",
+ "egui-wgpu",
  "glam",
  "pollster",
  "raw-window-handle",
@@ -1736,10 +1755,9 @@ dependencies = [
 
 [[package]]
 name = "roxlap-render"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "egui",
- "egui-wgpu",
  "glam",
  "raw-window-handle",
  "rayon",
@@ -1752,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "roxlap-scene"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "crossbeam-channel",
  "glam",

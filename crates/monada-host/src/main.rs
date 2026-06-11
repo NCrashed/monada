@@ -7,9 +7,13 @@
 //! §3.2). Sim state never holds a float pose — the Q32.32 -> f64
 //! conversion lives entirely in `monada-render`.
 //!
-//! Controls: arrow keys orbit (yaw/pitch), `W`/`S` zoom, `Esc` quits.
-//!
-//! Picking and the egui HUD are the next M1 slices.
+//! Controls: arrow keys orbit (yaw/pitch), `W`/`S` zoom, left-click to
+//! pick a mover, `Esc` quits. A small egui HUD shows tick / FPS /
+//! selection (DESIGN.md §3.2).
+
+// Host-side float casts (FPS readout, scale factor) are render-side and
+// deliberate; the deterministic wall is in monada-sim, not here.
+#![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,7 +23,9 @@ use monada_sim::scenario::{CircleSim, DEFAULT_COUNT};
 use monada_sim::Simulation;
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
-use roxlap_render::{FrameParams, RenderOptions, SceneRenderer};
+// egui itself comes through roxlap-render's re-export so the version
+// matches the one `paint_egui` rasterises with.
+use roxlap_render::{egui, FrameParams, RenderOptions, SceneRenderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
@@ -77,6 +83,11 @@ struct App {
     keys: Keys,
     /// Last cursor position in physical pixels, for click picking.
     cursor: (f64, f64),
+    /// Smoothed frames-per-second for the HUD.
+    fps: f32,
+    /// egui context + winit input bridge for the HUD overlay.
+    egui_ctx: egui::Context,
+    egui_state: Option<egui_winit::State>,
     /// One-shot coordinate dump (set `MONADA_DEBUG=1`).
     debug_done: bool,
 }
@@ -95,8 +106,31 @@ impl App {
             last_frame: Instant::now(),
             keys: Keys::default(),
             cursor: (0.0, 0.0),
+            fps: 0.0,
+            egui_ctx: egui::Context::default(),
+            egui_state: None,
             debug_done: false,
         }
+    }
+
+    /// Run the egui HUD for this frame and tessellate it. Returns the
+    /// paint jobs + texture delta to hand to `paint_egui`, or `None`
+    /// before the egui state exists (pre-`resumed`).
+    fn run_hud(
+        &mut self,
+        window: &Window,
+    ) -> Option<(Vec<egui::ClippedPrimitive>, egui::TexturesDelta, f32)> {
+        let tick = self.curr.tick();
+        let fps = self.fps;
+        let selected = self.scene.selected();
+        let ctx = &self.egui_ctx;
+        let state = self.egui_state.as_mut()?;
+
+        let raw = state.take_egui_input(window);
+        let out = ctx.run(raw, |ui_ctx| build_hud(ui_ctx, tick, fps, selected));
+        state.handle_platform_output(window, out.platform_output);
+        let jobs = ctx.tessellate(out.shapes, out.pixels_per_point);
+        Some((jobs, out.textures_delta, out.pixels_per_point))
     }
 
     /// Pick the mover under the cursor: unproject through the renderer's
@@ -141,6 +175,10 @@ impl App {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f64().min(0.25);
         self.last_frame = now;
+        if dt > 0.0 {
+            // Exponential smoothing so the HUD reading is steady.
+            self.fps = self.fps.mul_add(0.9, (1.0 / dt) as f32 * 0.1);
+        }
         self.accumulator += dt;
         while self.accumulator >= TICK_DT {
             self.prev = self.curr.clone();
@@ -177,6 +215,9 @@ impl App {
             }
         }
 
+        // Build the HUD before borrowing the renderer / `self.lighting`.
+        let hud = self.run_hud(&window);
+
         let settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
         let frame = FrameParams {
             settings: &settings,
@@ -198,7 +239,13 @@ impl App {
             return;
         };
         renderer.set_sprites(self.scene.sprites());
+        // roxlap 0.7: render() composites without presenting; the frame
+        // is finished by exactly one of paint_egui (HUD) or present.
         renderer.render(self.scene.scene_mut(), &camera, &frame);
+        match hud {
+            Some((jobs, textures, ppp)) => renderer.paint_egui(&jobs, &textures, ppp),
+            None => renderer.present(),
+        }
 
         window.request_redraw();
     }
@@ -231,6 +278,17 @@ impl ApplicationHandler for App {
             None => eprintln!("monada-host: CPU backend"),
         }
 
+        // egui input bridge bound to this window (clipboard / display
+        // handle, initial scale factor).
+        self.egui_state = Some(egui_winit::State::new(
+            self.egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            window.as_ref(),
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        ));
+
         window.request_redraw();
         self.window = Some(window);
         self.renderer = Some(renderer);
@@ -238,6 +296,13 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Let egui see the event first; `consumed` means a widget took it
+        // (e.g. a click landed on the HUD), so we skip camera/picking.
+        let consumed = match (self.window.clone(), self.egui_state.as_mut()) {
+            (Some(window), Some(state)) => state.on_window_event(&window, &event).consumed,
+            _ => false,
+        };
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -253,7 +318,7 @@ impl ApplicationHandler for App {
                         ..
                     },
                 ..
-            } => self.on_key(event_loop, code, state),
+            } if !consumed => self.on_key(event_loop, code, state),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
             }
@@ -261,11 +326,30 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => self.pick_under_cursor(),
+            } if !consumed => self.pick_under_cursor(),
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
     }
+}
+
+/// Build the HUD widget tree (DESIGN.md §3.2's egui HUD, M1 form).
+fn build_hud(ctx: &egui::Context, tick: u64, fps: f32, selected: Option<usize>) {
+    egui::Window::new("monada")
+        .title_bar(false)
+        .resizable(false)
+        .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
+        .show(ctx, |ui| {
+            ui.label(format!("tick {tick}"));
+            ui.label(format!("fps  {fps:.0}"));
+            match selected {
+                Some(i) => ui.label(format!("selected mover #{i}")),
+                None => ui.label("selected mover —"),
+            };
+            ui.separator();
+            ui.label("arrows orbit · W/S zoom");
+            ui.label("click a cube to pick · Esc quit");
+        });
 }
 
 impl App {

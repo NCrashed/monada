@@ -19,9 +19,15 @@ monada-sim = { workspace = true }
 monada-render = { workspace = true }
 # Render facade + camera/opticast types. Local path (sibling roxlap)
 # matches monada-render's dependency on the same checkout.
-roxlap-render = { path = "../../../roxlap/crates/roxlap-render" }
+# `hud` enables roxlap's egui overlay (SceneRenderer::paint_egui); the
+# crate re-exports `egui` so we tessellate with the exact version it
+# paints with.
+roxlap-render = { path = "../../../roxlap/crates/roxlap-render", features = ["hud"] }
 roxlap-core = { path = "../../../roxlap/crates/roxlap-core" }
 winit = "0.30"
+# egui input/output bridge for winit; egui itself comes via
+# `roxlap_render::egui` so the versions can't drift.
+egui-winit = { version = "0.29", default-features = false }
 
 [lints]
 workspace = true
