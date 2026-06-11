@@ -22,7 +22,7 @@ use roxlap_core::sprite::SpriteLighting;
 use roxlap_render::{FrameParams, RenderOptions, SceneRenderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -75,6 +75,8 @@ struct App {
     accumulator: f64,
     last_frame: Instant,
     keys: Keys,
+    /// Last cursor position in physical pixels, for click picking.
+    cursor: (f64, f64),
     /// One-shot coordinate dump (set `MONADA_DEBUG=1`).
     debug_done: bool,
 }
@@ -92,7 +94,25 @@ impl App {
             accumulator: 0.0,
             last_frame: Instant::now(),
             keys: Keys::default(),
+            cursor: (0.0, 0.0),
             debug_done: false,
+        }
+    }
+
+    /// Pick the mover under the cursor: unproject through the renderer's
+    /// last-frame projection, intersect the ground plane, select the
+    /// nearest mover (DESIGN.md §3.2).
+    fn pick_under_cursor(&mut self) {
+        let cam = self.scene.camera();
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        let Some(ray) = renderer.view_ray(&cam, self.cursor.0, self.cursor.1) else {
+            return;
+        };
+        match self.scene.pick_ground(ray.origin, ray.dir) {
+            Some(i) => eprintln!("picked mover #{i}"),
+            None => eprintln!("picked: (none)"),
         }
     }
 
@@ -148,6 +168,15 @@ impl App {
         }
 
         let camera = self.scene.camera();
+
+        // Track the picking ray under the cursor every frame (debug
+        // marker), using the previous frame's projection.
+        if let Some(renderer) = self.renderer.as_ref() {
+            if let Some(ray) = renderer.view_ray(&camera, self.cursor.0, self.cursor.1) {
+                self.scene.hover(ray.origin, ray.dir);
+            }
+        }
+
         let settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
         let frame = FrameParams {
             settings: &settings,
@@ -225,6 +254,14 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => self.on_key(event_loop, code, state),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x, position.y);
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => self.pick_under_cursor(),
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }

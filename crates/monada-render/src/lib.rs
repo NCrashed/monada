@@ -61,13 +61,28 @@ const PALETTE: [u32; 6] = [
     0x80E8_4855, // red
 ];
 
+/// Model index of the bright "selected" cube, appended after the
+/// palette models.
+const HIGHLIGHT_MODEL: usize = PALETTE.len();
+/// Model index of the green debug cursor marker.
+const CURSOR_MODEL: usize = PALETTE.len() + 1;
+/// Max xy distance (world units) from the pick-plane hit to a mover for
+/// it to count as picked; beyond this a click deselects.
+const PICK_RADIUS: f64 = 14.0;
+
 /// The M1 render scene: a ground grid plus a per-frame sprite set for
 /// the movers.
 pub struct CircleScene {
     scene: Scene,
-    /// Cube models (one per palette colour) + the live instance list.
+    /// Cube models (palette + highlight + cursor) + the live instance
+    /// list: instances `0..mover_count` are movers, index `mover_count`
+    /// is the debug cursor marker.
     sprites: SpriteSet,
+    /// Number of mover instances (the cursor marker sits just past it).
+    mover_count: usize,
     center: DVec3,
+    /// Currently picked mover instance, if any.
+    selected: Option<usize>,
     /// Orbit camera framing the circle; driven by host input.
     pub camera: OrbitCamera,
 }
@@ -80,23 +95,31 @@ impl CircleScene {
         let center = DVec3::new(0.0, 0.0, GROUND_Z);
         build_ground(&mut scene, center);
 
-        // One flat-shaded cube model per palette colour.
-        let models: Vec<Sprite> = PALETTE
-            .iter()
-            .map(|&col| {
-                let mut sprite = Sprite::axis_aligned(Kv6::solid_cube(CUBE, col), [0.0, 0.0, 0.0]);
-                // Show the raw bright palette colour rather than relying
-                // on a lighting bake for this visibility-first slice.
-                sprite.flags = SPRITE_FLAG_NO_SHADING;
-                sprite
-            })
-            .collect();
-        let instances = (0..count)
+        // One flat-shaded cube model per palette colour, plus a bright
+        // "selected" model (index HIGHLIGHT_MODEL) for picking.
+        let cube_sprite = |col: u32, edge: u32| {
+            let mut sprite = Sprite::axis_aligned(Kv6::solid_cube(edge, col), [0.0, 0.0, 0.0]);
+            // Show the raw bright palette colour rather than relying on a
+            // lighting bake for this visibility-first slice.
+            sprite.flags = SPRITE_FLAG_NO_SHADING;
+            sprite
+        };
+        let mut models: Vec<Sprite> = PALETTE.iter().map(|&col| cube_sprite(col, CUBE)).collect();
+        models.push(cube_sprite(0x80FF_FFFF, CUBE + 2)); // HIGHLIGHT_MODEL
+        models.push(cube_sprite(0x8000_FF00, CUBE - 4)); // CURSOR_MODEL (green)
+
+        let plane_z = center.z - LIFT;
+        let mut instances: Vec<SpriteInstanceDesc> = (0..count)
             .map(|i| SpriteInstanceDesc {
                 model: i % PALETTE.len(),
-                pos: [center.x as f32, center.y as f32, center.z as f32],
+                pos: [center.x as f32, center.y as f32, plane_z as f32],
             })
             .collect();
+        // Debug cursor marker (index == count), follows the picking ray.
+        instances.push(SpriteInstanceDesc {
+            model: CURSOR_MODEL,
+            pos: [center.x as f32, center.y as f32, plane_z as f32],
+        });
         let sprites = SpriteSet {
             models,
             instances,
@@ -106,7 +129,9 @@ impl CircleScene {
         CircleScene {
             scene,
             sprites,
+            mover_count: count,
             center,
+            selected: None,
             camera: OrbitCamera::framing(center),
         }
     }
@@ -118,11 +143,70 @@ impl CircleScene {
     /// Q32.32 -> `f64` conversion and the lerp happen here, on the
     /// render side of the wall.
     pub fn update(&mut self, prev: &[FixedVec3], curr: &[FixedVec3], alpha: f64) {
-        let n = self.sprites.instances.len().min(prev.len()).min(curr.len());
+        let n = self.mover_count.min(prev.len()).min(curr.len());
         for i in 0..n {
             let w = self.mover_world(prev[i], curr[i], alpha);
-            self.sprites.instances[i].pos = [w.x as f32, w.y as f32, w.z as f32];
+            let inst = &mut self.sprites.instances[i];
+            inst.pos = [w.x as f32, w.y as f32, w.z as f32];
+            inst.model = if self.selected == Some(i) {
+                HIGHLIGHT_MODEL
+            } else {
+                i % PALETTE.len()
+            };
         }
+    }
+
+    /// The horizontal plane the movers sit on (their cube centres). The
+    /// movers float [`LIFT`] above the ground, so picking must intersect
+    /// *this* plane, not the ground — intersecting the ground plane and
+    /// matching xy mis-picks by the movers' height parallax.
+    fn pick_plane(&self) -> f64 {
+        self.center.z - LIFT
+    }
+
+    /// Move the debug cursor marker to where a world-space ray crosses
+    /// the mover plane; returns that world point. Call every frame so the
+    /// marker tracks the mouse (not only on click).
+    pub fn hover(&mut self, origin: DVec3, dir: DVec3) -> Option<DVec3> {
+        let hit = ground_hit(origin, dir, self.pick_plane());
+        if let Some(h) = hit {
+            self.sprites.instances[self.mover_count].pos = [h.x as f32, h.y as f32, h.z as f32];
+        }
+        hit
+    }
+
+    /// Pick the mover nearest to where a world-space ray crosses the
+    /// mover plane (tile-style selection — no depth readback; DESIGN.md
+    /// §3.2). Updates and returns the selection; a click that lands
+    /// farther than [`PICK_RADIUS`] from any mover clears it.
+    pub fn pick_ground(&mut self, origin: DVec3, dir: DVec3) -> Option<usize> {
+        self.selected =
+            ground_hit(origin, dir, self.pick_plane()).and_then(|hit| self.nearest_mover(hit));
+        self.selected
+    }
+
+    /// Index of the mover whose xy is closest to `hit`, within
+    /// [`PICK_RADIUS`].
+    fn nearest_mover(&self, hit: DVec3) -> Option<usize> {
+        let mut best: Option<(usize, f64)> = None;
+        for (i, inst) in self.sprites.instances[..self.mover_count]
+            .iter()
+            .enumerate()
+        {
+            let dx = f64::from(inst.pos[0]) - hit.x;
+            let dy = f64::from(inst.pos[1]) - hit.y;
+            let d2 = dx * dx + dy * dy;
+            if best.map_or(true, |(_, b)| d2 < b) {
+                best = Some((i, d2));
+            }
+        }
+        best.filter(|&(_, d2)| d2 <= PICK_RADIUS * PICK_RADIUS)
+            .map(|(i, _)| i)
+    }
+
+    /// The currently selected mover, if any.
+    pub fn selected(&self) -> Option<usize> {
+        self.selected
     }
 
     /// Interpolated world-space centre of one mover cube: lerp the sim
@@ -211,4 +295,17 @@ fn checker_ground(grid: &mut Grid, center: DVec3) {
 /// Linear interpolation in `f64` (render side only).
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
+}
+
+/// Intersect a world ray with the horizontal plane `z = plane_z`.
+/// `None` if the ray is parallel to the plane or points away from it.
+fn ground_hit(origin: DVec3, dir: DVec3, plane_z: f64) -> Option<DVec3> {
+    if dir.z.abs() < 1e-9 {
+        return None;
+    }
+    let t = (plane_z - origin.z) / dir.z;
+    if t <= 0.0 {
+        return None;
+    }
+    Some(origin + dir * t)
 }
