@@ -10,9 +10,18 @@ readme.workspace = true
 description = "monada sim -> roxlap-scene translator: per-frame interpolation, picking, egui HUD."
 
 [dependencies]
-# Floats are permitted here — render state is throwaway and never
-# feeds back into sim (DESIGN.md §3.1). roxlap deps (roxlap-core,
-# roxlap-scene, roxlap-formats) are wired in at M1.
+# Floats are permitted here — render state is throwaway and never feeds
+# back into sim (DESIGN.md §3.1). monada-fixed crosses the wall here:
+# Q32.32 -> f64 conversion happens on this side only.
+monada-fixed = { workspace = true }
+glam = { workspace = true }
+# roxlap 0.6.x via local path (sibling checkout) so we can extend its
+# API on demand during M1+; swap to the crates.io `version` once the
+# render surface stabilises.
+roxlap-core = { path = "../../../roxlap/crates/roxlap-core" }
+roxlap-formats = { path = "../../../roxlap/crates/roxlap-formats" }
+roxlap-scene = { path = "../../../roxlap/crates/roxlap-scene" }
+roxlap-render = { path = "../../../roxlap/crates/roxlap-render" }
 
 [lints]
 workspace = true

@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "monada native host binary: winit + softbuffer + render + net glue."
+description = "monada native host binary: winit + roxlap render facade + sim loop glue."
 # Application binary, not a library for downstream consumption.
 publish = false
 
@@ -15,6 +15,13 @@ name = "monada-host"
 path = "src/main.rs"
 
 [dependencies]
+monada-sim = { workspace = true }
+monada-render = { workspace = true }
+# Render facade + camera/opticast types. Local path (sibling roxlap)
+# matches monada-render's dependency on the same checkout.
+roxlap-render = { path = "../../../roxlap/crates/roxlap-render" }
+roxlap-core = { path = "../../../roxlap/crates/roxlap-core" }
+winit = "0.30"
 
 [lints]
 workspace = true
