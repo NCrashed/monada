@@ -33,6 +33,9 @@ monada-script = { workspace = true }
 monada-sim = { workspace = true }
 monada-fixed = { workspace = true }
 monada-net = { workspace = true }
+# `examples/gen_pieces.rs` writes the committed piece KV6s; the format
+# crate's `solid_box`/`serialize` is the whole tool.
+roxlap-formats = { workspace = true }
 
 [lints]
 workspace = true

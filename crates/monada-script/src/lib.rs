@@ -16,7 +16,7 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use monada_fixed::FixedVec3;
+use monada_fixed::{Fixed, FixedVec3};
 use monada_sim::{Command, PlayerId, World};
 
 mod driver;
@@ -187,6 +187,15 @@ pub trait HostBridge: Send {
     /// meaning to it. The script-side sentinel (`None` → a negative id)
     /// lives in exactly one place — the `local_player` host-fn registration.
     fn local_player(&self) -> Option<i64>;
+
+    /// Declare the map's directional "sun": `dir` is the direction the
+    /// light travels, `intensity` its strength. The host shades the map's
+    /// sprites and grid from it. Render-side only.
+    fn set_light(&mut self, dir: FixedVec3, intensity: Fixed);
+
+    /// Load a sky panorama from an `assets/` image and render it behind the
+    /// scene. Render-side only.
+    fn set_sky(&mut self, asset_path: &str);
 }
 
 /// A shared host bridge handle: the host owns the concrete render state
@@ -220,6 +229,8 @@ impl HostBridge for NullBridge {
     fn local_player(&self) -> Option<i64> {
         None
     }
+    fn set_light(&mut self, _dir: FixedVec3, _intensity: Fixed) {}
+    fn set_sky(&mut self, _asset_path: &str) {}
 }
 
 /// A UI/HUD-side event a script pushes via `ui_emit_event` (DESIGN.md

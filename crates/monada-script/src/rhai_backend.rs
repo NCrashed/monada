@@ -451,6 +451,16 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
             .local_player()
             .unwrap_or(NO_LOCAL_PLAYER)
     });
+
+    let b = bridge.clone();
+    engine.register_fn("set_light", move |dir: FixedVec3, intensity: Fixed| {
+        b.lock().expect("bridge mutex").set_light(dir, intensity);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("set_sky", move |path: ImmutableString| {
+        b.lock().expect("bridge mutex").set_sky(path.as_str());
+    });
 }
 
 /// The `local_player()` script sentinel for "no single local player".

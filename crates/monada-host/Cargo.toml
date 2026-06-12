@@ -25,19 +25,18 @@ monada-format = { workspace = true }
 # Lockstep transport with the QUIC backend (M3 Phase B): the host's
 # `--listen`/`--connect` two-process play.
 monada-net = { workspace = true, features = ["quic"] }
-# Render facade + camera/opticast types. roxlap 0.7.0 from crates.io
-# (temporarily pinned to the published release, matching monada-render,
-# while roxlap master is mid-refactor locally).
+# Render facade + camera/opticast types. roxlap 0.8.0 via the sibling
+# path checkout (workspace dep), matching monada-render.
 # `hud` enables roxlap's egui overlay (SceneRenderer::paint_egui); the
 # crate re-exports `egui` so we tessellate with the exact version it
 # paints with.
-roxlap-render = { version = "0.7.0", features = ["hud"] }
-roxlap-core = "0.7.0"
+roxlap-render = { workspace = true, features = ["hud"] }
+roxlap-core = { workspace = true }
 # Scene graph + voxel grid edit API (the map paints its world here), named
 # in the host's scene accessors so one render path drives any map.
-roxlap-scene = "0.7.0"
+roxlap-scene = { workspace = true }
 # KV6 sprite parsing + procedural boxes for the generic MapRender models.
-roxlap-formats = "0.7.0"
+roxlap-formats = { workspace = true }
 # Render-side world math for picking-ray params (the sim wall stays in
 # monada-sim; floats live only here, per DESIGN.md §3.1).
 glam = { workspace = true }
@@ -45,6 +44,9 @@ winit = "0.30"
 # egui input/output bridge for winit; egui itself comes via
 # `roxlap_render::egui` so the versions can't drift.
 egui-winit = { version = "0.29", default-features = false }
+# Decode a map's `assets/*.png` skybox to RGBA8 (PNG only — the format
+# the map ships).
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true

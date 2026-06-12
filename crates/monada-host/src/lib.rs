@@ -1012,6 +1012,9 @@ impl App {
             gpu_fov_y_rad: 1.2,
             // Required (Some) for the CPU backend to draw the sprites.
             sprite_lighting: Some(&self.lighting),
+            // Per-face grid shading (roxlap 0.8). Flat for now; the map
+            // paths override this from their declared sun (step 2/3).
+            side_shades: [0; 6],
         };
 
         let Some(renderer) = self.renderer.as_mut() else {
@@ -1026,9 +1029,12 @@ impl App {
                 renderer.render(scene.scene_mut(), &camera, &frame);
             }
             SceneKind::Map(render) => {
-                let mut guard = render.lock().expect("render mutex");
-                renderer.set_sprites(guard.sprites());
-                renderer.render(guard.scene_mut(), &camera, &frame);
+                // The map lights itself: its own sprite sun + grid
+                // side-shades + sky, built per frame from its engine.
+                render
+                    .lock()
+                    .expect("render mutex")
+                    .render_into(renderer, &camera, &settings, SKY_COLOR);
             }
         }
         match hud {

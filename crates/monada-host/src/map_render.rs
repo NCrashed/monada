@@ -20,10 +20,13 @@ use monada_fixed::{Fixed, FixedVec3};
 use monada_render::OrbitCamera;
 use monada_script::HostBridge;
 use monada_sim::{Command, EntityId, World};
-use roxlap_core::Camera;
+use roxlap_core::opticast::OpticastSettings;
+use roxlap_core::sky::Sky;
+use roxlap_core::sprite::SpriteLighting;
+use roxlap_core::{Camera, Engine, LightSrc};
 use roxlap_formats::kv6::{self, Kv6};
 use roxlap_formats::sprite::{Sprite, SPRITE_FLAG_NO_SHADING};
-use roxlap_render::{SpriteInstanceDesc, SpriteSet};
+use roxlap_render::{FrameParams, SceneRenderer, SpriteInstanceDesc, SpriteSet};
 use roxlap_scene::{GridId, GridTransform, Scene};
 
 /// World voxels per sim unit (x/y). The board's 8 squares span 8·SCALE.
@@ -35,11 +38,31 @@ const GROUND_Z: f64 = 100.0;
 const HIGHLIGHT_MODEL: usize = 0;
 /// Max world-xy distance from a click to an entity for it to be picked.
 const PICK_RADIUS: f64 = 12.0;
+/// How far the directional "sun" sits along its incoming direction — large
+/// enough that its rays are near-parallel over the small board.
+const SUN_DIST: f64 = 4096.0;
+/// Strongest per-face grid darkening a sun can apply (voxlap side-shade
+/// units; 15/31 are typical "game" values).
+const MAX_SIDE_SHADE: f32 = 28.0;
+/// Outward normals of a grid cube's six faces, in voxlap side-shade order
+/// (top/bottom/left/right/up/down). Used to shade the board by sun angle.
+const CUBE_FACE_NORMALS: [[f64; 3]; 6] = [
+    [0.0, 0.0, -1.0], // top (up, -z)
+    [0.0, 0.0, 1.0],  // bot (down, +z)
+    [-1.0, 0.0, 0.0], // left
+    [1.0, 0.0, 0.0],  // right
+    [0.0, -1.0, 0.0], // up (-y)
+    [0.0, 1.0, 0.0],  // down (+y)
+];
 
-/// A flat-shaded box sprite model (visibility-first; no light bake).
-fn sprite_box(w: u32, h: u32, d: u32, color: u32) -> Sprite {
+/// A box sprite model. `shaded` keeps roxlap's per-face directional
+/// shading on (pieces, lit by the map's sun); `false` flags it flat (UI
+/// markers that should read at constant brightness).
+fn sprite_box(w: u32, h: u32, d: u32, color: u32, shaded: bool) -> Sprite {
     let mut s = Sprite::axis_aligned(Kv6::solid_box(w, h, d, color), [0.0, 0.0, 0.0]);
-    s.flags = SPRITE_FLAG_NO_SHADING;
+    if !shaded {
+        s.flags = SPRITE_FLAG_NO_SHADING;
+    }
     s
 }
 
@@ -91,6 +114,15 @@ pub struct MapRender {
     /// The local peer's player id (`None` = hotseat / all sides), exposed
     /// to the map via `local_player()` for turn gating.
     local_player: Option<i64>,
+    /// Lighting the map declared via `set_light` — a sprite sun (lightmode
+    /// 2 + a `LightSrc`) and grid `side_shades`. Snapshotted per frame.
+    engine: Engine,
+    /// CPU sky panorama (`FrameParams.sky`), built from the map's image.
+    sky: Option<Sky>,
+    /// The same panorama as RGBA8 + dims for the GPU backend's separate
+    /// sky path; uploaded once.
+    sky_panorama: Option<(Vec<u8>, u32, u32)>,
+    sky_uploaded: bool,
 }
 
 impl MapRender {
@@ -104,7 +136,7 @@ impl MapRender {
         // Model 0: a flat amber tile the size of one cell — highlights the
         // selected entity's *square*, sitting on the board surface under
         // the sprite (rather than a marker floating in the entity).
-        let marker = sprite_box(SCALE as u32, SCALE as u32, 2, 0x80FF_E000);
+        let marker = sprite_box(SCALE as u32, SCALE as u32, 2, 0x80FF_E000, false);
         let sprites = SpriteSet {
             models: vec![marker],
             instances: Vec::new(),
@@ -121,6 +153,10 @@ impl MapRender {
             pending: Vec::new(),
             assets,
             local_player,
+            engine: Engine::new(),
+            sky: None,
+            sky_panorama: None,
+            sky_uploaded: false,
         }
     }
 
@@ -195,14 +231,45 @@ impl MapRender {
     pub fn orbit(&mut self, dyaw: f64, dpitch: f64, ddist: f64) {
         self.camera.orbit(dyaw, dpitch, ddist);
     }
-    pub fn sprites(&self) -> &SpriteSet {
-        &self.sprites
-    }
-    pub fn scene_mut(&mut self) -> &mut Scene {
-        &mut self.scene
-    }
     pub fn status_text(&self) -> &str {
         &self.status
+    }
+
+    /// Draw this map: upload its sprites and render its scene, lit by the
+    /// map's declared sun (sprite `SpriteLighting` + grid `side_shades`)
+    /// and its sky. Disjoint field borrows let the per-frame `FrameParams`
+    /// reference `engine`/`sky` while `scene` is borrowed mutably for the
+    /// draw — which an accessor returning `&mut Scene` could not.
+    pub fn render_into(
+        &mut self,
+        renderer: &mut SceneRenderer,
+        camera: &Camera,
+        settings: &OpticastSettings,
+        sky_color: u32,
+    ) {
+        // GPU backend has its own sky path — upload the panorama once.
+        if !self.sky_uploaded {
+            if let Some((rgba, w, h)) = &self.sky_panorama {
+                renderer.set_sky_panorama(rgba, *w, *h);
+            }
+            self.sky_uploaded = true;
+        }
+        let lighting = SpriteLighting::from_engine(&self.engine);
+        let frame = FrameParams {
+            settings,
+            sky_color,
+            sky: self.sky.as_ref(), // CPU backend sky panorama
+            fog_color: 0,
+            fog_max_scan_dist: 0,
+            treat_z_max_as_air: true,
+            gpu_mip_scan_dist: 64.0,
+            gpu_max_outer_steps: 64,
+            gpu_fov_y_rad: 1.2,
+            sprite_lighting: Some(&lighting),
+            side_shades: self.engine.side_shades(),
+        };
+        renderer.set_sprites(&self.sprites);
+        renderer.render(&mut self.scene, camera, &frame);
     }
 }
 
@@ -212,7 +279,7 @@ impl HostBridge for MapRender {
     fn model_box(&mut self, w: i64, h: i64, d: i64, color: i64) -> i64 {
         self.sprites
             .models
-            .push(sprite_box(w as u32, h as u32, d as u32, color as u32));
+            .push(sprite_box(w as u32, h as u32, d as u32, color as u32, true));
         (self.sprites.models.len() - 1) as i64
     }
 
@@ -224,13 +291,10 @@ impl HostBridge for MapRender {
             .map_or_else(
                 || {
                     eprintln!("monada-host: model_kv6: missing/invalid asset {asset_path:?}");
-                    sprite_box(8, 8, 8, 0x80FF_00FF) // magenta "missing" box
+                    sprite_box(8, 8, 8, 0x80FF_00FF, true) // magenta "missing" box
                 },
-                |kv6| {
-                    let mut s = Sprite::axis_aligned(kv6, [0.0, 0.0, 0.0]);
-                    s.flags = SPRITE_FLAG_NO_SHADING;
-                    s
-                },
+                // Shaded (no NO_SHADING flag) so the map's sun lights it.
+                |kv6| Sprite::axis_aligned(kv6, [0.0, 0.0, 0.0]),
             );
         self.sprites.models.push(sprite);
         (self.sprites.models.len() - 1) as i64
@@ -292,5 +356,64 @@ impl HostBridge for MapRender {
 
     fn local_player(&self) -> Option<i64> {
         self.local_player
+    }
+
+    fn set_light(&mut self, dir: FixedVec3, intensity: Fixed) {
+        let raw = DVec3::new(dir.x.to_f64(), dir.y.to_f64(), dir.z.to_f64());
+        let len = raw.length();
+        if len < 1e-9 {
+            return;
+        }
+        let travel = raw / len; // unit direction the light travels
+                                // Fresh engine each call: one sun, deterministic, idempotent.
+        let mut engine = Engine::new();
+        engine.set_lightmode(2);
+        // The light SOURCE sits far back along the incoming direction.
+        let src = self.camera.center - travel * SUN_DIST;
+        engine.add_light(LightSrc {
+            pos: [src.x as f32, src.y as f32, src.z as f32],
+            r2: ((SUN_DIST * 2.0) * (SUN_DIST * 2.0)) as f32,
+            sc: intensity.to_f64() as f32,
+        });
+        // Grid: darken each cube face by how much it points *along* the
+        // travel direction (away from the source). Overhead light → top
+        // bright, bottom dark, sides mid.
+        let mut shades = [0i8; 6];
+        for (face, normal) in CUBE_FACE_NORMALS.iter().enumerate() {
+            let dot = normal[0] * travel.x + normal[1] * travel.y + normal[2] * travel.z;
+            shades[face] =
+                (MAX_SIDE_SHADE * 0.5 * (1.0 + dot as f32)).clamp(0.0, MAX_SIDE_SHADE) as i8;
+        }
+        engine.set_side_shades(
+            shades[0], shades[1], shades[2], shades[3], shades[4], shades[5],
+        );
+        self.engine = engine;
+    }
+
+    fn set_sky(&mut self, asset_path: &str) {
+        let Some(bytes) = self.assets.get(asset_path) else {
+            eprintln!("monada-host: set_sky: missing asset {asset_path:?}");
+            return;
+        };
+        let rgba = match image::load_from_memory(bytes) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                eprintln!("monada-host: set_sky: {asset_path:?}: {e}");
+                return;
+            }
+        };
+        let (width, height) = rgba.dimensions();
+        // CPU `Sky`: voxlap BGRA i32 (low byte blue), brightness high byte
+        // 0x80 to match the scene's voxel colours.
+        let pixels: Vec<i32> = rgba
+            .pixels()
+            .map(|px| {
+                let [r, g, b, _a] = px.0;
+                ((0x80u32 << 24) | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)) as i32
+            })
+            .collect();
+        self.sky = Some(Sky::from_pixels(pixels, width, height));
+        self.sky_panorama = Some((rgba.into_raw(), width, height));
+        self.sky_uploaded = false;
     }
 }

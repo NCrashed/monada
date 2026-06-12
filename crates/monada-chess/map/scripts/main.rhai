@@ -41,15 +41,14 @@ fn init() {
         }
     }
 
-    // One sprite model per (kind, color): a box whose height reads the
-    // piece's rank. `models[kind*2 + color]`.
-    let heights = [10, 14, 16, 14, 22, 26];
-    let white = 0x80F0_EAD8;
-    let black = 0x8028_343C;
+    // One sprite model per (kind, color), loaded from the shipped KV6
+    // assets (boxes for now — see `examples/gen_pieces.rs`; swap for
+    // sculpted art without touching the engine). `models[kind*2 + color]`.
+    let kinds = ["pawn", "knight", "bishop", "rook", "queen", "king"];
     let models = [];
     for k in 0..6 {
-        models.push(model_box(10, 10, heights[k], white));
-        models.push(model_box(10, 10, heights[k], black));
+        models.push(model_kv6("assets/pieces/" + kinds[k] + "_white.kv6"));
+        models.push(model_kv6("assets/pieces/" + kinds[k] + "_black.kv6"));
     }
 
     let g = entity_create(1);
@@ -67,6 +66,11 @@ fn init() {
     }
 
     camera_focus(vec3(ratio(7, 2), ratio(7, 2), fixed(0))); // board centre
+
+    // A directional sun from above, tilted toward the far side, so pieces
+    // and board read with depth (z grows downward → +z travels down).
+    set_light(vec3(ratio(2, 10), ratio(4, 10), fixed(1)), fixed(1));
+    set_sky("assets/skybox.png");
     status("white to move");
 }
 

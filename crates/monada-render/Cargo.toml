@@ -15,14 +15,12 @@ description = "monada sim -> roxlap-scene translator: per-frame interpolation, p
 # Q32.32 -> f64 conversion happens on this side only.
 monada-fixed = { workspace = true }
 glam = { workspace = true }
-# roxlap 0.7.0 from crates.io. (Temporarily pinned to the published
-# release instead of the sibling path checkout so monada builds while
-# roxlap master is mid-refactor locally; switch back to `path = ...`
-# to consume in-progress roxlap API again.)
-roxlap-core = "0.7.0"
-roxlap-formats = "0.7.0"
-roxlap-scene = "0.7.0"
-roxlap-render = "0.7.0"
+# roxlap 0.8.0 via the sibling path checkout (workspace dep) — monada
+# drives in-progress render features (directional lighting, sky).
+roxlap-core = { workspace = true }
+roxlap-formats = { workspace = true }
+roxlap-scene = { workspace = true }
+roxlap-render = { workspace = true }
 
 [lints]
 workspace = true
