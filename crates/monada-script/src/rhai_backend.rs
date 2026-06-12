@@ -441,8 +441,17 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         },
     );
 
+    // The only place the script-side sentinel lives: `None` (no single
+    // local player — hotseat) maps to a negative id a `no_float` Rhai
+    // script can branch on. The host bridge stays in clean `Option`-land.
     let b = bridge.clone();
     engine.register_fn("local_player", move || -> i64 {
-        b.lock().expect("bridge mutex").local_player()
+        b.lock()
+            .expect("bridge mutex")
+            .local_player()
+            .unwrap_or(NO_LOCAL_PLAYER)
     });
 }
+
+/// The `local_player()` script sentinel for "no single local player".
+const NO_LOCAL_PLAYER: i64 = -1;

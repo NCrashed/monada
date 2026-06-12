@@ -180,12 +180,13 @@ pub trait HostBridge: Send {
     /// after the current trigger returns (never applied re-entrantly).
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3);
 
-    /// The local peer's player id, or `-1` when there is no single local
+    /// The local peer's player id, or `None` when there is no single local
     /// player (a single-window "hotseat" session that drives every side).
     /// A turn-based map gates which side this client may submit for by
     /// comparing this against its own side-to-move; the engine attaches no
-    /// meaning to it.
-    fn local_player(&self) -> i64;
+    /// meaning to it. The script-side sentinel (`None` → a negative id)
+    /// lives in exactly one place — the `local_player` host-fn registration.
+    fn local_player(&self) -> Option<i64>;
 }
 
 /// A shared host bridge handle: the host owns the concrete render state
@@ -216,8 +217,8 @@ impl HostBridge for NullBridge {
     fn status(&mut self, _text: &str) {}
     fn camera_focus(&mut self, _point: FixedVec3) {}
     fn submit_command(&mut self, _verb: i64, _target: i64, _arg: FixedVec3) {}
-    fn local_player(&self) -> i64 {
-        -1
+    fn local_player(&self) -> Option<i64> {
+        None
     }
 }
 

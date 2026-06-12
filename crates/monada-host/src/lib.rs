@@ -49,6 +49,7 @@ use monada_script::{
 };
 use monada_sim::{ArchetypeId, Command, PlayerId};
 
+pub mod cli;
 mod map_render;
 use map_render::MapRender;
 use roxlap_core::opticast::OpticastSettings;
@@ -580,7 +581,7 @@ impl App {
             .to_string();
         // Hotseat: one window drives every side, so there is no single
         // local player (-1) — the script enforces turns by piece colour.
-        let render = Arc::new(Mutex::new(MapRender::new(run.map.assets, -1)));
+        let render = Arc::new(Mutex::new(MapRender::new(run.map.assets, None)));
         // Bridge must be set before `init` calls model_box / voxel_fill / …
         let bridge: SharedBridge = render.clone();
         backend.set_bridge(&bridge);
@@ -623,7 +624,7 @@ impl App {
         // off-turn input on `local_player()`.
         let render = Arc::new(Mutex::new(MapRender::new(
             run.map.assets,
-            i64::from(local.0),
+            Some(i64::from(local.0)),
         )));
         let bridge: SharedBridge = render.clone();
         let driver = RhaiDriver::with_bridge(shared_world(SEED), &script, &bridge)
@@ -669,23 +670,15 @@ impl App {
             SimHz::OnCommand => (true, REPLAY_MOVE_DT),
             SimHz::Fixed(hz) => (false, 1.0 / f64::from(hz.max(1))),
         };
-        let render = Arc::new(Mutex::new(MapRender::new(run.map.assets, -1)));
+        let render = Arc::new(Mutex::new(MapRender::new(run.map.assets, None)));
         let bridge: SharedBridge = render.clone();
         let driver = RhaiDriver::with_bridge(shared_world(replay.seed), &script, &bridge)
             .expect("compile map script");
 
-        // Group recorded (non-empty) frames by tick, then canonical player
-        // order — the same order live execution used.
-        let mut by_tick: ReplayByTick = BTreeMap::new();
-        for frame in &replay.frames {
-            by_tick
-                .entry(frame.tick)
-                .or_default()
-                .push((frame.player, frame.commands.clone()));
-        }
-        for players in by_tick.values_mut() {
-            players.sort_by_key(|(p, _)| *p);
-        }
+        // Consume the replay's own canonical grouping — the *same* source
+        // `Replay::playback` uses, so the paced viewer can't diverge from
+        // the verified playback.
+        let by_tick: ReplayByTick = replay.steps().into_iter().collect();
         eprintln!(
             "monada-host: replaying {} ticks ({} with input)",
             replay.ticks,

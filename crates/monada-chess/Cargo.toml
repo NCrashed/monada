@@ -14,12 +14,11 @@ name = "monada-chess"
 path = "src/main.rs"
 
 [dependencies]
-# The host event loop (lib target) + the archive loader. `monada-chess`
-# is just: load the bundled `chess.monada` and hand it to the host.
+# The host event loop + its shared map CLI (lib target) + the archive
+# loader. `monada-chess` is just: load the bundled `chess.monada` and hand
+# it to `monada_host::cli`.
 monada-host = { path = "../monada-host" }
 monada-format = { workspace = true }
-# Decode + verify a `.replay` for the `--replay` viewer.
-monada-net = { workspace = true }
 
 [build-dependencies]
 # build.rs packs `map/` into a deterministic `chess.monada` in OUT_DIR.

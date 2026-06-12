@@ -21,6 +21,11 @@ use serde::{Deserialize, Serialize};
 use crate::session::SimDriver;
 use crate::wire::InputBundle;
 
+/// Recorded input regrouped per executed tick into canonical per-player
+/// order: `(tick, [(player, commands)])`. Produced by [`Replay::steps`] and
+/// consumed by both playback and a paced replay viewer.
+pub type ReplaySteps = Vec<(u64, Vec<(PlayerId, Vec<Command>)>)>;
+
 /// A recorded match: identity metadata plus the ordered input stream.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Replay {
@@ -96,6 +101,23 @@ impl Replay {
         expected_map_hash: [u8; 32],
         engine_version: &str,
     ) -> Result<u64, ReplayError> {
+        self.verify(expected_map_hash, engine_version)?;
+        Ok(self.playback(driver))
+    }
+
+    /// Check this replay's identity against the current build: same map
+    /// hash, same engine version (DESIGN.md §3.4). The single home of the
+    /// "fail loud rather than desync silently" gate — every loader (the
+    /// host, `monada-chess`, [`playback_verified`](Self::playback_verified))
+    /// goes through here so the two checks can never drift apart.
+    ///
+    /// # Errors
+    /// [`ReplayError::MapMismatch`] / [`ReplayError::VersionMismatch`].
+    pub fn verify(
+        &self,
+        expected_map_hash: [u8; 32],
+        engine_version: &str,
+    ) -> Result<(), ReplayError> {
         if self.map_hash != expected_map_hash {
             return Err(ReplayError::MapMismatch {
                 expected: expected_map_hash,
@@ -108,7 +130,29 @@ impl Replay {
                 found: self.engine_version.clone(),
             });
         }
-        Ok(self.playback(driver))
+        Ok(())
+    }
+
+    /// The recorded input regrouped into the **canonical** per-tick,
+    /// per-player order live execution used: `(tick, [(player, commands)])`
+    /// ascending by tick, players sorted. The single source of this
+    /// grouping — both [`playback`](Self::playback) and a paced viewer
+    /// consume it, so a viewer can never diverge from the verified replay.
+    #[must_use]
+    pub fn steps(&self) -> ReplaySteps {
+        let mut by_tick: BTreeMap<u64, BTreeMap<PlayerId, Vec<Command>>> = BTreeMap::new();
+        for frame in &self.frames {
+            by_tick
+                .entry(frame.tick)
+                .or_default()
+                .entry(frame.player)
+                .or_default()
+                .extend(frame.commands.iter().copied());
+        }
+        by_tick
+            .into_iter()
+            .map(|(tick, players)| (tick, players.into_iter().collect()))
+            .collect()
     }
 
     /// Re-run the recorded inputs through a fresh `driver` (seeded to
@@ -123,22 +167,25 @@ impl Replay {
     /// between — identical to live execution, so the result is bit-exact
     /// with the original run.
     pub fn playback<D: SimDriver>(&self, driver: &mut D) -> u64 {
-        let mut by_tick: BTreeMap<u64, BTreeMap<PlayerId, &InputBundle>> = BTreeMap::new();
-        for frame in &self.frames {
-            by_tick
-                .entry(frame.tick)
-                .or_default()
-                .insert(frame.player, frame);
-        }
-        for tick in 0..self.ticks {
-            if let Some(players) = by_tick.get(&tick) {
-                for (&player, frame) in players {
-                    for command in &frame.commands {
-                        driver.apply_command(player, command);
-                    }
+        let mut next = 0u64;
+        for (tick, players) in self.steps() {
+            // Re-run the idle ticks between recorded moves (not stored).
+            while next < tick {
+                driver.step();
+                next += 1;
+            }
+            for (player, commands) in &players {
+                for command in commands {
+                    driver.apply_command(*player, command);
                 }
             }
             driver.step();
+            next += 1;
+        }
+        // Trailing idle ticks (e.g. between the last move and quit).
+        while next < self.ticks {
+            driver.step();
+            next += 1;
         }
         driver.state_hash()
     }

@@ -25,7 +25,7 @@ mod transport;
 mod wire;
 
 pub use lockstep::Lockstep;
-pub use replay::{Replay, ReplayError};
+pub use replay::{Replay, ReplayError, ReplaySteps};
 pub use session::{Desync, LockstepSession, MatchInfo, SessionConfig, SimDriver};
 pub use transport::{LoopbackTransport, Transport};
 pub use wire::{decode, encode, Checksum, InputBundle, NetMessage};
