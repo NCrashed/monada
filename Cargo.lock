@@ -1279,6 +1279,7 @@ dependencies = [
  "monada-script",
  "monada-sim",
  "roxlap-core",
+ "roxlap-formats",
  "roxlap-render",
  "roxlap-scene",
  "winit",

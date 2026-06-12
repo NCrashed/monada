@@ -16,6 +16,7 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use monada_fixed::FixedVec3;
 use monada_sim::{Command, PlayerId, World};
 
 mod driver;
@@ -102,6 +103,32 @@ pub trait ScriptBackend {
     /// Returns [`ScriptError::Run`] if the script raises.
     fn on_tick(&mut self) -> Result<(), ScriptError>;
 
+    /// Run the map's `pointer` trigger for a pointer event (DESIGN.md
+    /// §3.3 input events): a button at sim-space `point` over the picked
+    /// `entity` (or `-1` for none). The map owns the gesture state machine
+    /// (select → act); the host only forwards the raw event. A map with no
+    /// `pointer` handler ignores it (the default).
+    ///
+    /// # Errors
+    /// Returns [`ScriptError::Run`] if the handler raises.
+    fn on_pointer(
+        &mut self,
+        _button: i64,
+        _point: FixedVec3,
+        _entity: i64,
+    ) -> Result<(), ScriptError> {
+        Ok(())
+    }
+
+    /// Run the map's `key` trigger for a keyboard event. A map with no
+    /// `key` handler ignores it (the default).
+    ///
+    /// # Errors
+    /// Returns [`ScriptError::Run`] if the handler raises.
+    fn on_key(&mut self, _code: i64, _down: bool) -> Result<(), ScriptError> {
+        Ok(())
+    }
+
     /// Drain the UI/HUD events the script emitted via `ui_emit_event`
     /// since the last drain (DESIGN.md §3.3). These live strictly on the
     /// render side of the determinism wall — the host reads them for
@@ -110,6 +137,78 @@ pub trait ScriptBackend {
     fn drain_ui_events(&mut self) -> Vec<UiEvent> {
         Vec::new()
     }
+}
+
+/// The render / input / command host-API surface (DESIGN.md §3.3) that
+/// lives on the **host** side of the wall. `monada-script` defines only
+/// these primitive signatures — no roxlap render types — so the sim /
+/// script wall holds; the host ([`monada-host`]) implements them (the
+/// sprite-model registry, the voxel world grid, local selection, command
+/// routing). A [`RhaiBackend`] with no bridge set treats every render/
+/// input call as a no-op, so headless tests and the determinism oracle
+/// need no host (use [`NullBridge`]).
+///
+/// Coordinates are **sim space** (the same the script uses for entity
+/// positions); the host owns the sim→world scale, the camera, and the
+/// z-convention. Local UI state (selection) is per-player and **never**
+/// enters [`World`] or the desync hash.
+pub trait HostBridge: Send {
+    /// Define a procedural box sprite model; returns its model id.
+    fn model_box(&mut self, w: i64, h: i64, d: i64, color: i64) -> i64;
+    /// Define a sprite model from a KV6 asset in the map archive (by its
+    /// archive-relative path); returns its model id.
+    fn model_kv6(&mut self, asset_path: &str) -> i64;
+    /// Bind an entity to a base render model (render-side, not hashed).
+    fn entity_set_model(&mut self, entity: i64, model: i64);
+    /// Paint a solid voxel box into the world grid, in sim coordinates.
+    /// (Two corners + colour reads naturally as separate args for scripts.)
+    #[allow(clippy::too_many_arguments)]
+    fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64);
+    /// Paint a single voxel into the world grid, in sim coordinates.
+    fn voxel_set(&mut self, x: i64, y: i64, z: i64, color: i64);
+    /// Mark `entity` as the locally selected one (a highlight overlay).
+    fn highlight(&mut self, entity: i64);
+    /// Clear the local selection.
+    fn highlight_clear(&mut self);
+    /// The locally selected entity, or `-1`.
+    fn highlighted(&self) -> i64;
+    /// Set the HUD status line.
+    fn status(&mut self, text: &str);
+    /// Aim the camera at a point (sim coordinates).
+    fn camera_focus(&mut self, point: FixedVec3);
+    /// Queue a sim command for the host to route through the command path
+    /// after the current trigger returns (never applied re-entrantly).
+    fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3);
+}
+
+/// A shared host bridge handle: the host owns the concrete render state
+/// and hands a coerced clone to the [`RhaiBackend`].
+pub type SharedBridge = Arc<Mutex<dyn HostBridge + Send>>;
+
+/// A do-nothing [`HostBridge`] for headless runs (tests, oracle): render
+/// and input calls are no-ops, `highlighted` is empty. Lets a map whose
+/// `init` paints a board / defines models run with no window.
+pub struct NullBridge;
+
+impl HostBridge for NullBridge {
+    fn model_box(&mut self, _w: i64, _h: i64, _d: i64, _color: i64) -> i64 {
+        0
+    }
+    fn model_kv6(&mut self, _asset_path: &str) -> i64 {
+        0
+    }
+    fn entity_set_model(&mut self, _entity: i64, _model: i64) {}
+    #[allow(clippy::too_many_arguments)]
+    fn voxel_fill(&mut self, _x0: i64, _y0: i64, _z0: i64, _x1: i64, _y1: i64, _z1: i64, _c: i64) {}
+    fn voxel_set(&mut self, _x: i64, _y: i64, _z: i64, _color: i64) {}
+    fn highlight(&mut self, _entity: i64) {}
+    fn highlight_clear(&mut self) {}
+    fn highlighted(&self) -> i64 {
+        -1
+    }
+    fn status(&mut self, _text: &str) {}
+    fn camera_focus(&mut self, _point: FixedVec3) {}
+    fn submit_command(&mut self, _verb: i64, _target: i64, _arg: FixedVec3) {}
 }
 
 /// A UI/HUD-side event a script pushes via `ui_emit_event` (DESIGN.md

@@ -12,10 +12,10 @@ const CHESS_MONADA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/chess.mona
 
 fn main() {
     let map = Map::read(CHESS_MONADA).expect("bundled chess.monada is a valid archive");
-    let script = map
-        .entry_script()
-        .expect("chess map declares an entry script")
-        .to_string();
+    assert!(
+        map.entry_script().is_some(),
+        "chess map declares an entry script"
+    );
     eprintln!(
         "monada-chess: {:?} ({} players, sim_hz {}) sha256 {}",
         map.manifest.name,
@@ -23,10 +23,7 @@ fn main() {
         map.manifest.sim_hz,
         short_hash(&map.hash),
     );
-    run(RunConfig::Map(MapRun {
-        name: map.manifest.name,
-        script,
-    }));
+    run(RunConfig::Map(MapRun { map }));
 }
 
 /// First 6 bytes of the map hash, hex — the visible map identity.

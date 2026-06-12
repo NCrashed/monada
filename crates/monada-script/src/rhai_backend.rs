@@ -16,7 +16,7 @@ use monada_fixed::{trig, Fixed, FixedVec3};
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 use rhai::{Array, Dynamic, Engine, ImmutableString, Scope, AST};
 
-use crate::{ScriptBackend, ScriptError, SharedWorld, UiEvent};
+use crate::{ScriptBackend, ScriptError, SharedBridge, SharedWorld, UiEvent};
 
 /// The buffer `ui_emit_event` pushes into and [`drain_ui_events`] empties.
 /// Shared (`Arc<Mutex<_>>`) for the same reason as [`SharedWorld`]:
@@ -27,6 +27,10 @@ type UiEventBuffer = Arc<Mutex<Vec<UiEvent>>>;
 
 /// Arity of the map's `command` trigger: `command(player, verb, target, arg)`.
 const COMMAND_ARITY: usize = 4;
+/// Arity of the map's `pointer` trigger: `pointer(button, point, entity)`.
+const POINTER_ARITY: usize = 3;
+/// Arity of the map's `key` trigger: `key(code, down)`.
+const KEY_ARITY: usize = 2;
 
 /// Rhai-backed scripting runtime over a shared [`World`].
 pub struct RhaiBackend {
@@ -41,6 +45,10 @@ pub struct RhaiBackend {
     /// existing handler — that must surface as the bug it is (it could
     /// otherwise desync one peer silently).
     has_command: bool,
+    /// Whether the loaded script defines a `pointer/3` / `key/2` handler
+    /// (decided at [`load`](RhaiBackend::load), like `has_command`).
+    has_pointer: bool,
+    has_key: bool,
     /// UI/HUD events the script emitted via `ui_emit_event`, awaiting a
     /// [`drain_ui_events`](ScriptBackend::drain_ui_events) by the host.
     /// Render-side only — never part of [`World`](monada_sim::World) state.
@@ -53,6 +61,11 @@ impl RhaiBackend {
     #[must_use]
     pub fn new(world: SharedWorld) -> RhaiBackend {
         let mut engine = Engine::new();
+        // Map scripts are semi-trusted assets, not arbitrary sandboxed
+        // input — lift Rhai's conservative expression-depth limits (32
+        // inside functions by default) so non-trivial setup loops / rule
+        // tables compile. Determinism is unaffected.
+        engine.set_max_expr_depths(0, 0);
         let events: UiEventBuffer = Arc::new(Mutex::new(Vec::new()));
         register_number_types(&mut engine);
         register_host_api(&mut engine, &world, &events);
@@ -62,8 +75,20 @@ impl RhaiBackend {
             scope: Scope::new(),
             world,
             has_command: false,
+            has_pointer: false,
+            has_key: false,
             events,
         }
+    }
+
+    /// Register the host's render / input / command API (DESIGN.md §3.3)
+    /// into the engine, forwarding to `bridge`. Call **once, before**
+    /// [`on_init`](ScriptBackend::on_init); a backend with no bridge set
+    /// treats those calls as undefined (a map that uses them must have a
+    /// bridge). Rhai resolves calls at run time, so registering after
+    /// construction is fine.
+    pub fn set_bridge(&mut self, bridge: &SharedBridge) {
+        register_bridge_api(&mut self.engine, bridge);
     }
 
     fn call(&mut self, name: &str) -> Result<(), ScriptError> {
@@ -85,9 +110,13 @@ impl ScriptBackend for RhaiBackend {
             .map_err(|e| ScriptError::Compile(e.to_string()))?;
         // Decide handler presence here so `on_command` never has to
         // distinguish "no handler" from "handler raised FunctionNotFound".
-        self.has_command = ast
-            .iter_functions()
-            .any(|f| f.name == "command" && f.params.len() == COMMAND_ARITY);
+        let defines = |name: &str, arity: usize| {
+            ast.iter_functions()
+                .any(|f| f.name == name && f.params.len() == arity)
+        };
+        self.has_command = defines("command", COMMAND_ARITY);
+        self.has_pointer = defines("pointer", POINTER_ARITY);
+        self.has_key = defines("key", KEY_ARITY);
         self.ast = Some(ast);
         Ok(())
     }
@@ -126,6 +155,37 @@ impl ScriptBackend for RhaiBackend {
         // entity state via the host API.
         self.world.lock().expect("world mutex").tick += 1;
         self.call("tick")
+    }
+
+    fn on_pointer(
+        &mut self,
+        button: i64,
+        point: FixedVec3,
+        entity: i64,
+    ) -> Result<(), ScriptError> {
+        if !self.has_pointer {
+            return Ok(());
+        }
+        let ast = self
+            .ast
+            .as_ref()
+            .ok_or_else(|| ScriptError::Run("no script loaded".to_string()))?;
+        self.engine
+            .call_fn::<()>(&mut self.scope, ast, "pointer", (button, point, entity))
+            .map_err(|e| ScriptError::Run(e.to_string()))
+    }
+
+    fn on_key(&mut self, code: i64, down: bool) -> Result<(), ScriptError> {
+        if !self.has_key {
+            return Ok(());
+        }
+        let ast = self
+            .ast
+            .as_ref()
+            .ok_or_else(|| ScriptError::Run("no script loaded".to_string()))?;
+        self.engine
+            .call_fn::<()>(&mut self.scope, ast, "key", (code, down))
+            .map_err(|e| ScriptError::Run(e.to_string()))
     }
 
     fn drain_ui_events(&mut self) -> Vec<UiEvent> {
@@ -288,4 +348,76 @@ fn register_host_api(engine: &mut Engine, world: &SharedWorld, events: &UiEventB
             c,
         });
     });
+}
+
+/// Register the host's render / input / command API (DESIGN.md §3.3),
+/// each call forwarding to the shared [`HostBridge`](crate::HostBridge).
+/// Kept separate from the sim host API because the *implementation* lives
+/// in the host (roxlap render) while this crate knows only the primitive
+/// signatures — the sim / script wall.
+fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
+    let b = bridge.clone();
+    engine.register_fn("model_box", move |w: i64, h: i64, d: i64, color: i64| -> i64 {
+        b.lock().expect("bridge mutex").model_box(w, h, d, color)
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("model_kv6", move |path: ImmutableString| -> i64 {
+        b.lock().expect("bridge mutex").model_kv6(path.as_str())
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("entity_set_model", move |e: i64, model: i64| {
+        b.lock().expect("bridge mutex").entity_set_model(e, model);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn(
+        "voxel_fill",
+        move |x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .voxel_fill(x0, y0, z0, x1, y1, z1, color);
+        },
+    );
+
+    let b = bridge.clone();
+    engine.register_fn("voxel_set", move |x: i64, y: i64, z: i64, color: i64| {
+        b.lock().expect("bridge mutex").voxel_set(x, y, z, color);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("highlight", move |e: i64| {
+        b.lock().expect("bridge mutex").highlight(e);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("highlight_clear", move || {
+        b.lock().expect("bridge mutex").highlight_clear();
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("highlighted", move || -> i64 {
+        b.lock().expect("bridge mutex").highlighted()
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("status", move |text: ImmutableString| {
+        b.lock().expect("bridge mutex").status(text.as_str());
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("camera_focus", move |point: FixedVec3| {
+        b.lock().expect("bridge mutex").camera_focus(point);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn(
+        "submit_command",
+        move |verb: i64, target: i64, arg: FixedVec3| {
+            b.lock()
+                .expect("bridge mutex")
+                .submit_command(verb, target, arg);
+        },
+    );
 }

@@ -112,8 +112,11 @@ pub struct Manifest {
 #[derive(Clone, Debug)]
 pub struct Map {
     pub manifest: Manifest,
-    /// Archive-relative path -> UTF-8 script source.
+    /// Archive-relative path -> UTF-8 script source (`scripts/`).
     pub scripts: BTreeMap<String, String>,
+    /// Archive-relative path -> raw bytes (`assets/`: KV6 sprites, voxel
+    /// worlds, … — whatever the map ships for the host to load).
+    pub assets: BTreeMap<String, Vec<u8>>,
     /// SHA-256 of the canonical tar (DESIGN.md §3.4) — the map identity
     /// stored in replays / lockstep `MatchInfo`.
     pub hash: [u8; 32],
@@ -143,17 +146,21 @@ impl Map {
             toml::from_str(manifest_str).map_err(|e| FormatError::Manifest(e.to_string()))?;
 
         let mut scripts = BTreeMap::new();
-        for (path, data) in &files {
+        let mut assets = BTreeMap::new();
+        for (path, data) in files {
             if path.starts_with("scripts/") {
-                let src = String::from_utf8(data.clone())
+                let src = String::from_utf8(data)
                     .map_err(|_| FormatError::ScriptUtf8(path.clone()))?;
-                scripts.insert(path.clone(), src);
+                scripts.insert(path, src);
+            } else if path.starts_with("assets/") {
+                assets.insert(path, data);
             }
         }
 
         Ok(Map {
             manifest,
             scripts,
+            assets,
             hash: hash(&tar),
         })
     }
@@ -335,6 +342,18 @@ mod tests {
         assert_eq!(SimHz::from_str("25hz").unwrap(), SimHz::Fixed(25));
         assert_eq!(SimHz::from_str("on_command").unwrap(), SimHz::OnCommand);
         assert!(SimHz::from_str("sometimes").is_err());
+    }
+
+    #[test]
+    fn assets_round_trip_as_raw_bytes() {
+        let mut files = sample();
+        // A KV6 sprite the map ships for model_kv6 — binary, non-UTF-8.
+        let kv6 = vec![0x4b, 0x76, 0x78, 0x6c, 0x00, 0xff, 0x80, 0x01];
+        files.insert("assets/pieces/king.kv6".to_string(), kv6.clone());
+        let map = Map::read(&pack(&files).unwrap()).unwrap();
+        assert_eq!(map.assets.get("assets/pieces/king.kv6"), Some(&kv6));
+        // Assets stay out of `scripts`.
+        assert!(!map.scripts.contains_key("assets/pieces/king.kv6"));
     }
 
     #[test]

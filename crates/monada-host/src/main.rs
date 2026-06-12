@@ -61,16 +61,13 @@ fn load_map(path: &str) -> RunConfig {
         eprintln!("monada-host: {path}: {e}");
         exit(2);
     });
-    let script = map
-        .entry_script()
-        .unwrap_or_else(|| {
-            eprintln!(
-                "monada-host: {path}: entry script {:?} is not in the archive",
-                map.manifest.entry
-            );
-            exit(2);
-        })
-        .to_string();
+    if map.entry_script().is_none() {
+        eprintln!(
+            "monada-host: {path}: entry script {:?} is not in the archive",
+            map.manifest.entry
+        );
+        exit(2);
+    }
     eprintln!(
         "monada-host: loaded {:?} ({} players, sim_hz {}) sha256 {}",
         map.manifest.name,
@@ -78,10 +75,7 @@ fn load_map(path: &str) -> RunConfig {
         map.manifest.sim_hz,
         short_hash(&map.hash),
     );
-    RunConfig::Map(MapRun {
-        name: map.manifest.name,
-        script,
-    })
+    RunConfig::Map(MapRun { map })
 }
 
 /// First 6 bytes of a map hash, hex — enough to eyeball the identity.

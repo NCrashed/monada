@@ -33,9 +33,11 @@ monada-net = { workspace = true, features = ["quic"] }
 # paints with.
 roxlap-render = { version = "0.7.0", features = ["hud"] }
 roxlap-core = "0.7.0"
-# Scene graph type, named in the host's `SceneKind` accessors so one
-# render path can drive either the circle or the chess board scene.
+# Scene graph + voxel grid edit API (the map paints its world here), named
+# in the host's scene accessors so one render path drives any map.
 roxlap-scene = "0.7.0"
+# KV6 sprite parsing + procedural boxes for the generic MapRender models.
+roxlap-formats = "0.7.0"
 # Render-side world math for picking-ray params (the sim wall stays in
 # monada-sim; floats live only here, per DESIGN.md §3.1).
 glam = { workspace = true }
