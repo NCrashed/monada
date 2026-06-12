@@ -67,9 +67,12 @@ fn init() {
 
     camera_focus(vec3(ratio(7, 2), ratio(7, 2), fixed(0))); // board centre
 
-    // A directional sun from above, tilted toward the far side, so pieces
-    // and board read with depth (z grows downward → +z travels down).
-    set_light(vec3(ratio(2, 10), ratio(4, 10), fixed(1)), fixed(1));
+    // A directional sun over the board from the +x/+y side and above: it
+    // travels toward -x/-y and downward (z grows down → +z travels down),
+    // i.e. the light comes from the high near-right corner. That matches the
+    // pieces' built-in side-tint (brightest toward +x/+y), so board and
+    // pieces read lit from the same side. `fixed(1)` = full shadow contrast.
+    set_light(vec3(ratio(-7, 10), ratio(-5, 10), ratio(6, 10)), fixed(1));
     set_sky("assets/skybox.png");
     status("white to move");
 }

@@ -52,15 +52,15 @@ monada-voxvideo = { path = "crates/monada-voxvideo", version = "0.0.1" }
 monada-physics = { path = "crates/monada-physics", version = "0.0.1" }
 monada-format = { path = "crates/monada-format", version = "0.0.1" }
 
-# roxlap voxel engine 0.8.0 — ships the render features this slice needs
-# (directional grid `side_shades` + sprite lighting via `FrameParams`, sky
-# panorama). Path to the sibling 0.8.0 checkout for now: crates.io still
-# serves roxlap-core/render 0.7.0 (the 0.8.0 publish is propagating).
-# Flip to `version = "0.8.0"` (crates.io, CI-safe) once it resolves.
-roxlap-core = { path = "../roxlap/crates/roxlap-core", version = "0.8.0" }
-roxlap-render = { path = "../roxlap/crates/roxlap-render", version = "0.8.0" }
-roxlap-scene = { path = "../roxlap/crates/roxlap-scene", version = "0.8.0" }
-roxlap-formats = { path = "../roxlap/crates/roxlap-formats", version = "0.8.0" }
+# roxlap voxel engine 0.8.0 (crates.io, CI-safe) — ships the render
+# features this slice needs: directional grid `side_shades` + sprite
+# lighting via `FrameParams`, sky panorama, and `Engine::set_kv6col`.
+# crates.io rather than the sibling path so the author's in-progress
+# roxlap working copy doesn't perturb monada's build.
+roxlap-core = "0.8.0"
+roxlap-render = "0.8.0"
+roxlap-scene = "0.8.0"
+roxlap-formats = "0.8.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

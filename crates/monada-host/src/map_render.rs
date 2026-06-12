@@ -23,7 +23,7 @@ use monada_sim::{Command, EntityId, World};
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sky::Sky;
 use roxlap_core::sprite::SpriteLighting;
-use roxlap_core::{Camera, Engine, LightSrc};
+use roxlap_core::{Camera, Engine};
 use roxlap_formats::kv6::{self, Kv6};
 use roxlap_formats::sprite::{Sprite, SPRITE_FLAG_NO_SHADING};
 use roxlap_render::{FrameParams, SceneRenderer, SpriteInstanceDesc, SpriteSet};
@@ -38,12 +38,17 @@ const GROUND_Z: f64 = 100.0;
 const HIGHLIGHT_MODEL: usize = 0;
 /// Max world-xy distance from a click to an entity for it to be picked.
 const PICK_RADIUS: f64 = 12.0;
-/// How far the directional "sun" sits along its incoming direction — large
-/// enough that its rays are near-parallel over the small board.
-const SUN_DIST: f64 = 4096.0;
-/// Strongest per-face grid darkening a sun can apply (voxlap side-shade
-/// units; 15/31 are typical "game" values).
-const MAX_SIDE_SHADE: f32 = 28.0;
+/// Strongest per-face grid darkening a sun can apply, to the face pointing
+/// fully away from the sun (voxlap side-shade units out of the 0x80
+/// brightness reference). Kept gentle so the board reads bright — only
+/// shadowed faces darken (see `set_light`), not perpendicular ones.
+const MAX_SIDE_SHADE: f32 = 18.0;
+/// Sprite material (`Engine::kv6col`) — the master brightness for pieces in
+/// the lightmode-1 tint path. Below the engine's mid-grey `0x80` default
+/// would halve them; pure white `0xFF` blows the lit faces past the colour
+/// clamp (flat pure-white). `0xB0` sits just under the clamp so pieces show
+/// their own colour with directional form, while highlights still pop.
+const SPRITE_MATERIAL: u32 = 0x00B0_B0B0;
 /// Outward normals of a grid cube's six faces, in voxlap side-shade order
 /// (top/bottom/left/right/up/down). Used to shade the board by sun angle.
 const CUBE_FACE_NORMALS: [[f64; 3]; 6] = [
@@ -137,6 +142,10 @@ impl MapRender {
         // selected entity's *square*, sitting on the board surface under
         // the sprite (rather than a marker floating in the entity).
         let marker = sprite_box(SCALE as u32, SCALE as u32, 2, 0x80FF_E000, false);
+        // Sprite material so unlit maps' pieces aren't halved by the
+        // engine's mid-grey `kv6col` default (see `set_light`).
+        let mut engine = Engine::new();
+        engine.set_kv6col(SPRITE_MATERIAL);
         let sprites = SpriteSet {
             models: vec![marker],
             instances: Vec::new(),
@@ -153,7 +162,7 @@ impl MapRender {
             pending: Vec::new(),
             assets,
             local_player,
-            engine: Engine::new(),
+            engine,
             sky: None,
             sky_panorama: None,
             sky_uploaded: false,
@@ -365,24 +374,28 @@ impl HostBridge for MapRender {
             return;
         }
         let travel = raw / len; // unit direction the light travels
-                                // Fresh engine each call: one sun, deterministic, idempotent.
+                                // Fresh engine each call: deterministic, idempotent.
         let mut engine = Engine::new();
-        engine.set_lightmode(2);
-        // The light SOURCE sits far back along the incoming direction.
-        let src = self.camera.center - travel * SUN_DIST;
-        engine.add_light(LightSrc {
-            pos: [src.x as f32, src.y as f32, src.z as f32],
-            r2: ((SUN_DIST * 2.0) * (SUN_DIST * 2.0)) as f32,
-            sc: intensity.to_f64() as f32,
-        });
-        // Grid: darken each cube face by how much it points *along* the
-        // travel direction (away from the source). Overhead light → top
-        // bright, bottom dark, sides mid.
+        // Sprites: white material + lightmode 1 (directional surface tint).
+        // The default `kv6col` is mid-grey (0x80) which halves every sprite
+        // voxel's colour, and lightmode 2's sprite path is ambient-capped —
+        // together they rendered pieces at ~⅓ brightness. White + mode 1
+        // lights pieces at near-full colour. roxlap fixes the mode-1 tint
+        // direction (brightest toward +x/+y for an axis-aligned sprite); the
+        // board below follows `dir`, so point the map's light from +x/+y to
+        // keep the two consistent. A steerable bright sprite light is a
+        // roxlap follow-up.
+        engine.set_kv6col(SPRITE_MATERIAL);
+        engine.set_lightmode(1);
+        // Board grid: darken only faces tilted *away* from the sun (normal
+        // along the light's travel, `dot > 0`); faces toward or perpendicular
+        // to it keep full brightness, so the lit board reads bright, not
+        // grey. `intensity` scales shadow depth (the map's contrast knob).
+        let max_shade = (MAX_SIDE_SHADE * intensity.to_f64() as f32).clamp(0.0, MAX_SIDE_SHADE);
         let mut shades = [0i8; 6];
         for (face, normal) in CUBE_FACE_NORMALS.iter().enumerate() {
-            let dot = normal[0] * travel.x + normal[1] * travel.y + normal[2] * travel.z;
-            shades[face] =
-                (MAX_SIDE_SHADE * 0.5 * (1.0 + dot as f32)).clamp(0.0, MAX_SIDE_SHADE) as i8;
+            let dot = (normal[0] * travel.x + normal[1] * travel.y + normal[2] * travel.z) as f32;
+            shades[face] = (max_shade * dot.max(0.0)).clamp(0.0, MAX_SIDE_SHADE) as i8;
         }
         engine.set_side_shades(
             shades[0], shades[1], shades[2], shades[3], shades[4], shades[5],
