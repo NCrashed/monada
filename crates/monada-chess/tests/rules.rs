@@ -1,12 +1,15 @@
-//! The chess map's rules as a unit-level canary (DESIGN.md §6). Drives
-//! the `command` handler directly (no host, no net) and asserts: opening
-//! setup, legal piece movement, turn alternation, illegal-move rejection
-//! with the sim hash untouched, capture = despawn, and win-on-king-
-//! capture — plus the `ui_emit_event` stream the host/HUD consumes. This
-//! is the seed of the M4 oracle golden (slice 3).
+//! The chess map's rules as a unit-level canary (DESIGN.md §6). Loads the
+//! rules **from the packed `map/` archive** (so it exercises the format
+//! round-trip too), then drives the `command` handler directly (no host,
+//! no net) and asserts: opening setup, legal piece movement, turn
+//! alternation, illegal-move rejection with the sim hash untouched,
+//! capture = despawn, and win-on-king-capture — plus the `ui_emit_event`
+//! stream the host/HUD consumes. The seed of the M4 oracle golden (slice 3).
+
+use std::path::Path;
 
 use monada_fixed::{Fixed, FixedVec3};
-use monada_script::{shared_world, RhaiBackend, ScriptBackend, SharedWorld, UiEvent, CHESS_SCRIPT};
+use monada_script::{shared_world, RhaiBackend, ScriptBackend, SharedWorld, UiEvent};
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
 const SEED: u64 = 0x4D4F_4E41_4441_5F30;
@@ -15,16 +18,27 @@ const MOVE: u32 = 1;
 const WHITE: PlayerId = PlayerId(0);
 const BLACK: PlayerId = PlayerId(1);
 
-/// Event codes, mirroring the header of `scripts/chess.rhai`.
+/// Event codes, mirroring the header of `map/scripts/main.rhai`.
 const EV_TURN: u32 = 1;
 const EV_ILLEGAL: u32 = 2;
 const EV_CAPTURE: u32 = 3;
 const EV_GAME_OVER: u32 = 4;
 
+/// The chess rules, loaded through the real archive path: pack `map/`,
+/// read it back, take the manifest's entry script.
+fn chess_script() -> String {
+    let map_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("map");
+    let bytes = monada_format::pack_dir(&map_dir).expect("pack chess map");
+    let map = monada_format::Map::read(&bytes).expect("read chess map");
+    map.entry_script()
+        .expect("chess map has an entry script")
+        .to_string()
+}
+
 fn fresh() -> (SharedWorld, RhaiBackend) {
     let world = shared_world(SEED);
     let mut backend = RhaiBackend::new(world.clone());
-    backend.load(CHESS_SCRIPT).expect("compile chess.rhai");
+    backend.load(&chess_script()).expect("compile main.rhai");
     backend.on_init().expect("init runs");
     backend.drain_ui_events(); // discard anything emitted during setup
     (world, backend)
@@ -177,8 +191,16 @@ fn capturing_the_king_wins() {
     assert_eq!(piece_count(&world), 31, "white king removed");
     let on_e1 = piece_at(&world, 4, 0).expect("the black queen occupies e1");
     let w = world.lock().unwrap();
-    assert_eq!(w.field(on_e1, "color"), Some(Fixed::from_int(1)), "it is black");
-    assert_eq!(w.field(on_e1, "kind"), Some(Fixed::from_int(4)), "it is the queen");
+    assert_eq!(
+        w.field(on_e1, "color"),
+        Some(Fixed::from_int(1)),
+        "it is black"
+    );
+    assert_eq!(
+        w.field(on_e1, "kind"),
+        Some(Fixed::from_int(4)),
+        "it is the queen"
+    );
     drop(w);
 
     // The game is decided: further commands are rejected as game-over.

@@ -63,7 +63,8 @@ impl Default for SessionConfig {
 #[derive(Clone, Debug)]
 pub struct MatchInfo {
     pub seed: u64,
-    pub map_hash: u64,
+    /// SHA-256 map identity (`monada_format::hash`, DESIGN.md §3.4).
+    pub map_hash: [u8; 32],
     pub engine_version: String,
 }
 

@@ -136,7 +136,7 @@ fn demo_session(
     let driver = RhaiDriver::new(shared_world(SEED), COMMAND_DEMO_SCRIPT).expect("compile demo");
     let info = MatchInfo {
         seed: SEED,
-        map_hash: monada_net::map_hash(COMMAND_DEMO_SCRIPT),
+        map_hash: monada_format::hash(COMMAND_DEMO_SCRIPT.as_bytes()),
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
     };
     LockstepSession::new(
@@ -213,7 +213,7 @@ pub fn lockstep_checkpoints() -> Vec<Checkpoint> {
         .replay()
         .playback_verified(
             &mut fresh,
-            monada_net::map_hash(COMMAND_DEMO_SCRIPT),
+            monada_format::hash(COMMAND_DEMO_SCRIPT.as_bytes()),
             env!("CARGO_PKG_VERSION"),
         )
         .expect("replay identity matches this build");

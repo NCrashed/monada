@@ -14,6 +14,22 @@ name = "monada-chess"
 path = "src/main.rs"
 
 [dependencies]
+# The host event loop (lib target) + the archive loader. `monada-chess`
+# is just: load the bundled `chess.monada` and hand it to the host.
+monada-host = { path = "../monada-host" }
+monada-format = { workspace = true }
+
+[build-dependencies]
+# build.rs packs `map/` into a deterministic `chess.monada` in OUT_DIR.
+monada-format = { workspace = true }
+
+[dev-dependencies]
+# The rules canary loads the map's script and drives the Rhai backend
+# directly (no host, no window).
+monada-format = { workspace = true }
+monada-script = { workspace = true }
+monada-sim = { workspace = true }
+monada-fixed = { workspace = true }
 
 [lints]
 workspace = true

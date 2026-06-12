@@ -19,6 +19,9 @@ monada-sim = { workspace = true }
 monada-script = { workspace = true }
 monada-fixed = { workspace = true }
 monada-render = { workspace = true }
+# Map archive loading (tar.zst + manifest + SHA-256) for `--map` /
+# `monada-chess`, and the SHA-256 map identity for MatchInfo.
+monada-format = { workspace = true }
 # Lockstep transport with the QUIC backend (M3 Phase B): the host's
 # `--listen`/`--connect` two-process play.
 monada-net = { workspace = true, features = ["quic"] }

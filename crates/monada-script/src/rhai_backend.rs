@@ -280,15 +280,12 @@ fn register_host_api(engine: &mut Engine, world: &SharedWorld, events: &UiEventB
     // the drain buffer, never in `World` state or the desync hash. All-
     // integer payload; the script defines what the codes mean.
     let ev = events.clone();
-    engine.register_fn(
-        "ui_emit_event",
-        move |code: i64, a: i64, b: i64, c: i64| {
-            ev.lock().expect("events mutex").push(UiEvent {
-                code: code as u32,
-                a,
-                b,
-                c,
-            });
-        },
-    );
+    engine.register_fn("ui_emit_event", move |code: i64, a: i64, b: i64, c: i64| {
+        ev.lock().expect("events mutex").push(UiEvent {
+            code: code as u32,
+            a,
+            b,
+            c,
+        });
+    });
 }

@@ -20,7 +20,7 @@ const P1: PlayerId = PlayerId(1);
 fn info() -> MatchInfo {
     MatchInfo {
         seed: 0x4D4F_4E41_4441_5F30,
-        map_hash: 0xABCD,
+        map_hash: [0xAB; 32],
         engine_version: "test".to_string(),
     }
 }
@@ -303,18 +303,18 @@ fn replay_verified_rejects_wrong_map_and_version() {
         a.step(vec![]).unwrap();
         b.step(vec![]).unwrap();
     }
-    // `info()` records map_hash 0xABCD, engine_version "test".
+    // `info()` records map_hash [0xAB; 32], engine_version "test".
     let mut fresh = FoldDriver::new(0);
     assert!(matches!(
         a.replay()
-            .playback_verified(&mut fresh, 0xDEAD, "test")
+            .playback_verified(&mut fresh, [0xDE; 32], "test")
             .unwrap_err(),
         monada_net::ReplayError::MapMismatch { .. }
     ));
     let mut fresh = FoldDriver::new(0);
     assert!(matches!(
         a.replay()
-            .playback_verified(&mut fresh, 0xABCD, "v999")
+            .playback_verified(&mut fresh, [0xAB; 32], "v999")
             .unwrap_err(),
         monada_net::ReplayError::VersionMismatch { .. }
     ));
@@ -322,6 +322,6 @@ fn replay_verified_rejects_wrong_map_and_version() {
     let mut fresh = FoldDriver::new(0);
     assert!(a
         .replay()
-        .playback_verified(&mut fresh, 0xABCD, "test")
+        .playback_verified(&mut fresh, [0xAB; 32], "test")
         .is_ok());
 }

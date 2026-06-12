@@ -21,7 +21,9 @@ fn vec(x: i32, y: i32) -> FixedVec3 {
 fn info() -> MatchInfo {
     MatchInfo {
         seed: SEED,
-        map_hash: monada_net::map_hash(COMMAND_DEMO_SCRIPT),
+        // Both sessions share this, and the replay reproduce uses the
+        // unverified `playback`, so any fixed 32-byte id works here.
+        map_hash: [0xC0; 32],
         engine_version: "test".to_string(),
     }
 }

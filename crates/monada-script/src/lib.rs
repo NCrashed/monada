@@ -50,16 +50,6 @@ pub const WALK_CIRCLE_SCRIPT: &str = include_str!("../scripts/walk_circle.rhai")
 /// command path end to end (`on_command` -> host API -> `World`).
 pub const COMMAND_DEMO_SCRIPT: &str = include_str!("../scripts/command_demo.rhai");
 
-/// The M4 chess map (DESIGN.md §6) — a legal-move subset: piece moves +
-/// capture (`despawn`) + win-on-king-capture. Castling / en passant /
-/// promotion / check-mate detection are a later slice. Every rule lives
-/// in the script; the engine knows nothing of chess (DESIGN.md §4). It
-/// keeps authoritative game state (`to_move`, `winner`) in a singleton
-/// `game` entity and reports turn / capture / illegal-move / game-over to
-/// the host via [`ScriptBackend::drain_ui_events`]. Embedded until the
-/// map archive format lands (M4 slice 2).
-pub const CHESS_SCRIPT: &str = include_str!("../scripts/chess.rhai");
-
 /// Build a seeded world, load `source`, run its `init` trigger then
 /// `ticks` `tick` triggers, and return the shared world. The reusable
 /// scenario runner for tests and the determinism oracle.

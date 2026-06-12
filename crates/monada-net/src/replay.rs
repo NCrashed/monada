@@ -26,9 +26,10 @@ use crate::wire::InputBundle;
 pub struct Replay {
     /// The world RNG seed both peers started from.
     pub seed: u64,
-    /// Hash of the map/script that defines the rules (see [`map_hash`]).
-    /// A replay only reproduces against the same map.
-    pub map_hash: u64,
+    /// SHA-256 identity of the map/script that defines the rules
+    /// (`monada_format::hash`, DESIGN.md §3.4). A replay only reproduces
+    /// against the same map.
+    pub map_hash: [u8; 32],
     /// Engine version string; replays are not guaranteed across versions.
     pub engine_version: String,
     /// Command delay the match ran with (metadata; playback does not need
@@ -42,7 +43,12 @@ pub struct Replay {
 impl Replay {
     /// A fresh, empty replay carrying the match's identity metadata.
     #[must_use]
-    pub fn new(seed: u64, map_hash: u64, engine_version: String, command_delay: u64) -> Replay {
+    pub fn new(
+        seed: u64,
+        map_hash: [u8; 32],
+        engine_version: String,
+        command_delay: u64,
+    ) -> Replay {
         Replay {
             seed,
             map_hash,
@@ -71,7 +77,7 @@ impl Replay {
     pub fn playback_verified<D: SimDriver>(
         &self,
         driver: &mut D,
-        expected_map_hash: u64,
+        expected_map_hash: [u8; 32],
         engine_version: &str,
     ) -> Result<u64, ReplayError> {
         if self.map_hash != expected_map_hash {
@@ -140,7 +146,7 @@ impl Replay {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReplayError {
     /// The replay was recorded against a different map/script.
-    MapMismatch { expected: u64, found: u64 },
+    MapMismatch { expected: [u8; 32], found: [u8; 32] },
     /// The replay was recorded by a different engine version.
     VersionMismatch { expected: String, found: String },
 }
@@ -150,7 +156,9 @@ impl fmt::Display for ReplayError {
         match self {
             ReplayError::MapMismatch { expected, found } => write!(
                 f,
-                "replay map mismatch: expected {expected:#018x}, replay is {found:#018x}"
+                "replay map mismatch: expected {}, replay is {}",
+                ShortHash(expected),
+                ShortHash(found)
             ),
             ReplayError::VersionMismatch { expected, found } => write!(
                 f,
@@ -162,23 +170,15 @@ impl fmt::Display for ReplayError {
 
 impl std::error::Error for ReplayError {}
 
-/// Hash a map/script source into a [`Replay::map_hash`] (FNV-1a 64).
-/// Until the tar.zst map archive lands (M4) the "map" is the script
-/// text, so hashing the source pins the ruleset a replay belongs to.
-///
-/// FNV-1a is an **interim** stand-in: it is fine for catching an honest
-/// wrong-map mistake, but it is **not collision-resistant**, so it must
-/// not be the trust boundary for *untrusted* replays (anti-cheat,
-/// DESIGN.md §10.2). When the map archive lands this moves to the
-/// SHA-256-of-archive that DESIGN.md §3.4 specifies.
-#[must_use]
-pub fn map_hash(source: &str) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut h = OFFSET;
-    for &b in source.as_bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(PRIME);
+/// The first few bytes of a map hash, hex, for error messages — enough to
+/// tell two maps apart without dumping all 32 bytes.
+struct ShortHash<'a>(&'a [u8; 32]);
+
+impl fmt::Display for ShortHash<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in &self.0[..6] {
+            write!(f, "{byte:02x}")?;
+        }
+        f.write_str("…")
     }
-    h
 }

@@ -51,7 +51,7 @@ impl SimDriver for FoldDriver {
 fn info() -> MatchInfo {
     MatchInfo {
         seed: 1,
-        map_hash: 2,
+        map_hash: [2; 32],
         engine_version: "test".to_string(),
     }
 }

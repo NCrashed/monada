@@ -19,6 +19,9 @@ monada-fixed = { workspace = true }
 monada-sim = { workspace = true }
 monada-script = { workspace = true }
 monada-net = { workspace = true }
+# SHA-256 map identity for the lockstep@ scenario's MatchInfo / replay
+# verification (the demo script's id; DESIGN.md §3.4).
+monada-format = { workspace = true }
 
 [lints]
 workspace = true

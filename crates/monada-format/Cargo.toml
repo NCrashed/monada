@@ -10,6 +10,18 @@ readme.workspace = true
 description = "monada map archive (tar.zst): manifest schema, asset bundling, integrity hashing."
 
 [dependencies]
+# Manifest (de)serialisation. serde comes from the workspace (derive on).
+serde = { workspace = true, features = ["derive"] }
+toml = "1"
+# tar.zst archive: streaming entries (tar) + the codec voxel data
+# compresses best with (zstd) — DESIGN.md §3.4.
+tar = "0.4"
+zstd = "0.13"
+# SHA-256 map identity (DESIGN.md §3.4).
+sha2 = "0.10"
+
+[dev-dependencies]
+# Round-trip tests build a map then read it back.
 
 [lints]
 workspace = true

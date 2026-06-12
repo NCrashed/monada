@@ -1,0 +1,9 @@
+# Chess 2.0 — monada's first demo map (DESIGN.md §6). Manifest schema:
+# monada_format::Manifest.
+name = "Chess 2.0"
+engine_version = "0.0.1"
+players = 2
+# Turn-based: the sim advances only when a command arrives (DESIGN.md §6).
+sim_hz = "on_command"
+script_runtime = "rhai"
+entry = "scripts/main.rhai"
