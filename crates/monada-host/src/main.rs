@@ -18,9 +18,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use monada_fixed::FixedVec3;
 use monada_render::CircleScene;
-use monada_sim::scenario::{CircleSim, DEFAULT_COUNT};
-use monada_sim::Simulation;
+use monada_script::{shared_world, RhaiBackend, ScriptBackend, SharedWorld, WALK_CIRCLE_SCRIPT};
+use monada_sim::ArchetypeId;
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
 // egui itself comes through roxlap-render's re-export so the version
@@ -35,6 +36,10 @@ use winit::window::{Window, WindowId};
 
 /// Fixed simulation step (25 Hz, the WC3-parity default — DESIGN.md §3.1).
 const TICK_DT: f64 = 1.0 / 25.0;
+/// Seed for the scripted scenario's deterministic RNG (`MONADA_0`).
+const SEED: u64 = 0x4D4F_4E41_4441_5F30;
+/// The walk-circle script declares the mover archetype first.
+const MOVER: ArchetypeId = ArchetypeId(0);
 /// Packed `0x00RRGGBB` sky / clear colour.
 const SKY_COLOR: u32 = 0x0099_B3D9;
 
@@ -70,10 +75,14 @@ struct App {
     window: Option<Arc<Window>>,
     renderer: Option<SceneRenderer>,
     scene: CircleScene,
-    /// Sim state before and after the most recent fixed step; the
+    /// The deterministic sim world, driven entirely by the Rhai script —
+    /// the engine knows nothing about circles (DESIGN.md §7, M2).
+    world: SharedWorld,
+    backend: RhaiBackend,
+    /// Mover positions before and after the most recent fixed step; the
     /// renderer interpolates between them.
-    prev: CircleSim,
-    curr: CircleSim,
+    prev_pos: Vec<FixedVec3>,
+    curr_pos: Vec<FixedVec3>,
     /// CPU sprite shading. `default_oracle` needs no engine and is
     /// `'static`; required (as `Some`) for the CPU backend to draw the
     /// mover sprites at all.
@@ -94,13 +103,24 @@ struct App {
 
 impl App {
     fn new() -> App {
-        let sim = CircleSim::canonical();
+        // Build the deterministic world and the Rhai backend, then run
+        // the map's `init` trigger to populate it.
+        let world = shared_world(SEED);
+        let mut backend = RhaiBackend::new(world.clone());
+        backend
+            .load(WALK_CIRCLE_SCRIPT)
+            .expect("compile walk_circle.rhai");
+        backend.on_init().expect("script init");
+        let curr_pos = world.lock().expect("world mutex").positions(MOVER).to_vec();
+
         App {
             window: None,
             renderer: None,
-            scene: CircleScene::new(DEFAULT_COUNT as usize),
-            prev: sim.clone(),
-            curr: sim,
+            scene: CircleScene::new(curr_pos.len()),
+            prev_pos: curr_pos.clone(),
+            curr_pos,
+            world,
+            backend,
             lighting: SpriteLighting::default_oracle(),
             accumulator: 0.0,
             last_frame: Instant::now(),
@@ -120,7 +140,7 @@ impl App {
         &mut self,
         window: &Window,
     ) -> Option<(Vec<egui::ClippedPrimitive>, egui::TexturesDelta, f32)> {
-        let tick = self.curr.tick();
+        let tick = self.world.lock().expect("world mutex").tick;
         let fps = self.fps;
         let selected = self.scene.selected();
         let ctx = &self.egui_ctx;
@@ -181,18 +201,20 @@ impl App {
         }
         self.accumulator += dt;
         while self.accumulator >= TICK_DT {
-            self.prev = self.curr.clone();
-            self.curr.step();
+            self.prev_pos.clone_from(&self.curr_pos);
+            self.backend.on_tick().expect("script tick");
+            self.curr_pos = self
+                .world
+                .lock()
+                .expect("world mutex")
+                .positions(MOVER)
+                .to_vec();
             self.accumulator -= TICK_DT;
         }
         let alpha = (self.accumulator / TICK_DT).clamp(0.0, 1.0);
 
         self.drive_camera(dt);
-        self.scene.update(
-            self.prev.movers().columns().pos(),
-            self.curr.movers().columns().pos(),
-            alpha,
-        );
+        self.scene.update(&self.prev_pos, &self.curr_pos, alpha);
 
         if !self.debug_done && std::env::var_os("MONADA_DEBUG").is_some() {
             self.debug_done = true;

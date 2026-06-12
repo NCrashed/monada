@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 monada-fixed = { workspace = true }
 monada-sim = { workspace = true }
+monada-script = { workspace = true }
 
 [lints]
 workspace = true

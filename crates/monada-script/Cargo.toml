@@ -10,6 +10,12 @@ readme.workspace = true
 description = "monada scripting runtime (Rhai v0, WASM post-v0) + the host API wall."
 
 [dependencies]
+monada-sim = { workspace = true }
+monada-fixed = { workspace = true }
+# Rhai with `no_float`: scripts cannot perform IEEE arithmetic at all
+# (DESIGN.md §5.2) — sim math goes through monada-fixed. `sync` makes
+# the engine Send+Sync, so the shared world handle is Arc<Mutex<World>>.
+rhai = { version = "1", default-features = false, features = ["std", "sync", "no_float"] }
 
 [lints]
 workspace = true

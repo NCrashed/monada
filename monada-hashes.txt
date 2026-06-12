@@ -1,8 +1,13 @@
 # monada determinism goldens — @generated, do not hand-edit.
-# Canonical CircleSim: seed "MONADA_0", 100 movers.
+# scenarios: walk (scripted circle), kernel (pure-Rust anchor); seed "MONADA_0".
 # Regenerate with `cargo run -p monada-oracle -- --bless`.
-circle@0 = 4085228208043754834
-circle@1 = 4203083451758757778
-circle@30 = 12989070050077658665
-circle@150 = 7995104311006645468
-circle@600 = 2920854233001871778
+walk@0 = 9359308724793962880
+walk@1 = 18067293261836786764
+walk@30 = 3032362181624752735
+walk@150 = 15775391899802058306
+walk@600 = 7227763778376693000
+kernel@0 = 1196917030367687968
+kernel@1 = 7465096096848989742
+kernel@30 = 1850810979573687065
+kernel@150 = 6637375668485290534
+kernel@600 = 17458794637091858842

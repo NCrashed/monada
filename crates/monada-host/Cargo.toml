@@ -16,6 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 monada-sim = { workspace = true }
+monada-script = { workspace = true }
+monada-fixed = { workspace = true }
 monada-render = { workspace = true }
 # Render facade + camera/opticast types. Local path (sibling roxlap)
 # matches monada-render's dependency on the same checkout.

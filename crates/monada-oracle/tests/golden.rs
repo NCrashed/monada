@@ -1,9 +1,8 @@
-//! The CI determinism gate. If this test fails on any platform, the
-//! sim has diverged (or the scenario changed and the goldens need a
+//! The CI determinism gate. If this fails on any platform, a scenario
+//! has diverged (or it changed intentionally and the goldens need a
 //! deliberate `--bless`).
 
-use monada_oracle::{canonical_checkpoints, diff, parse_goldens, Verdict};
-use monada_sim::scenario::CANONICAL_HASH_AT_600;
+use monada_oracle::{all_checkpoints, diff, parse_goldens, walk_final_hash, Verdict};
 
 /// The committed goldens, embedded at compile time so the test always
 /// checks exactly what is on disk.
@@ -11,7 +10,7 @@ const COMMITTED: &str = include_str!("../../../monada-hashes.txt");
 
 #[test]
 fn checkpoints_match_committed_goldens() {
-    let checkpoints = canonical_checkpoints();
+    let checkpoints = all_checkpoints();
     let goldens = parse_goldens(COMMITTED).expect("goldens file parses");
     for (cp, verdict) in diff(&checkpoints, &goldens) {
         assert_eq!(
@@ -25,12 +24,12 @@ fn checkpoints_match_committed_goldens() {
 }
 
 #[test]
-fn final_checkpoint_matches_sim_constant() {
-    // The oracle and the sim crate must agree on the headline golden.
-    let final_cp = canonical_checkpoints()
+fn walk_final_matches_checkpoint() {
+    // The standalone runner and the checkpoint walk must agree on the
+    // headline scripted golden (walk@600).
+    let final_cp = all_checkpoints()
         .into_iter()
-        .last()
-        .expect("at least one checkpoint");
-    assert_eq!(final_cp.tick, 600);
-    assert_eq!(final_cp.hash, CANONICAL_HASH_AT_600);
+        .find(|c| c.scenario == "walk" && c.tick == 600)
+        .expect("walk@600 checkpoint");
+    assert_eq!(final_cp.hash, walk_final_hash());
 }

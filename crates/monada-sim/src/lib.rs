@@ -37,12 +37,13 @@
 mod entity;
 mod hash;
 mod rng;
-pub mod scenario;
 mod sim;
 mod storage;
+mod world;
 
 pub use entity::{EntityAllocator, EntityId};
 pub use hash::{StateHash, StateHasher};
 pub use rng::DeterministicRng;
 pub use sim::{advance, Simulation};
 pub use storage::{ArchetypeStorage, Columns};
+pub use world::{ArchetypeId, World};

@@ -14,9 +14,7 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-use monada_oracle::{
-    canonical_checkpoints, diff, parse_goldens, render_goldens, Checkpoint, Verdict,
-};
+use monada_oracle::{all_checkpoints, diff, parse_goldens, render_goldens, Checkpoint, Verdict};
 
 /// Path to the committed goldens, relative to this crate's manifest.
 const GOLDENS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../monada-hashes.txt");
@@ -33,9 +31,9 @@ fn main() -> ExitCode {
         }
     };
 
-    let checkpoints = canonical_checkpoints();
+    let checkpoints = all_checkpoints();
     println!(
-        "platform: {}-{} | canonical CircleSim, {} checkpoints",
+        "platform: {}-{} | scripted walk + kernel anchor, {} checkpoints",
         std::env::consts::ARCH,
         std::env::consts::OS,
         checkpoints.len()
@@ -110,6 +108,6 @@ fn print_table(checkpoints: &[Checkpoint], results: Option<&[(Checkpoint, Verdic
                 format!("  MISMATCH (golden {golden}, got {got})")
             }
         };
-        println!("  tick {:>4}: {:>20}{}", c.tick, c.hash, status);
+        println!("  {:>12}: {:>20}{}", c.key(), c.hash, status);
     }
 }
