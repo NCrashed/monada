@@ -268,7 +268,6 @@ impl CircleScene {
     }
 }
 
-
 /// Lay down a flat square ground slab around `center`, two voxels thick,
 /// top face at `center.z`. Two-tone checkerboard so motion over it reads
 /// clearly.

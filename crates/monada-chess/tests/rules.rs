@@ -113,15 +113,18 @@ fn illegal_moves_are_rejected_without_touching_state() {
 
     // Black to move out of turn (white's turn): rejected by colour.
     let e = piece_at(&world, 4, 6).unwrap();
-    b.on_command(ANY, &Command::on(MOVE, e, square(4, 4))).unwrap();
+    b.on_command(ANY, &Command::on(MOVE, e, square(4, 4)))
+        .unwrap();
 
     // White knight to a non-L (empty) square.
     let e = piece_at(&world, 1, 0).unwrap();
-    b.on_command(ANY, &Command::on(MOVE, e, square(1, 2))).unwrap();
+    b.on_command(ANY, &Command::on(MOVE, e, square(1, 2)))
+        .unwrap();
 
     // A blocked rook (own pawn in front) cannot move.
     let e = piece_at(&world, 0, 0).unwrap();
-    b.on_command(ANY, &Command::on(MOVE, e, square(0, 3))).unwrap();
+    b.on_command(ANY, &Command::on(MOVE, e, square(0, 3)))
+        .unwrap();
 
     assert_eq!(
         world.lock().unwrap().state_hash(),
@@ -147,7 +150,11 @@ fn capture_removes_the_taken_piece() {
         Some(Fixed::from_int(0)),
         "the survivor on d5 is the white pawn"
     );
-    assert_eq!(game_field(&world, "to_move"), 1, "black to move after capture");
+    assert_eq!(
+        game_field(&world, "to_move"),
+        1,
+        "black to move after capture"
+    );
 }
 
 #[test]
@@ -167,13 +174,26 @@ fn capturing_the_king_wins() {
     assert_eq!(piece_count(&world), 31, "white king removed");
     let on_e1 = piece_at(&world, 4, 0).expect("the black queen occupies e1");
     let w = world.lock().unwrap();
-    assert_eq!(w.field(on_e1, "color"), Some(Fixed::from_int(1)), "it is black");
-    assert_eq!(w.field(on_e1, "kind"), Some(Fixed::from_int(4)), "it is the queen");
+    assert_eq!(
+        w.field(on_e1, "color"),
+        Some(Fixed::from_int(1)),
+        "it is black"
+    );
+    assert_eq!(
+        w.field(on_e1, "kind"),
+        Some(Fixed::from_int(4)),
+        "it is the queen"
+    );
     drop(w);
 
     // The game is decided: further commands are no-ops.
     let before = world.lock().unwrap().state_hash();
     let e = piece_at(&world, 0, 2).unwrap();
-    b.on_command(ANY, &Command::on(MOVE, e, square(0, 3))).unwrap();
-    assert_eq!(world.lock().unwrap().state_hash(), before, "game over: no moves");
+    b.on_command(ANY, &Command::on(MOVE, e, square(0, 3)))
+        .unwrap();
+    assert_eq!(
+        world.lock().unwrap().state_hash(),
+        before,
+        "game over: no moves"
+    );
 }

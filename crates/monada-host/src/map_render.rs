@@ -98,8 +98,10 @@ impl MapRender {
     pub fn new(assets: BTreeMap<String, Vec<u8>>) -> MapRender {
         let mut scene = Scene::new();
         let grid = scene.add_grid(GridTransform::identity());
-        // Model 0: a tall thin amber marker for the selected entity.
-        let marker = sprite_box(3, 3, SCALE as u32, 0x80FF_E000);
+        // Model 0: a flat amber tile the size of one cell — highlights the
+        // selected entity's *square*, sitting on the board surface under
+        // the sprite (rather than a marker floating in the entity).
+        let marker = sprite_box(SCALE as u32, SCALE as u32, 2, 0x80FF_E000);
         let sprites = SpriteSet {
             models: vec![marker],
             instances: Vec::new(),
@@ -129,7 +131,10 @@ impl MapRender {
                 continue; // despawned (e.g. captured)
             };
             let w = world_of(p);
-            let zsiz = sprites.models.get(model).map_or(SCALE, |m| f64::from(m.kv6.zsiz));
+            let zsiz = sprites
+                .models
+                .get(model)
+                .map_or(SCALE, |m| f64::from(m.kv6.zsiz));
             sprites.instances.push(SpriteInstanceDesc {
                 model,
                 // Seat the model bottom on the surface (pivot is centre).
@@ -140,8 +145,10 @@ impl MapRender {
             if let Some(p) = world.position(h) {
                 let w = world_of(p);
                 sprites.instances.push(SpriteInstanceDesc {
+                    // Seat the tile flush on the board surface, centred on
+                    // the entity's square (x/y already cell-centred).
                     model: HIGHLIGHT_MODEL,
-                    pos: [w.x as f32, w.y as f32, (w.z - SCALE) as f32],
+                    pos: [w.x as f32, w.y as f32, (GROUND_Z - 1.0) as f32],
                 });
             }
         }
@@ -246,7 +253,11 @@ impl HostBridge for MapRender {
 
     fn voxel_set(&mut self, x: i64, y: i64, z: i64, color: i64) {
         let scale = SCALE as i64;
-        let pos = IVec3::new((x * scale) as i32, (y * scale) as i32, (GROUND_Z as i64 + z) as i32);
+        let pos = IVec3::new(
+            (x * scale) as i32,
+            (y * scale) as i32,
+            (GROUND_Z as i64 + z) as i32,
+        );
         if let Some(grid) = self.scene.grid_mut(self.grid) {
             grid.set_voxel(pos, Some(color as u32));
         }

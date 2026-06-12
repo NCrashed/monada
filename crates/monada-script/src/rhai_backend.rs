@@ -357,9 +357,12 @@ fn register_host_api(engine: &mut Engine, world: &SharedWorld, events: &UiEventB
 /// signatures — the sim / script wall.
 fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     let b = bridge.clone();
-    engine.register_fn("model_box", move |w: i64, h: i64, d: i64, color: i64| -> i64 {
-        b.lock().expect("bridge mutex").model_box(w, h, d, color)
-    });
+    engine.register_fn(
+        "model_box",
+        move |w: i64, h: i64, d: i64, color: i64| -> i64 {
+            b.lock().expect("bridge mutex").model_box(w, h, d, color)
+        },
+    );
 
     let b = bridge.clone();
     engine.register_fn("model_kv6", move |path: ImmutableString| -> i64 {

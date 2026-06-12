@@ -466,7 +466,12 @@ impl App {
             // The map owns its HUD text — the host just shows whatever the
             // script set via `status(...)`, knowing nothing of its meaning.
             Sim::Map(map) => HudState::Map {
-                status: map.render.lock().expect("render mutex").status_text().to_string(),
+                status: map
+                    .render
+                    .lock()
+                    .expect("render mutex")
+                    .status_text()
+                    .to_string(),
             },
         };
         let ctx = &self.egui_ctx;
@@ -817,11 +822,15 @@ struct NetHud {
 
 /// Per-mode HUD state passed to [`build_hud`].
 enum HudState {
-    Local { selected: Option<usize> },
+    Local {
+        selected: Option<usize>,
+    },
     Net(NetHud),
     /// A scripted map: just the status line the map set via `status(...)`.
     /// The host attaches no meaning to it.
-    Map { status: String },
+    Map {
+        status: String,
+    },
 }
 
 /// Build the HUD widget tree (DESIGN.md §3.2's egui HUD).

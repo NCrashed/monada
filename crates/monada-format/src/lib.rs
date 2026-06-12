@@ -149,8 +149,8 @@ impl Map {
         let mut assets = BTreeMap::new();
         for (path, data) in files {
             if path.starts_with("scripts/") {
-                let src = String::from_utf8(data)
-                    .map_err(|_| FormatError::ScriptUtf8(path.clone()))?;
+                let src =
+                    String::from_utf8(data).map_err(|_| FormatError::ScriptUtf8(path.clone()))?;
                 scripts.insert(path, src);
             } else if path.starts_with("assets/") {
                 assets.insert(path, data);
