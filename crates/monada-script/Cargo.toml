@@ -12,6 +12,10 @@ description = "monada scripting runtime (Rhai v0, WASM post-v0) + the host API w
 [dependencies]
 monada-sim = { workspace = true }
 monada-fixed = { workspace = true }
+# The lockstep session's SimDriver seam. monada-script is the only crate
+# that links both rhai and net: RhaiDriver adapts the Rhai backend to the
+# transport-agnostic session (DESIGN.md §3.1, M3). net never links rhai.
+monada-net = { workspace = true }
 # Rhai with `no_float`: scripts cannot perform IEEE arithmetic at all
 # (DESIGN.md §5.2) — sim math goes through monada-fixed. `sync` makes
 # the engine Send+Sync, so the shared world handle is Arc<Mutex<World>>.

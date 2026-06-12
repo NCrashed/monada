@@ -1,5 +1,5 @@
 # monada determinism goldens — @generated, do not hand-edit.
-# scenarios: walk (scripted circle), kernel (pure-Rust anchor); seed "MONADA_0".
+# scenarios: walk (scripted circle), kernel (pure-Rust anchor), lockstep (two-session command demo); seed "MONADA_0".
 # Regenerate with `cargo run -p monada-oracle -- --bless`.
 walk@0 = 9359308724793962880
 walk@1 = 18067293261836786764
@@ -11,3 +11,8 @@ kernel@1 = 7465096096848989742
 kernel@30 = 1850810979573687065
 kernel@150 = 6637375668485290534
 kernel@600 = 17458794637091858842
+lockstep@0 = 4156691780721317626
+lockstep@1 = 12614279531689896143
+lockstep@30 = 2391582360505065792
+lockstep@150 = 13390146667816815528
+lockstep@600 = 6769154635391089060

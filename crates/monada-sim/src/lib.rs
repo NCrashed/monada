@@ -34,6 +34,7 @@
 // identifiers; backticking each one reads worse than the prose.
 #![allow(clippy::doc_markdown)]
 
+mod command;
 mod entity;
 mod hash;
 mod rng;
@@ -41,6 +42,7 @@ mod sim;
 mod storage;
 mod world;
 
+pub use command::{Command, PlayerId};
 pub use entity::{EntityAllocator, EntityId};
 pub use hash::{StateHash, StateHasher};
 pub use rng::DeterministicRng;

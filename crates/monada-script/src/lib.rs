@@ -16,10 +16,12 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use monada_sim::World;
+use monada_sim::{Command, PlayerId, World};
 
+mod driver;
 mod rhai_backend;
 
+pub use driver::RhaiDriver;
 pub use rhai_backend::RhaiBackend;
 
 /// The shared, lockable world a [`ScriptBackend`] mutates.
@@ -39,6 +41,14 @@ pub fn shared_world(seed: u64) -> SharedWorld {
 /// engine knows nothing about circles. Embedded until the map archive
 /// format lands (M4).
 pub const WALK_CIRCLE_SCRIPT: &str = include_str!("../scripts/walk_circle.rhai");
+
+/// The M3 command-driven demo scenario (DESIGN.md §3.1, §7). Players
+/// issue [`Command`]s over the lockstep wire: `verb == 1` spawns a unit
+/// at the command's point, `verb == 2` sets a unit's velocity; `tick`
+/// integrates position by velocity. The engine knows nothing about the
+/// verbs — it is the script that interprets them. Exercises the whole
+/// command path end to end (`on_command` -> host API -> `World`).
+pub const COMMAND_DEMO_SCRIPT: &str = include_str!("../scripts/command_demo.rhai");
 
 /// Build a seeded world, load `source`, run its `init` trigger then
 /// `ticks` `tick` triggers, and return the shared world. The reusable
@@ -73,6 +83,17 @@ pub trait ScriptBackend {
     /// # Errors
     /// Returns [`ScriptError::Run`] if the script raises.
     fn on_init(&mut self) -> Result<(), ScriptError>;
+
+    /// Run the map's `command` trigger for one player [`Command`]
+    /// (DESIGN.md §3.1, M3). Called by the lockstep session for every
+    /// command of a released tick, in canonical player order, *before*
+    /// [`on_tick`](Self::on_tick). A script that defines no `command`
+    /// handler treats this as a no-op — the engine never interprets the
+    /// command itself.
+    ///
+    /// # Errors
+    /// Returns [`ScriptError::Run`] if the handler raises.
+    fn on_command(&mut self, player: PlayerId, command: &Command) -> Result<(), ScriptError>;
 
     /// Advance one simulation tick: bump the world tick, then run the
     /// map's `tick` trigger.

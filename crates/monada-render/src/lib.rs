@@ -209,6 +209,19 @@ impl CircleScene {
         self.selected
     }
 
+    /// Sim-space `(x, y)` of where a world-space ray crosses the mover
+    /// plane — the inverse of [`mover_world`](Self::mover_world)'s xy map.
+    /// The host quantises this to fixed-point for a spawn command
+    /// (DESIGN.md §3.1, M3): click-to-place in the command-driven demo.
+    pub fn ground_sim_xy(&self, origin: DVec3, dir: DVec3) -> Option<(f64, f64)> {
+        ground_hit(origin, dir, self.pick_plane()).map(|hit| {
+            (
+                (hit.x - self.center.x) / SCALE,
+                (hit.y - self.center.y) / SCALE,
+            )
+        })
+    }
+
     /// Interpolated world-space centre of one mover cube: lerp the sim
     /// position in `f64`, scale into world voxels about the centre, and
     /// seat the cube on the ground (cube centre is half an edge above

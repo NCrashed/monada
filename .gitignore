@@ -2,6 +2,9 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# Replay captures written by monada-host on exit (runtime artifacts).
+*.replay
+
 # cargo-fuzz build output, corpora, and crash artifacts.
 **/fuzz/target/
 **/fuzz/corpus/

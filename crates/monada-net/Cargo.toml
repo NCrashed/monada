@@ -10,6 +10,43 @@ readme.workspace = true
 description = "monada lockstep transport: per-tick input bundling, command-delay, desync hashing."
 
 [dependencies]
+# The wire carries only commands + checksums, both built from sim-native
+# types (Command/PlayerId/EntityId/Fixed). monada-net never links rhai —
+# it is sim-only, preserving the script<->sim wall (DESIGN.md §3.1).
+monada-sim = { workspace = true }
+serde = { workspace = true, features = ["std", "derive"] }
+# Compact, deterministic, pure-Rust wire/replay codec. Only crosses a
+# real boundary (QUIC, M3 Phase B) or hits disk (replay files); the
+# in-process loopback transport passes values without encoding.
+postcard = { version = "1", features = ["use-std"] }
+
+# QUIC transport (M3 Phase B), behind the `quic` feature so the
+# deterministic core stays async-free and the heavy net stack is opt-in.
+# A background tokio thread owns the quinn connection and bridges it to
+# the sync `Transport` trait over tokio mpsc channels.
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls-ring",
+], optional = true }
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "macros",
+], optional = true }
+# `rustls` for the dev-only "accept any cert" client verifier; `rcgen`
+# for the server's self-signed cert. LAN/dev posture — DESIGN.md §7's
+# matchmaker/cert story is owed later.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+], optional = true }
+rcgen = { version = "0.13", optional = true }
+
+[features]
+quic = ["dep:quinn", "dep:tokio", "dep:rustls", "dep:rcgen"]
 
 [lints]
 workspace = true

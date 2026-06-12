@@ -11,10 +11,13 @@
 )]
 
 use monada_fixed::{trig, Fixed, FixedVec3};
-use monada_sim::{ArchetypeId, EntityId};
+use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 use rhai::{Array, Dynamic, Engine, ImmutableString, Scope, AST};
 
 use crate::{ScriptBackend, ScriptError, SharedWorld};
+
+/// Arity of the map's `command` trigger: `command(player, verb, target, arg)`.
+const COMMAND_ARITY: usize = 4;
 
 /// Rhai-backed scripting runtime over a shared [`World`].
 pub struct RhaiBackend {
@@ -22,6 +25,13 @@ pub struct RhaiBackend {
     ast: Option<AST>,
     scope: Scope<'static>,
     world: SharedWorld,
+    /// Whether the loaded script defines a `command/4` handler. Decided
+    /// once at [`load`](RhaiBackend::load) so [`on_command`](RhaiBackend::on_command)
+    /// can no-op a handler-less map *without* swallowing a genuine
+    /// `ErrorFunctionNotFound` raised by a typo'd host-API call inside an
+    /// existing handler — that must surface as the bug it is (it could
+    /// otherwise desync one peer silently).
+    has_command: bool,
 }
 
 impl RhaiBackend {
@@ -37,6 +47,7 @@ impl RhaiBackend {
             ast: None,
             scope: Scope::new(),
             world,
+            has_command: false,
         }
     }
 
@@ -57,12 +68,42 @@ impl ScriptBackend for RhaiBackend {
             .engine
             .compile(source)
             .map_err(|e| ScriptError::Compile(e.to_string()))?;
+        // Decide handler presence here so `on_command` never has to
+        // distinguish "no handler" from "handler raised FunctionNotFound".
+        self.has_command = ast
+            .iter_functions()
+            .any(|f| f.name == "command" && f.params.len() == COMMAND_ARITY);
         self.ast = Some(ast);
         Ok(())
     }
 
     fn on_init(&mut self) -> Result<(), ScriptError> {
         self.call("init")
+    }
+
+    fn on_command(&mut self, player: PlayerId, command: &Command) -> Result<(), ScriptError> {
+        // A map with no `command/4` handler simply ignores input (e.g. the
+        // walk-circle scenario). This is the *only* place input is dropped;
+        // once we call into a handler that exists, every error — including a
+        // typo'd host-API call raising `ErrorFunctionNotFound` — propagates.
+        if !self.has_command {
+            return Ok(());
+        }
+        let ast = self
+            .ast
+            .as_ref()
+            .ok_or_else(|| ScriptError::Run("no script loaded".to_string()))?;
+        // The script interprets the command; the engine just forwards its
+        // opaque fields. `arg` is a `Vec3` on the script side.
+        let args = (
+            i64::from(player.0),
+            i64::from(command.verb),
+            command.target.0 as i64,
+            command.arg,
+        );
+        self.engine
+            .call_fn::<()>(&mut self.scope, ast, "command", args)
+            .map_err(|e| ScriptError::Run(e.to_string()))
     }
 
     fn on_tick(&mut self) -> Result<(), ScriptError> {
@@ -85,6 +126,13 @@ fn register_number_types(engine: &mut Engine) {
         Fixed::from_ratio(n as i32, d as i32)
     });
     engine.register_fn("vec3", FixedVec3::new);
+
+    // Read `Vec3` components in scripts (e.g. a command's `arg.x`). The
+    // setter side stays in `vec3(...)` reconstruction — vectors are
+    // value types.
+    engine.register_get("x", |v: &mut FixedVec3| v.x);
+    engine.register_get("y", |v: &mut FixedVec3| v.y);
+    engine.register_get("z", |v: &mut FixedVec3| v.z);
 
     // Fixed arithmetic operators.
     engine.register_fn("+", |a: Fixed, b: Fixed| a + b);
@@ -131,6 +179,14 @@ fn register_host_api(engine: &mut Engine, world: &SharedWorld) {
         w.lock()
             .expect("world mutex")
             .set_position(EntityId(e as u64), p);
+    });
+
+    let w = world.clone();
+    engine.register_fn("entity_position", move |e: i64| -> FixedVec3 {
+        w.lock()
+            .expect("world mutex")
+            .position(EntityId(e as u64))
+            .unwrap_or(FixedVec3::ZERO)
     });
 
     let w = world.clone();

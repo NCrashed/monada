@@ -5,7 +5,7 @@
 //! goldens in `monada-hashes.txt` on every supported platform. A direct
 //! lift of `roxlap-oracle`'s hash-and-diff style.
 //!
-//! Two scenarios gate, by design (decision B):
+//! Three scenarios gate, by design (decision B + M3):
 //! - **`walk`** — the scripted "100 entities walk in a circle"
 //!   (`monada-script`'s `WALK_CIRCLE_SCRIPT`). The headline M2 gate; it
 //!   exercises the whole Rhai path (compile, host API, fixed-point trig,
@@ -13,12 +13,23 @@
 //! - **`kernel`** — a tiny pure-Rust scenario on the generic [`World`],
 //!   with no scripting at all. A Rhai-independent anchor: it isolates a
 //!   sim-kernel regression from a script-layer (e.g. Rhai-version) one.
+//! - **`lockstep`** — two `monada-net` sessions, joined by a loopback
+//!   transport, run the scripted `command_demo` map from an identical
+//!   command stream (M3). It gates the lockstep path: command bundling,
+//!   command-delay scheduling, the tick barrier, and the command-driven
+//!   sim. The two sessions must also agree at every checkpoint (a built-
+//!   in equality assertion), and the recorded replay must reproduce the
+//!   final hash.
 
 use std::fmt::Write as _;
 
 use monada_fixed::{Fixed, FixedVec3};
-use monada_script::{run_script, shared_world, RhaiBackend, ScriptBackend, WALK_CIRCLE_SCRIPT};
-use monada_sim::{ArchetypeId, World};
+use monada_net::{LockstepSession, LoopbackTransport, MatchInfo, SessionConfig, SimDriver};
+use monada_script::{
+    run_script, shared_world, RhaiBackend, RhaiDriver, ScriptBackend, COMMAND_DEMO_SCRIPT,
+    WALK_CIRCLE_SCRIPT,
+};
+use monada_sim::{ArchetypeId, Command, EntityId, PlayerId, World};
 
 /// Tick counts at which each scenario is hashed. Ascending; `0` captures
 /// the seeded post-`init` state before any step.
@@ -113,11 +124,114 @@ fn kernel_step(world: &mut World, _arch: ArchetypeId) {
     }
 }
 
+/// The two lockstep players.
+const P0: PlayerId = PlayerId(0);
+const P1: PlayerId = PlayerId(1);
+
+/// Build one loopback-connected `command_demo` session for `player`.
+fn demo_session(
+    player: PlayerId,
+    transport: LoopbackTransport,
+) -> LockstepSession<LoopbackTransport, RhaiDriver> {
+    let driver = RhaiDriver::new(shared_world(SEED), COMMAND_DEMO_SCRIPT).expect("compile demo");
+    let info = MatchInfo {
+        seed: SEED,
+        map_hash: monada_net::map_hash(COMMAND_DEMO_SCRIPT),
+        engine_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    LockstepSession::new(
+        driver,
+        transport,
+        player,
+        &[P0, P1],
+        SessionConfig::default(),
+        info,
+    )
+}
+
+/// Player 0's command for the step (tick) at which it is issued; player 1
+/// issues nothing. Fully deterministic — fixed verbs, fixed integer
+/// vectors, fixed target ids — so the absolute hash is a stable golden.
+/// Spawns three units (which become `EntityId` 0/1/2), then steers them
+/// and spawns a fourth (`EntityId(3)`); a command issued at step `s`
+/// executes at `s + command_delay`, so every steered target exists by the
+/// time its steer runs.
+fn demo_command(step: u64) -> Vec<Command> {
+    let v = |x: i32, y: i32| FixedVec3::new(Fixed::from_int(x), Fixed::from_int(y), Fixed::ZERO);
+    match step {
+        2 => vec![Command::at(1, v(4, 0))],
+        3 => vec![Command::at(1, v(-3, 5))],
+        4 => vec![Command::at(1, v(7, -2))],
+        10 => vec![Command::on(2, EntityId(0), v(1, 1))],
+        12 => vec![Command::on(2, EntityId(1), v(-1, 0))],
+        20 => vec![Command::on(2, EntityId(2), v(0, 2))],
+        50 => vec![Command::at(1, v(0, 9))],
+        100 => vec![Command::on(2, EntityId(3), v(2, -1))],
+        _ => vec![],
+    }
+}
+
+/// The lockstep scenario: two loopback sessions run `command_demo` from
+/// the same command stream, hashed at each tick checkpoint. Asserts the
+/// two sessions agree at every checkpoint and that the replay reproduces
+/// the final hash — equality is platform-independent, while the absolute
+/// hashes gate cross-platform via the goldens.
+///
+/// # Panics
+/// Panics on a script compile/run failure, a session desync, a
+/// session/replay hash disagreement (all bugs, not data conditions).
+#[must_use]
+pub fn lockstep_checkpoints() -> Vec<Checkpoint> {
+    let (ta, tb) = LoopbackTransport::pair();
+    let mut a = demo_session(P0, ta);
+    let mut b = demo_session(P1, tb);
+
+    let mut out = Vec::with_capacity(TICK_CHECKPOINTS.len());
+    for &tick in TICK_CHECKPOINTS {
+        // Advance both sessions in lockstep until tick `tick` has executed
+        // (session tick counter == `tick`). Tick 0 = post-init.
+        while a.tick() < tick {
+            let step = a.tick();
+            assert!(a.step(demo_command(step)).expect("session a"), "a stalled");
+            assert!(b.step(Vec::new()).expect("session b"), "b stalled");
+        }
+        let ha = a.driver().state_hash();
+        let hb = b.driver().state_hash();
+        assert_eq!(ha, hb, "lockstep sessions diverged at tick {tick}");
+        out.push(Checkpoint {
+            scenario: "lockstep",
+            tick,
+            hash: ha,
+        });
+    }
+
+    // The replay of A reproduces A's final state bit-exactly — through the
+    // *verified* path, which also checks the replay's map hash + engine
+    // version (DESIGN.md §3.4) against this build.
+    let mut fresh = RhaiDriver::new(shared_world(SEED), COMMAND_DEMO_SCRIPT).expect("compile demo");
+    let replayed = a
+        .replay()
+        .playback_verified(
+            &mut fresh,
+            monada_net::map_hash(COMMAND_DEMO_SCRIPT),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("replay identity matches this build");
+    assert_eq!(
+        replayed,
+        a.driver().state_hash(),
+        "replay did not reproduce the lockstep final hash"
+    );
+
+    out
+}
+
 /// Every gated scenario's checkpoints, in a fixed order.
 #[must_use]
 pub fn all_checkpoints() -> Vec<Checkpoint> {
     let mut out = walk_checkpoints();
     out.extend(kernel_checkpoints());
+    out.extend(lockstep_checkpoints());
     out
 }
 
@@ -139,7 +253,8 @@ pub fn render_goldens(checkpoints: &[Checkpoint]) -> String {
     let mut s = String::new();
     s.push_str("# monada determinism goldens — @generated, do not hand-edit.\n");
     s.push_str(
-        "# scenarios: walk (scripted circle), kernel (pure-Rust anchor); seed \"MONADA_0\".\n",
+        "# scenarios: walk (scripted circle), kernel (pure-Rust anchor), \
+         lockstep (two-session command demo); seed \"MONADA_0\".\n",
     );
     s.push_str("# Regenerate with `cargo run -p monada-oracle -- --bless`.\n");
     for c in checkpoints {

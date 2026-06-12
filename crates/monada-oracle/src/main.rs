@@ -33,7 +33,7 @@ fn main() -> ExitCode {
 
     let checkpoints = all_checkpoints();
     println!(
-        "platform: {}-{} | scripted walk + kernel anchor, {} checkpoints",
+        "platform: {}-{} | walk + kernel + lockstep, {} checkpoints",
         std::env::consts::ARCH,
         std::env::consts::OS,
         checkpoints.len()

@@ -40,7 +40,9 @@ jobs:
       # failures: the workspace `disallowed-types` (HashMap/HashSet) and
       # monada-sim's `#![deny(float_arithmetic)]` both gate here, before
       # anything can desync a platform (DESIGN.md §8).
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # `monada-net/quic` is enabled so the QUIC transport (M3 Phase B) is
+      # linted too — it is otherwise feature-gated off.
+      - run: cargo clippy --workspace --all-targets --features monada-net/quic -- -D warnings
 
   test:
     name: cargo test (${{ matrix.os }})
@@ -53,7 +55,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --release
+      # `monada-net/quic` runs the lockstep-over-real-QUIC integration
+      # test (M3 Phase B) on every platform too (loopback UDP).
+      - run: cargo test --workspace --release --features monada-net/quic
 
   determinism:
     name: oracle hash-diff (${{ matrix.os }})

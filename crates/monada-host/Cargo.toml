@@ -19,13 +19,17 @@ monada-sim = { workspace = true }
 monada-script = { workspace = true }
 monada-fixed = { workspace = true }
 monada-render = { workspace = true }
-# Render facade + camera/opticast types. Local path (sibling roxlap)
-# matches monada-render's dependency on the same checkout.
+# Lockstep transport with the QUIC backend (M3 Phase B): the host's
+# `--listen`/`--connect` two-process play.
+monada-net = { workspace = true, features = ["quic"] }
+# Render facade + camera/opticast types. roxlap 0.7.0 from crates.io
+# (temporarily pinned to the published release, matching monada-render,
+# while roxlap master is mid-refactor locally).
 # `hud` enables roxlap's egui overlay (SceneRenderer::paint_egui); the
 # crate re-exports `egui` so we tessellate with the exact version it
 # paints with.
-roxlap-render = { path = "../../../roxlap/crates/roxlap-render", features = ["hud"] }
-roxlap-core = { path = "../../../roxlap/crates/roxlap-core" }
+roxlap-render = { version = "0.7.0", features = ["hud"] }
+roxlap-core = "0.7.0"
 winit = "0.30"
 # egui input/output bridge for winit; egui itself comes via
 # `roxlap_render::egui` so the versions can't drift.
