@@ -88,6 +88,12 @@ fn pointer(button, point, entity) {
         return; // game decided
     }
     let to_move = to_int(entity_field(g, "to_move"));
+    // Networked: this client may only act on its own side. -1 = hotseat
+    // (one window drives both sides), so no gating.
+    let lp = local_player();
+    if lp != -1 && lp != to_move {
+        return;
+    }
     let sx = to_int(point.x);
     let sy = to_int(point.y);
     if sx < 0 || sx > 7 || sy < 0 || sy > 7 {

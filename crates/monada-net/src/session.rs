@@ -19,7 +19,7 @@ use monada_sim::{Command, PlayerId};
 use crate::lockstep::Lockstep;
 use crate::replay::Replay;
 use crate::transport::Transport;
-use crate::wire::{Checksum, InputBundle, NetMessage};
+use crate::wire::{Checksum, NetMessage};
 
 /// What a session needs from the simulation: apply a command, advance one
 /// tick, and produce a canonical state hash. Infallible by design —
@@ -154,6 +154,15 @@ impl<T: Transport, D: SimDriver> LockstepSession<T, D> {
         &self.driver
     }
 
+    /// Mutably borrow the driver for a **non-sim** side effect — e.g. the
+    /// host running a map's pointer-gesture handler, which only touches
+    /// local UI and queues a command (it must not advance the sim or apply
+    /// a command directly; those go through [`step`](Self::step) so they
+    /// stay in lockstep).
+    pub fn driver_mut(&mut self) -> &mut D {
+        &mut self.driver
+    }
+
     /// The recorded replay so far.
     pub fn replay(&self) -> &Replay {
         &self.replay
@@ -236,14 +245,11 @@ impl<T: Transport, D: SimDriver> LockstepSession<T, D> {
             for command in list {
                 self.driver.apply_command(*player, command);
             }
-            // Record the executed stream for the replay (one bundle per
-            // player, in canonical order).
-            self.replay.push(InputBundle {
-                tick: executed,
-                player: *player,
-                commands: list.clone(),
-            });
         }
+        // Record the executed tick for the replay — non-empty bundles only,
+        // plus the tick count so idle ticks are re-run on playback, not
+        // stored.
+        self.replay.record(executed, &commands);
         self.driver.step();
 
         // Periodic desync probe. Solo sessions have nobody to compare

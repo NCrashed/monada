@@ -179,6 +179,13 @@ pub trait HostBridge: Send {
     /// Queue a sim command for the host to route through the command path
     /// after the current trigger returns (never applied re-entrantly).
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3);
+
+    /// The local peer's player id, or `-1` when there is no single local
+    /// player (a single-window "hotseat" session that drives every side).
+    /// A turn-based map gates which side this client may submit for by
+    /// comparing this against its own side-to-move; the engine attaches no
+    /// meaning to it.
+    fn local_player(&self) -> i64;
 }
 
 /// A shared host bridge handle: the host owns the concrete render state
@@ -209,6 +216,9 @@ impl HostBridge for NullBridge {
     fn status(&mut self, _text: &str) {}
     fn camera_focus(&mut self, _point: FixedVec3) {}
     fn submit_command(&mut self, _verb: i64, _target: i64, _arg: FixedVec3) {}
+    fn local_player(&self) -> i64 {
+        -1
+    }
 }
 
 /// A UI/HUD-side event a script pushes via `ui_emit_event` (DESIGN.md

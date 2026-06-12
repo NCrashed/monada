@@ -25,9 +25,11 @@ use std::fmt::Write as _;
 
 use monada_fixed::{Fixed, FixedVec3};
 use monada_net::{LockstepSession, LoopbackTransport, MatchInfo, SessionConfig, SimDriver};
+use std::sync::{Arc, Mutex};
+
 use monada_script::{
-    run_script, shared_world, RhaiBackend, RhaiDriver, ScriptBackend, COMMAND_DEMO_SCRIPT,
-    WALK_CIRCLE_SCRIPT,
+    run_script, shared_world, NullBridge, RhaiBackend, RhaiDriver, ScriptBackend, SharedBridge,
+    SharedWorld, COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId, World};
 
@@ -226,12 +228,89 @@ pub fn lockstep_checkpoints() -> Vec<Checkpoint> {
     out
 }
 
+/// The M4 chess demo map, embedded for the golden (read straight from the
+/// map's script file — the oracle never bundles the archive).
+const CHESS_SCRIPT: &str = include_str!("../../monada-chess/map/scripts/main.rhai");
+/// chess piece archetype (declared first by the map).
+const CHESS_PIECE: ArchetypeId = ArchetypeId(0);
+/// Hash the chess game after this many moves (`chess@0` = post-init).
+const CHESS_CHECKPOINTS: &[usize] = &[0, 8, 16];
+/// A fixed, subset-legal 16-move opening, ending with two knight captures
+/// on e5 — exercises movement, sliding paths, and capture/despawn. Targets
+/// are looked up by square each move (the board is deterministic), so the
+/// sequence is stable across platforms.
+const CHESS_GAME: &[(i32, i32, i32, i32)] = &[
+    (4, 1, 4, 3), // 1. e4
+    (4, 6, 4, 4), // 1... e5
+    (6, 0, 5, 2), // 2. Nf3
+    (1, 7, 2, 5), // 2... Nc6
+    (5, 0, 2, 3), // 3. Bc4
+    (5, 7, 2, 4), // 3... Bc5
+    (3, 1, 3, 2), // 4. d3
+    (3, 6, 3, 5), // 4... d6
+    (1, 0, 2, 2), // 5. Nc3
+    (6, 7, 5, 5), // 5... Nf6
+    (7, 1, 7, 2), // 6. h3
+    (7, 6, 7, 5), // 6... h6
+    (0, 1, 0, 2), // 7. a3
+    (0, 6, 0, 5), // 7... a6
+    (5, 2, 4, 4), // 8. Nxe5  (knight takes the e-pawn)
+    (2, 5, 4, 4), // 8... Nxe5 (recapture)
+];
+
+fn chess_sq(x: i32, y: i32) -> FixedVec3 {
+    FixedVec3::new(Fixed::from_int(x), Fixed::from_int(y), Fixed::ZERO)
+}
+
+fn chess_piece_at(world: &SharedWorld, x: i32, y: i32) -> EntityId {
+    let w = world.lock().expect("world mutex");
+    *w.entities(CHESS_PIECE)
+        .iter()
+        .find(|&&e| w.position(e) == Some(chess_sq(x, y)))
+        .expect("a piece on the source square")
+}
+
+/// The M4 chess golden: a fixed game played through the *map's own script*
+/// (the rules live in `monada-chess`, not here) under a headless
+/// [`NullBridge`], hashed after a few move counts. Gates cross-platform
+/// determinism of the chess ruleset (DESIGN.md §6 oracle row).
+///
+/// # Panics
+/// Panics on a script compile/run failure (a bug, not a data condition).
+#[must_use]
+pub fn chess_checkpoints() -> Vec<Checkpoint> {
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
+    let mut driver =
+        RhaiDriver::with_bridge(shared_world(SEED), CHESS_SCRIPT, &bridge).expect("compile chess");
+
+    let mut out = Vec::new();
+    let mut record = |driver: &RhaiDriver, n: usize| {
+        if CHESS_CHECKPOINTS.contains(&n) {
+            out.push(Checkpoint {
+                scenario: "chess",
+                tick: n as u64,
+                hash: driver.state_hash(),
+            });
+        }
+    };
+
+    record(&driver, 0);
+    for (i, &(fx, fy, tx, ty)) in CHESS_GAME.iter().enumerate() {
+        let e = chess_piece_at(driver.world(), fx, fy);
+        // Colour-enforced: the player id is irrelevant for the golden.
+        driver.apply_command(P0, &Command::on(1, e, chess_sq(tx, ty)));
+        record(&driver, i + 1);
+    }
+    out
+}
+
 /// Every gated scenario's checkpoints, in a fixed order.
 #[must_use]
 pub fn all_checkpoints() -> Vec<Checkpoint> {
     let mut out = walk_checkpoints();
     out.extend(kernel_checkpoints());
     out.extend(lockstep_checkpoints());
+    out.extend(chess_checkpoints());
     out
 }
 

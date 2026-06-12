@@ -18,6 +18,8 @@ path = "src/main.rs"
 # is just: load the bundled `chess.monada` and hand it to the host.
 monada-host = { path = "../monada-host" }
 monada-format = { workspace = true }
+# Decode + verify a `.replay` for the `--replay` viewer.
+monada-net = { workspace = true }
 
 [build-dependencies]
 # build.rs packs `map/` into a deterministic `chess.monada` in OUT_DIR.
@@ -25,11 +27,13 @@ monada-format = { workspace = true }
 
 [dev-dependencies]
 # The rules canary loads the map's script and drives the Rhai backend
-# directly (no host, no window).
+# directly (no host, no window); the lockstep test runs two loopback
+# sessions of the same game (no QUIC — LoopbackTransport).
 monada-format = { workspace = true }
 monada-script = { workspace = true }
 monada-sim = { workspace = true }
 monada-fixed = { workspace = true }
+monada-net = { workspace = true }
 
 [lints]
 workspace = true

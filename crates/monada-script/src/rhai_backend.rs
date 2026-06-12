@@ -31,8 +31,14 @@ const COMMAND_ARITY: usize = 4;
 const POINTER_ARITY: usize = 3;
 /// Arity of the map's `key` trigger: `key(code, down)`.
 const KEY_ARITY: usize = 2;
+/// Arity of the map's `tick` trigger: `tick()`.
+const TICK_ARITY: usize = 0;
 
 /// Rhai-backed scripting runtime over a shared [`World`].
+// The `has_*` handler-presence flags are independent booleans; a flat set
+// is the natural shape (the lint's state-machine suggestion would obscure
+// it).
+#[allow(clippy::struct_excessive_bools)]
 pub struct RhaiBackend {
     engine: Engine,
     ast: Option<AST>,
@@ -45,10 +51,14 @@ pub struct RhaiBackend {
     /// existing handler — that must surface as the bug it is (it could
     /// otherwise desync one peer silently).
     has_command: bool,
-    /// Whether the loaded script defines a `pointer/3` / `key/2` handler
-    /// (decided at [`load`](RhaiBackend::load), like `has_command`).
+    /// Whether the loaded script defines a `pointer/3` / `key/2` / `tick/0`
+    /// handler (decided at [`load`](RhaiBackend::load), like `has_command`).
+    /// A command-driven map (e.g. turn-based chess) has no `tick`, so
+    /// [`on_tick`](RhaiBackend::on_tick) still advances the counter but
+    /// calls nothing.
     has_pointer: bool,
     has_key: bool,
+    has_tick: bool,
     /// UI/HUD events the script emitted via `ui_emit_event`, awaiting a
     /// [`drain_ui_events`](ScriptBackend::drain_ui_events) by the host.
     /// Render-side only — never part of [`World`](monada_sim::World) state.
@@ -77,6 +87,7 @@ impl RhaiBackend {
             has_command: false,
             has_pointer: false,
             has_key: false,
+            has_tick: false,
             events,
         }
     }
@@ -117,6 +128,7 @@ impl ScriptBackend for RhaiBackend {
         self.has_command = defines("command", COMMAND_ARITY);
         self.has_pointer = defines("pointer", POINTER_ARITY);
         self.has_key = defines("key", KEY_ARITY);
+        self.has_tick = defines("tick", TICK_ARITY);
         self.ast = Some(ast);
         Ok(())
     }
@@ -151,10 +163,15 @@ impl ScriptBackend for RhaiBackend {
     }
 
     fn on_tick(&mut self) -> Result<(), ScriptError> {
-        // The driver owns the tick counter; the script only mutates
-        // entity state via the host API.
+        // The driver owns the tick counter; the script only mutates entity
+        // state via the host API. A command-driven map (no `tick` handler)
+        // still advances the counter — it just runs no per-tick logic.
         self.world.lock().expect("world mutex").tick += 1;
-        self.call("tick")
+        if self.has_tick {
+            self.call("tick")
+        } else {
+            Ok(())
+        }
     }
 
     fn on_pointer(
@@ -423,4 +440,9 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
                 .submit_command(verb, target, arg);
         },
     );
+
+    let b = bridge.clone();
+    engine.register_fn("local_player", move || -> i64 {
+        b.lock().expect("bridge mutex").local_player()
+    });
 }

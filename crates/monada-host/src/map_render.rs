@@ -88,6 +88,9 @@ pub struct MapRender {
     pending: Vec<Command>,
     /// The map's `assets/` (for `model_kv6` path resolution).
     assets: BTreeMap<String, Vec<u8>>,
+    /// The local peer's player id (`-1` = hotseat / all sides), exposed to
+    /// the map via `local_player()` for turn gating.
+    local_player: i64,
 }
 
 impl MapRender {
@@ -95,7 +98,7 @@ impl MapRender {
     /// marker model. (Identity grid so the GPU sprite pass projects the
     /// world camera correctly — see `monada_render`'s circle ground.)
     #[must_use]
-    pub fn new(assets: BTreeMap<String, Vec<u8>>) -> MapRender {
+    pub fn new(assets: BTreeMap<String, Vec<u8>>, local_player: i64) -> MapRender {
         let mut scene = Scene::new();
         let grid = scene.add_grid(GridTransform::identity());
         // Model 0: a flat amber tile the size of one cell — highlights the
@@ -117,6 +120,7 @@ impl MapRender {
             camera: OrbitCamera::framing(DVec3::new(0.0, 0.0, GROUND_Z)),
             pending: Vec::new(),
             assets,
+            local_player,
         }
     }
 
@@ -284,5 +288,9 @@ impl HostBridge for MapRender {
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3) {
         self.pending
             .push(Command::on(verb as u32, EntityId(target as u64), arg));
+    }
+
+    fn local_player(&self) -> i64 {
+        self.local_player
     }
 }

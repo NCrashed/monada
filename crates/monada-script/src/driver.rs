@@ -12,10 +12,11 @@
 //! - `step` → the map's `tick` trigger (via `on_tick`),
 //! - `state_hash` → the world's canonical [`state_hash`](monada_sim::World::state_hash).
 
+use monada_fixed::FixedVec3;
 use monada_net::SimDriver;
 use monada_sim::{Command, PlayerId};
 
-use crate::{RhaiBackend, ScriptBackend, ScriptError, SharedWorld};
+use crate::{RhaiBackend, ScriptBackend, ScriptError, SharedBridge, SharedWorld};
 
 /// A lockstep [`SimDriver`] backed by a compiled Rhai map.
 pub struct RhaiDriver {
@@ -36,11 +37,45 @@ impl RhaiDriver {
         Ok(RhaiDriver { backend, world })
     }
 
+    /// Like [`new`](RhaiDriver::new) but with a host [`HostBridge`](crate::HostBridge)
+    /// set **before** `init` — required for maps whose `init` calls the
+    /// render/input host-API (defining models, painting the board). Headless
+    /// callers (oracle, net tests) pass a `NullBridge`.
+    ///
+    /// # Errors
+    /// Propagates a compile or `init`-time [`ScriptError`].
+    pub fn with_bridge(
+        world: SharedWorld,
+        source: &str,
+        bridge: &SharedBridge,
+    ) -> Result<RhaiDriver, ScriptError> {
+        let mut backend = RhaiBackend::new(world.clone());
+        backend.set_bridge(bridge);
+        backend.load(source)?;
+        backend.on_init()?;
+        Ok(RhaiDriver { backend, world })
+    }
+
     /// The shared world this driver mutates (e.g. for the render bridge to
     /// read positions between ticks).
     #[must_use]
     pub fn world(&self) -> &SharedWorld {
         &self.world
+    }
+
+    /// Forward a pointer event to the map's `pointer` trigger (the host's
+    /// click FSM for a networked map). Commands the gesture queues are
+    /// drained from the bridge by the host, not applied here.
+    ///
+    /// # Errors
+    /// Propagates a [`ScriptError`] the handler raises.
+    pub fn on_pointer(
+        &mut self,
+        button: i64,
+        point: FixedVec3,
+        entity: i64,
+    ) -> Result<(), ScriptError> {
+        self.backend.on_pointer(button, point, entity)
     }
 }
 

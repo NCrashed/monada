@@ -33,14 +33,15 @@
 // the sim/net crates' stance).
 #![allow(clippy::doc_markdown)]
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use glam::DVec3;
 use monada_fixed::{Fixed, FixedVec3};
-use monada_format::Map;
-use monada_net::{LockstepSession, MatchInfo, QuicTransport, SessionConfig};
+use monada_format::{Map, SimHz};
+use monada_net::{LockstepSession, MatchInfo, QuicTransport, Replay, SessionConfig, SimDriver};
 use monada_render::CircleScene;
 use monada_script::{
     shared_world, RhaiBackend, RhaiDriver, ScriptBackend, SharedBridge, SharedWorld,
@@ -109,11 +110,16 @@ pub struct MapRun {
 pub enum RunConfig {
     /// The M1 walk-in-a-circle sim, single instance.
     Local,
-    /// A two-process lockstep match (`--listen` / `--connect`).
+    /// A two-process lockstep match of the `command_demo` map (M3).
     Net(NetRole),
-    /// A scripted map loaded from an archive, local hotseat. Command-
-    /// driven, no wall-clock tick.
-    Map(MapRun),
+    /// A scripted map loaded from an archive. `net` = `None` is a local
+    /// hotseat (one window, both sides); `Some(role)` is a two-process
+    /// lockstep match over QUIC, each peer playing its own side.
+    Map { run: MapRun, net: Option<NetRole> },
+    /// Watch a recorded `.replay` against its map: the input stream is
+    /// re-applied on a timer and rendered (DESIGN.md §3.1). The caller has
+    /// already verified the replay's map hash + engine version.
+    Replay { run: MapRun, replay: Replay },
 }
 
 /// Run the host event loop for `config` (blocks until the window closes).
@@ -131,9 +137,16 @@ pub fn run(config: RunConfig) {
         RunConfig::Net(_) => {
             eprintln!("monada-host: networked — arrows orbit, W/S zoom, click spawns, Esc quits");
         }
-        RunConfig::Map(run) => {
+        RunConfig::Map { run, net } => {
+            let how = if net.is_some() { "LAN" } else { "local" };
             eprintln!(
-                "monada-host: {} — arrows orbit, W/S zoom, click to interact, Esc quits",
+                "monada-host: {} ({how}) — arrows orbit, W/S zoom, click to interact, Esc quits",
+                run.map.manifest.name
+            );
+        }
+        RunConfig::Replay { run, .. } => {
+            eprintln!(
+                "monada-host: replaying {} — arrows orbit, W/S zoom, [ ] speed, Space pause, Esc quits",
                 run.map.manifest.name
             );
         }
@@ -208,8 +221,133 @@ impl MapSim {
     }
 }
 
+/// A networked scripted-map match: two processes over QUIC lockstep, each
+/// peer playing its own side. Like [`MapSim`], but a move command — instead
+/// of applying locally — is routed through the [`LockstepSession`] so both
+/// peers re-derive identical state from the shared input stream.
+struct NetMapSim {
+    session: LockstepSession<QuicTransport, RhaiDriver>,
+    render: Arc<Mutex<MapRender>>,
+    local: PlayerId,
+    /// Local commands queued by clicks; submitted on the next ready tick.
+    pending: Vec<Command>,
+    halted: bool,
+    replay_path: String,
+    saved: bool,
+}
+
+impl NetMapSim {
+    /// Run the map's pointer gesture on the live networked world. The
+    /// command it queues is routed through the session (`pending` → `step`),
+    /// not applied locally — both peers apply it in lockstep. The script's
+    /// `local_player()` gating means only the side-to-move client submits.
+    fn pointer(&mut self, button: i64, origin: DVec3, dir: DVec3) {
+        let world = self.session.driver().world().clone();
+        let (point, entity) = {
+            let r = self.render.lock().expect("render mutex");
+            let w = world.lock().expect("world mutex");
+            r.pick(&w, origin, dir)
+        };
+        self.session
+            .driver_mut()
+            .on_pointer(button, point, entity)
+            .expect("map pointer handler");
+        let commands = self.render.lock().expect("render mutex").drain_commands();
+        self.pending.extend(commands);
+    }
+
+    /// Advance the lockstep sim: execute every tick whose inputs have
+    /// arrived, handing queued local commands to `step` (buffered, never
+    /// dropped). Mirrors the M3 networked advance.
+    fn advance(&mut self) {
+        let mut budget = MAX_CATCHUP_TICKS_PER_FRAME;
+        while !self.halted && budget > 0 {
+            let cmds = std::mem::take(&mut self.pending);
+            match self.session.step(cmds) {
+                Ok(true) => budget -= 1,
+                Ok(false) => break,
+                Err(desync) => {
+                    eprintln!("monada-host: {desync} — halting");
+                    self.halted = true;
+                }
+            }
+        }
+    }
+}
+
+/// Default pace for a **command-driven** map's replay: seconds per move
+/// (idle ticks between moves are re-run instantly). Fixed-Hz maps pace at
+/// `1/hz` per tick instead.
+const REPLAY_MOVE_DT: f64 = 0.7;
+
+/// Recorded commands by execution tick (sparse — only ticks that had
+/// input; idle ticks are re-run, not stored).
+type ReplayByTick = BTreeMap<u64, Vec<(PlayerId, Vec<Command>)>>;
+
+/// Watching a recorded `.replay`: every executed tick `0..total` is re-run
+/// on a fresh driver (applying recorded commands at their ticks), then
+/// rendered. Paced by the map's `sim_hz` — `1/hz` per tick for a fixed-rate
+/// map, or one move per [`REPLAY_MOVE_DT`] for a command-driven one (idle
+/// ticks free). No interaction; no network.
+struct ReplaySim {
+    driver: RhaiDriver,
+    render: Arc<Mutex<MapRender>>,
+    by_tick: ReplayByTick,
+    /// Total executed ticks to re-run.
+    total: u64,
+    /// Next tick to execute.
+    cursor: u64,
+    /// Seconds per paced unit (per move if `command_driven`, else per tick).
+    step_dt: f64,
+    /// Command-driven map: idle ticks cost no time; only moves are paced.
+    command_driven: bool,
+    /// Playback speed multiplier (adjusted with the `[` / `]` keys).
+    speed: f64,
+    paused: bool,
+    /// Real seconds accumulated toward the next paced step.
+    elapsed: f64,
+}
+
+impl ReplaySim {
+    /// Re-run recorded ticks as real time passes. Idle ticks of a command-
+    /// driven map advance for free; paced ticks/moves wait `step_dt/speed`.
+    fn advance(&mut self, dt: f64) {
+        if self.paused || self.cursor >= self.total {
+            return;
+        }
+        self.elapsed += dt * self.speed;
+        while self.cursor < self.total {
+            let has_cmd = self.by_tick.contains_key(&self.cursor);
+            let cost = if self.command_driven && !has_cmd {
+                0.0
+            } else {
+                self.step_dt
+            };
+            if self.elapsed < cost {
+                break;
+            }
+            self.elapsed -= cost;
+            if let Some(cmds) = self.by_tick.get(&self.cursor) {
+                for (player, list) in cmds {
+                    for command in list {
+                        self.driver.apply_command(*player, command);
+                    }
+                }
+            }
+            self.driver.step();
+            self.cursor += 1;
+        }
+    }
+
+    /// Multiply the playback speed, clamped to a sane range.
+    fn scale_speed(&mut self, factor: f64) {
+        self.speed = (self.speed * factor).clamp(0.125, 16.0);
+    }
+}
+
 /// The simulation behind the render bridge: local single-instance, a
-/// networked lockstep session, or a local scripted map.
+/// networked lockstep session, a local / networked scripted map, or a
+/// replay being watched.
 enum Sim {
     Local {
         world: SharedWorld,
@@ -220,6 +358,8 @@ enum Sim {
     },
     Net(Box<Net>),
     Map(Box<MapSim>),
+    NetMap(Box<NetMapSim>),
+    Replay(Box<ReplaySim>),
 }
 
 impl Sim {
@@ -229,6 +369,8 @@ impl Sim {
             Sim::Local { world, .. } => world.lock().expect("world mutex").tick,
             Sim::Net(net) => net.session.tick(),
             Sim::Map(map) => map.world.lock().expect("world mutex").tick,
+            Sim::NetMap(nm) => nm.session.tick(),
+            Sim::Replay(r) => r.driver.world().lock().expect("world mutex").tick,
         }
     }
 
@@ -238,17 +380,19 @@ impl Sim {
             Sim::Local { world, .. } => world.clone(),
             Sim::Net(net) => net.session.driver().world().clone(),
             Sim::Map(map) => map.world.clone(),
+            Sim::NetMap(nm) => nm.session.driver().world().clone(),
+            Sim::Replay(r) => r.driver.world().clone(),
         }
     }
 
     /// Snapshot the rendered archetype's positions (circle/net movers).
-    /// The map path renders generically from `MapRender`, so it needs no
+    /// The map paths render generically from `MapRender`, so they need no
     /// position snapshot here.
     fn positions(&self) -> Vec<FixedVec3> {
         let arch = match self {
             Sim::Local { .. } => MOVER,
             Sim::Net(_) => UNIT,
-            Sim::Map(_) => return Vec::new(),
+            Sim::Map(_) | Sim::NetMap(_) | Sim::Replay(_) => return Vec::new(),
         };
         let world = self.world();
         let guard = world.lock().expect("world mutex");
@@ -330,12 +474,19 @@ impl App {
         let sim = match config {
             RunConfig::Local => Self::new_local(),
             RunConfig::Net(role) => Self::new_net(&role),
-            RunConfig::Map(run) => Self::new_map(run),
+            RunConfig::Map { run, net: None } => Self::new_map(run),
+            RunConfig::Map {
+                run,
+                net: Some(role),
+            } => Self::new_net_map(run, &role),
+            RunConfig::Replay { run, replay } => Self::new_replay(run, &replay),
         };
         let curr_pos = sim.positions();
         let scene = match &sim {
-            // The map scene shares the render bridge the script writes to.
+            // The map scenes share the render bridge the script writes to.
             Sim::Map(map) => SceneKind::Map(map.render.clone()),
+            Sim::NetMap(nm) => SceneKind::Map(nm.render.clone()),
+            Sim::Replay(r) => SceneKind::Map(r.render.clone()),
             _ => SceneKind::Circle(CircleScene::new(curr_pos.len())),
         };
         App {
@@ -427,7 +578,9 @@ impl App {
             .entry_script()
             .expect("map declares an entry script")
             .to_string();
-        let render = Arc::new(Mutex::new(MapRender::new(run.map.assets)));
+        // Hotseat: one window drives every side, so there is no single
+        // local player (-1) — the script enforces turns by piece colour.
+        let render = Arc::new(Mutex::new(MapRender::new(run.map.assets, -1)));
         // Bridge must be set before `init` calls model_box / voxel_fill / …
         let bridge: SharedBridge = render.clone();
         backend.set_bridge(&bridge);
@@ -438,6 +591,118 @@ impl App {
             world,
             backend: Box::new(backend),
             render,
+        }))
+    }
+
+    /// Build a networked scripted-map match: connect over QUIC, then run
+    /// the same map as the hotseat but route moves through a lockstep
+    /// session. Each peer is a fixed player id (`listen` = 0, `connect` =
+    /// 1); the map's `local_player()` gating ties that to the side it may
+    /// move. The map identity is the archive's SHA-256.
+    fn new_net_map(run: MapRun, role: &NetRole) -> Sim {
+        let (transport, local, tag) = match *role {
+            NetRole::Listen(addr) => {
+                eprintln!("monada-host: listening on {addr} — waiting for a peer…");
+                let t = QuicTransport::listen(addr).expect("quic listen");
+                (t, PlayerId(0), "host")
+            }
+            NetRole::Connect(addr) => {
+                eprintln!("monada-host: connecting to {addr}…");
+                let t = QuicTransport::connect(addr).expect("quic connect");
+                (t, PlayerId(1), "client")
+            }
+        };
+        eprintln!("monada-host: peer connected — player {}", local.0);
+
+        let script = run
+            .map
+            .entry_script()
+            .expect("map declares an entry script")
+            .to_string();
+        // This peer plays the side matching its player id; the script gates
+        // off-turn input on `local_player()`.
+        let render = Arc::new(Mutex::new(MapRender::new(
+            run.map.assets,
+            i64::from(local.0),
+        )));
+        let bridge: SharedBridge = render.clone();
+        let driver = RhaiDriver::with_bridge(shared_world(SEED), &script, &bridge)
+            .expect("compile map script");
+        let info = MatchInfo {
+            seed: SEED,
+            map_hash: run.map.hash,
+            engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let session = LockstepSession::new(
+            driver,
+            transport,
+            local,
+            &[PlayerId(0), PlayerId(1)],
+            SessionConfig::default(),
+            info,
+        );
+        Sim::NetMap(Box::new(NetMapSim {
+            session,
+            render,
+            local,
+            pending: Vec::new(),
+            halted: false,
+            replay_path: format!("monada-{tag}.replay"),
+            saved: false,
+        }))
+    }
+
+    /// Build a replay viewer: a fresh driver seeded from the replay, the
+    /// recorded input stream grouped by tick for paced re-application, and a
+    /// render bridge to draw it. The caller has already verified the
+    /// replay's map hash + engine version against `run`.
+    fn new_replay(run: MapRun, replay: &Replay) -> Sim {
+        let script = run
+            .map
+            .entry_script()
+            .expect("map declares an entry script")
+            .to_string();
+        // Pace from the map's declared tick model: a fixed-Hz map replays at
+        // its real rate (1/hz per tick); a command-driven map replays one
+        // move at a time (idle ticks re-run instantly).
+        let (command_driven, step_dt) = match run.map.manifest.sim_hz {
+            SimHz::OnCommand => (true, REPLAY_MOVE_DT),
+            SimHz::Fixed(hz) => (false, 1.0 / f64::from(hz.max(1))),
+        };
+        let render = Arc::new(Mutex::new(MapRender::new(run.map.assets, -1)));
+        let bridge: SharedBridge = render.clone();
+        let driver = RhaiDriver::with_bridge(shared_world(replay.seed), &script, &bridge)
+            .expect("compile map script");
+
+        // Group recorded (non-empty) frames by tick, then canonical player
+        // order — the same order live execution used.
+        let mut by_tick: ReplayByTick = BTreeMap::new();
+        for frame in &replay.frames {
+            by_tick
+                .entry(frame.tick)
+                .or_default()
+                .push((frame.player, frame.commands.clone()));
+        }
+        for players in by_tick.values_mut() {
+            players.sort_by_key(|(p, _)| *p);
+        }
+        eprintln!(
+            "monada-host: replaying {} ticks ({} with input)",
+            replay.ticks,
+            replay.frames.len()
+        );
+
+        Sim::Replay(Box::new(ReplaySim {
+            driver,
+            render,
+            by_tick,
+            total: replay.ticks,
+            cursor: 0,
+            step_dt,
+            command_driven,
+            speed: 1.0,
+            paused: false,
+            elapsed: 0.0,
         }))
     }
 
@@ -472,7 +737,38 @@ impl App {
                     .expect("render mutex")
                     .status_text()
                     .to_string(),
+                net: None,
             },
+            Sim::NetMap(nm) => HudState::Map {
+                status: nm
+                    .render
+                    .lock()
+                    .expect("render mutex")
+                    .status_text()
+                    .to_string(),
+                net: Some(MapNet {
+                    player: nm.local.0,
+                    halted: nm.halted,
+                    connected: nm.session.connected(),
+                }),
+            },
+            Sim::Replay(r) => {
+                let status = r
+                    .render
+                    .lock()
+                    .expect("render mutex")
+                    .status_text()
+                    .to_string();
+                let pace = if r.paused {
+                    "paused".to_string()
+                } else {
+                    format!("{:.2}x", r.speed)
+                };
+                HudState::Map {
+                    status: format!("{status} · replay {}/{} · {pace}", r.cursor, r.total),
+                    net: None,
+                }
+            }
         };
         let ctx = &self.egui_ctx;
         let state = self.egui_state.as_mut()?;
@@ -516,8 +812,38 @@ impl App {
             (Sim::Map(map), SceneKind::Map(_)) => {
                 map.pointer(/* left button */ 0, ray.origin, ray.dir);
             }
+            (Sim::NetMap(nm), SceneKind::Map(_)) => {
+                nm.pointer(/* left button */ 0, ray.origin, ray.dir);
+            }
             // sim / scene flavours are constructed together, so the
             // mixed pairs never occur.
+            _ => {}
+        }
+    }
+
+    /// Refresh the render scene from the current sim: the circle/net scene
+    /// interpolates mover positions; the map scenes (local / networked /
+    /// replay) rebuild sprites from the live world + the script's model
+    /// bindings.
+    fn update_scene(&mut self, alpha: f64) {
+        match (&self.sim, &mut self.scene) {
+            (Sim::Map(map), SceneKind::Map(render)) => {
+                let world = map.world.lock().expect("world mutex");
+                render.lock().expect("render mutex").build_instances(&world);
+            }
+            (Sim::NetMap(nm), SceneKind::Map(render)) => {
+                let world = nm.session.driver().world().clone();
+                let guard = world.lock().expect("world mutex");
+                render.lock().expect("render mutex").build_instances(&guard);
+            }
+            (Sim::Replay(r), SceneKind::Map(render)) => {
+                let world = r.driver.world().clone();
+                let guard = world.lock().expect("world mutex");
+                render.lock().expect("render mutex").build_instances(&guard);
+            }
+            (_, SceneKind::Circle(scene)) => {
+                scene.update(&self.prev_pos, &self.curr_pos, alpha);
+            }
             _ => {}
         }
     }
@@ -590,26 +916,24 @@ impl App {
         self.prev_pos.clone_from(&self.curr_pos);
     }
 
-    /// Write the networked match's replay to disk (once), on exit.
+    /// Write a networked match's replay to disk (once), on exit — both the
+    /// `command_demo` net mode and a networked map.
     fn save_replay(&mut self) {
-        let Sim::Net(net) = &mut self.sim else {
-            return;
+        let (replay, path, saved) = match &mut self.sim {
+            Sim::Net(net) => (net.session.replay(), &net.replay_path, &mut net.saved),
+            Sim::NetMap(nm) => (nm.session.replay(), &nm.replay_path, &mut nm.saved),
+            _ => return,
         };
-        if net.saved {
+        if *saved {
             return;
         }
-        net.saved = true;
-        match net.session.replay().encode() {
-            Ok(bytes) => {
-                let ticks = net.session.replay().frames.len();
-                match std::fs::write(&net.replay_path, bytes) {
-                    Ok(()) => eprintln!(
-                        "monada-host: wrote {} ({ticks} input frames)",
-                        net.replay_path
-                    ),
-                    Err(e) => eprintln!("monada-host: failed to write replay: {e}"),
-                }
-            }
+        *saved = true;
+        let ticks = replay.frames.len();
+        match replay.encode() {
+            Ok(bytes) => match std::fs::write(path, bytes) {
+                Ok(()) => eprintln!("monada-host: wrote {path} ({ticks} input frames)"),
+                Err(e) => eprintln!("monada-host: failed to write replay: {e}"),
+            },
             Err(e) => eprintln!("monada-host: replay encode failed: {e}"),
         }
     }
@@ -634,29 +958,25 @@ impl App {
         // Advance the sim and compute the render blend factor. A map is
         // command-driven — no wall-clock tick — so it just snaps to the
         // current world.
-        let alpha = match &self.sim {
+        let alpha = match &mut self.sim {
             Sim::Local { .. } => self.advance_local(dt),
             Sim::Net(_) => {
                 self.advance_net();
                 1.0
             }
             Sim::Map(_) => 1.0,
+            Sim::NetMap(nm) => {
+                nm.advance();
+                1.0
+            }
+            Sim::Replay(r) => {
+                r.advance(dt);
+                1.0
+            }
         };
 
         self.drive_camera(dt);
-        // Mode-specific scene update: the circle/net scene interpolates
-        // mover positions; the map scene rebuilds sprites from the live
-        // world + the script's model bindings.
-        match (&self.sim, &mut self.scene) {
-            (Sim::Map(map), SceneKind::Map(render)) => {
-                let world = map.world.lock().expect("world mutex");
-                render.lock().expect("render mutex").build_instances(&world);
-            }
-            (_, SceneKind::Circle(scene)) => {
-                scene.update(&self.prev_pos, &self.curr_pos, alpha);
-            }
-            _ => {}
-        }
+        self.update_scene(alpha);
 
         if !self.debug_done && std::env::var_os("MONADA_DEBUG").is_some() {
             self.debug_done = true;
@@ -820,16 +1140,25 @@ struct NetHud {
     connected: bool,
 }
 
+/// Lockstep status for a networked map (the connection line).
+struct MapNet {
+    player: u32,
+    halted: bool,
+    connected: bool,
+}
+
 /// Per-mode HUD state passed to [`build_hud`].
 enum HudState {
     Local {
         selected: Option<usize>,
     },
     Net(NetHud),
-    /// A scripted map: just the status line the map set via `status(...)`.
-    /// The host attaches no meaning to it.
+    /// A scripted map: the status line the map set via `status(...)` (the
+    /// host attaches no meaning to it), plus the lockstep line when
+    /// networked.
     Map {
         status: String,
+        net: Option<MapNet>,
     },
 }
 
@@ -867,8 +1196,17 @@ fn build_hud(ctx: &egui::Context, tick: u64, fps: f32, hud: &HudState) {
                 }
                 // The host shows the map's status verbatim — it has no idea
                 // what game the string describes.
-                HudState::Map { status } => {
+                HudState::Map { status, net } => {
                     ui.label(status);
+                    if let Some(net) = net {
+                        if net.halted {
+                            ui.colored_label(egui::Color32::RED, "DESYNC — halted");
+                        } else if net.connected {
+                            ui.label(format!("player {} · lockstep in sync", net.player));
+                        } else {
+                            ui.colored_label(egui::Color32::RED, "peer lost — no reconnect");
+                        }
+                    }
                     ui.separator();
                     ui.label("arrows orbit · W/S zoom · Esc quit");
                 }
@@ -890,7 +1228,18 @@ impl App {
             KeyCode::ArrowDown => self.keys.pitch_down = down,
             KeyCode::KeyW => self.keys.zoom_in = down,
             KeyCode::KeyS => self.keys.zoom_out = down,
+            // Replay transport: `[` slower, `]` faster, Space pause.
+            KeyCode::BracketLeft if down => self.replay_control(|r| r.scale_speed(0.5)),
+            KeyCode::BracketRight if down => self.replay_control(|r| r.scale_speed(2.0)),
+            KeyCode::Space if down => self.replay_control(|r| r.paused = !r.paused),
             _ => {}
+        }
+    }
+
+    /// Apply a transport control to the replay sim, if one is running.
+    fn replay_control(&mut self, f: impl FnOnce(&mut ReplaySim)) {
+        if let Sim::Replay(r) = &mut self.sim {
+            f(r);
         }
     }
 }

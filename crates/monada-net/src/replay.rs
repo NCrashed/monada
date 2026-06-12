@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use std::fmt;
 
-use monada_sim::PlayerId;
+use monada_sim::{Command, PlayerId};
 use serde::{Deserialize, Serialize};
 
 use crate::session::SimDriver;
@@ -35,8 +35,13 @@ pub struct Replay {
     /// Command delay the match ran with (metadata; playback does not need
     /// it since recorded bundles are already at their execution ticks).
     pub command_delay: u64,
-    /// Executed input bundles, in execution order (per tick, sorted by
-    /// player).
+    /// Total ticks executed. Playback steps the sim this many times, so a
+    /// per-tick sim reproduces exactly even though only **command-bearing**
+    /// ticks are stored in `frames` — the empty ticks between moves are
+    /// re-run, not recorded (DESIGN.md §3.1).
+    pub ticks: u64,
+    /// Executed **non-empty** input bundles, in execution order (per tick,
+    /// sorted by player). Idle ticks are not stored.
     pub frames: Vec<InputBundle>,
 }
 
@@ -54,14 +59,25 @@ impl Replay {
             map_hash,
             engine_version,
             command_delay,
+            ticks: 0,
             frames: Vec::new(),
         }
     }
 
-    /// Append one executed bundle (called by the session as each tick
-    /// runs).
-    pub fn push(&mut self, frame: InputBundle) {
-        self.frames.push(frame);
+    /// Record one executed tick: store each player's **non-empty** command
+    /// bundle (idle ticks add nothing but the tick count). Called by the
+    /// session after it executes a tick.
+    pub fn record(&mut self, executed: u64, commands: &[(PlayerId, Vec<Command>)]) {
+        for (player, list) in commands {
+            if !list.is_empty() {
+                self.frames.push(InputBundle {
+                    tick: executed,
+                    player: *player,
+                    commands: list.clone(),
+                });
+            }
+        }
+        self.ticks = executed + 1;
     }
 
     /// Verify the replay's identity against the current build, then play
@@ -101,9 +117,11 @@ impl Replay {
     /// [`playback_verified`](Replay::playback_verified) for loading a
     /// replay from an untrusted source.
     ///
-    /// Frames are grouped by tick and applied in the canonical
-    /// sorted-by-[`PlayerId`] order — identical to live execution — so
-    /// the result is bit-exact with the original run.
+    /// Steps the sim for **every** executed tick `0..ticks`, applying the
+    /// recorded command bundles (in canonical sorted-by-[`PlayerId`] order)
+    /// at the ticks that have them and re-running the idle ticks in
+    /// between — identical to live execution, so the result is bit-exact
+    /// with the original run.
     pub fn playback<D: SimDriver>(&self, driver: &mut D) -> u64 {
         let mut by_tick: BTreeMap<u64, BTreeMap<PlayerId, &InputBundle>> = BTreeMap::new();
         for frame in &self.frames {
@@ -112,10 +130,12 @@ impl Replay {
                 .or_default()
                 .insert(frame.player, frame);
         }
-        for (_tick, players) in by_tick {
-            for (&player, frame) in &players {
-                for command in &frame.commands {
-                    driver.apply_command(player, command);
+        for tick in 0..self.ticks {
+            if let Some(players) = by_tick.get(&tick) {
+                for (&player, frame) in players {
+                    for command in &frame.commands {
+                        driver.apply_command(player, command);
+                    }
                 }
             }
             driver.step();
