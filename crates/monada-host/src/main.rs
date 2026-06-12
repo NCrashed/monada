@@ -19,8 +19,16 @@
 //! Controls: arrow keys orbit (yaw/pitch), `W`/`S` zoom, `Esc` quits.
 
 // Host-side float casts (FPS readout, scale factor) are render-side and
-// deliberate; the deterministic wall is in monada-sim, not here.
-#![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+// deliberate; the deterministic wall is in monada-sim, not here. The
+// sign-loss / wrap casts are reading small non-negative sim fields
+// (board coords 0..7, piece kind/colour, side ids) back out for the HUD
+// and renderer — never onto the deterministic path.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
 // Prose acronyms in docs (`QUIC`, `HUD`) read worse backticked (matches
 // the sim/net crates' stance).
 #![allow(clippy::doc_markdown)]
@@ -29,19 +37,22 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use glam::DVec3;
 use monada_fixed::{Fixed, FixedVec3};
 use monada_net::{LockstepSession, MatchInfo, QuicTransport, SessionConfig};
-use monada_render::CircleScene;
+use monada_render::{ChessScene, CircleScene, PieceView};
 use monada_script::{
-    shared_world, RhaiBackend, RhaiDriver, ScriptBackend, SharedWorld, COMMAND_DEMO_SCRIPT,
-    WALK_CIRCLE_SCRIPT,
+    shared_world, RhaiBackend, RhaiDriver, ScriptBackend, SharedWorld, UiEvent, CHESS_SCRIPT,
+    COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
 };
-use monada_sim::{ArchetypeId, Command, PlayerId};
+use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
+use roxlap_core::Camera;
 // egui itself comes through roxlap-render's re-export so the version
 // matches the one `paint_egui` rasterises with.
-use roxlap_render::{egui, FrameParams, RenderOptions, SceneRenderer};
+use roxlap_render::{egui, FrameParams, RenderOptions, SceneRenderer, SpriteSet};
+use roxlap_scene::Scene;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
@@ -59,6 +70,10 @@ const MOVER: ArchetypeId = ArchetypeId(0);
 const UNIT: ArchetypeId = ArchetypeId(0);
 /// `command_demo` verb: spawn a unit at the command's point.
 const SPAWN_VERB: u32 = 1;
+/// The chess map declares its piece archetype first, so its id is 0.
+const PIECE: ArchetypeId = ArchetypeId(0);
+/// chess verb: move piece `target` to `arg` (the destination square).
+const MOVE_VERB: u32 = 1;
 /// Packed `0x00RRGGBB` sky / clear colour.
 const SKY_COLOR: u32 = 0x0099_B3D9;
 
@@ -109,18 +124,47 @@ fn parse_net_role() -> Option<NetRole> {
     None
 }
 
+/// What the host runs this session.
+enum Mode {
+    /// The M1 walk-in-a-circle sim, single instance (no args).
+    Local,
+    /// A two-process lockstep match (`--listen` / `--connect`).
+    Net(NetRole),
+    /// The M4 chess demo, local hotseat (`--chess`). Command-driven, no
+    /// wall-clock tick; both sides play at one window until the archive +
+    /// network path lands (slice 2/3).
+    Chess,
+}
+
+/// `--chess` wins if present; otherwise `--listen`/`--connect` select a
+/// networked match, and the absence of any flag is local play.
+fn parse_mode() -> Mode {
+    if std::env::args().skip(1).any(|a| a == "--chess") {
+        return Mode::Chess;
+    }
+    match parse_net_role() {
+        Some(role) => Mode::Net(role),
+        None => Mode::Local,
+    }
+}
+
 fn main() {
-    let role = parse_net_role();
+    let mode = parse_mode();
     let event_loop = EventLoop::new().expect("winit: EventLoop::new");
     // Animate continuously: poll, don't wait for input.
     event_loop.set_control_flow(ControlFlow::Poll);
-    match role {
-        Some(_) => {
+    match mode {
+        Mode::Net(_) => {
             eprintln!("monada-host: networked — arrows orbit, W/S zoom, click spawns, Esc quits");
         }
-        None => eprintln!("monada-host: local — arrows orbit, W/S zoom, click picks, Esc quits"),
+        Mode::Chess => {
+            eprintln!("monada-host: chess — arrows orbit, W/S zoom, click a piece then a square, Esc quits");
+        }
+        Mode::Local => {
+            eprintln!("monada-host: local — arrows orbit, W/S zoom, click picks, Esc quits");
+        }
     }
-    let mut app = App::new(role);
+    let mut app = App::new(mode);
     event_loop.run_app(&mut app).expect("winit: run_app");
 }
 
@@ -151,8 +195,27 @@ struct Net {
     saved: bool,
 }
 
-/// The simulation behind the render bridge: local single-instance or a
-/// networked lockstep session.
+/// A local chess match (hotseat). Authoritative game state lives in the
+/// `World` (the script's `game` singleton); the host mirrors only what
+/// the script *tells* it through `ui_emit_event` — it never reads the
+/// game entity's fields directly.
+struct Chess {
+    world: SharedWorld,
+    backend: Box<RhaiBackend>,
+    /// Side to move, mirrored from the script's `turn_changed` events.
+    to_move: u32,
+    /// Set once a `game_over` event arrives; further clicks are ignored.
+    winner: Option<u32>,
+    /// The piece picked by the first click, awaiting a destination click.
+    selected: Option<EntityId>,
+    /// Half-moves played (for the HUD).
+    moves: u32,
+    /// Last HUD line, set from the most recent UI event.
+    status: String,
+}
+
+/// The simulation behind the render bridge: local single-instance, a
+/// networked lockstep session, or a local chess match.
 enum Sim {
     Local {
         world: SharedWorld,
@@ -162,6 +225,7 @@ enum Sim {
         backend: Box<RhaiBackend>,
     },
     Net(Box<Net>),
+    Chess(Box<Chess>),
 }
 
 impl Sim {
@@ -170,6 +234,7 @@ impl Sim {
         match self {
             Sim::Local { world, .. } => world.lock().expect("world mutex").tick,
             Sim::Net(net) => net.session.tick(),
+            Sim::Chess(chess) => chess.world.lock().expect("world mutex").tick,
         }
     }
 
@@ -178,6 +243,7 @@ impl Sim {
         match self {
             Sim::Local { world, .. } => world.clone(),
             Sim::Net(net) => net.session.driver().world().clone(),
+            Sim::Chess(chess) => chess.world.clone(),
         }
     }
 
@@ -186,6 +252,7 @@ impl Sim {
         match self {
             Sim::Local { .. } => MOVER,
             Sim::Net(_) => UNIT,
+            Sim::Chess(_) => PIECE,
         }
     }
 
@@ -198,10 +265,60 @@ impl Sim {
     }
 }
 
+/// The render scene, one per sim flavour. Both expose the same surface
+/// the host drives every frame (`camera` / `sprites` / `scene_mut` /
+/// `hover` / `orbit`); the mode-specific `update` is called on the
+/// concrete type in [`App::redraw`].
+enum SceneKind {
+    Circle(CircleScene),
+    Chess(ChessScene),
+}
+
+impl SceneKind {
+    fn camera(&self) -> Camera {
+        match self {
+            SceneKind::Circle(s) => s.camera(),
+            SceneKind::Chess(s) => s.camera(),
+        }
+    }
+
+    fn orbit(&mut self, dyaw: f64, dpitch: f64, ddist: f64) {
+        match self {
+            SceneKind::Circle(s) => s.camera.orbit(dyaw, dpitch, ddist),
+            SceneKind::Chess(s) => s.camera.orbit(dyaw, dpitch, ddist),
+        }
+    }
+
+    fn hover(&mut self, origin: DVec3, dir: DVec3) {
+        match self {
+            SceneKind::Circle(s) => {
+                s.hover(origin, dir);
+            }
+            SceneKind::Chess(s) => {
+                s.hover(origin, dir);
+            }
+        }
+    }
+
+    fn sprites(&self) -> &SpriteSet {
+        match self {
+            SceneKind::Circle(s) => s.sprites(),
+            SceneKind::Chess(s) => s.sprites(),
+        }
+    }
+
+    fn scene_mut(&mut self) -> &mut Scene {
+        match self {
+            SceneKind::Circle(s) => s.scene_mut(),
+            SceneKind::Chess(s) => s.scene_mut(),
+        }
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<SceneRenderer>,
-    scene: CircleScene,
+    scene: SceneKind,
     /// The simulation (local walk-circle or a networked lockstep match).
     sim: Sim,
     /// Sprite positions before and after the most recent fixed step; the
@@ -231,16 +348,21 @@ struct App {
 }
 
 impl App {
-    fn new(role: Option<NetRole>) -> App {
-        let sim = match role {
-            None => Self::new_local(),
-            Some(role) => Self::new_net(&role),
+    fn new(mode: Mode) -> App {
+        let sim = match mode {
+            Mode::Local => Self::new_local(),
+            Mode::Net(role) => Self::new_net(&role),
+            Mode::Chess => Self::new_chess(),
         };
         let curr_pos = sim.positions();
+        let scene = match &sim {
+            Sim::Chess(_) => SceneKind::Chess(ChessScene::new()),
+            _ => SceneKind::Circle(CircleScene::new(curr_pos.len())),
+        };
         App {
             window: None,
             renderer: None,
-            scene: CircleScene::new(curr_pos.len()),
+            scene,
             sim,
             prev_pos: curr_pos.clone(),
             live_count: curr_pos.len(),
@@ -313,6 +435,26 @@ impl App {
         }))
     }
 
+    /// Build the local chess match (the M4 demo, hotseat). The whole game
+    /// is the script; the host just relays clicks as `move` commands and
+    /// mirrors the UI events the script emits.
+    fn new_chess() -> Sim {
+        let world = shared_world(SEED);
+        let mut backend = RhaiBackend::new(world.clone());
+        backend.load(CHESS_SCRIPT).expect("compile chess.rhai");
+        backend.on_init().expect("chess init");
+        backend.drain_ui_events(); // setup emits nothing the HUD needs
+        Sim::Chess(Box::new(Chess {
+            world,
+            backend: Box::new(backend),
+            to_move: 0,
+            winner: None,
+            selected: None,
+            moves: 0,
+            status: "white to move".to_string(),
+        }))
+    }
+
     /// Run the egui HUD for this frame and tessellate it. Returns the
     /// paint jobs + texture delta to hand to `paint_egui`, or `None`
     /// before the egui state exists (pre-`resumed`).
@@ -322,14 +464,25 @@ impl App {
     ) -> Option<(Vec<egui::ClippedPrimitive>, egui::TexturesDelta, f32)> {
         let tick = self.sim.tick();
         let fps = self.fps;
-        let selected = self.scene.selected();
-        let net = match &self.sim {
-            Sim::Local { .. } => None,
-            Sim::Net(net) => Some(NetHud {
+        let hud = match &self.sim {
+            Sim::Local { .. } => HudState::Local {
+                selected: match &self.scene {
+                    SceneKind::Circle(s) => s.selected(),
+                    SceneKind::Chess(_) => None,
+                },
+            },
+            Sim::Net(net) => HudState::Net(NetHud {
                 player: net.local.0,
                 units: self.curr_pos.len(),
                 halted: net.halted,
                 connected: net.session.connected(),
+            }),
+            Sim::Chess(chess) => HudState::Chess(ChessHud {
+                to_move: chess.to_move,
+                winner: chess.winner,
+                moves: chess.moves,
+                picking: chess.selected.is_some(),
+                status: chess.status.clone(),
             }),
         };
         let ctx = &self.egui_ctx;
@@ -337,7 +490,7 @@ impl App {
 
         let raw = state.take_egui_input(window);
         let out = ctx.run(raw, |ui_ctx| {
-            build_hud(ui_ctx, tick, fps, selected, net.as_ref());
+            build_hud(ui_ctx, tick, fps, &hud);
         });
         state.handle_platform_output(window, out.platform_output);
         let jobs = ctx.tessellate(out.shapes, out.pixels_per_point);
@@ -354,17 +507,63 @@ impl App {
         let Some(ray) = renderer.view_ray(&cam, self.cursor.0, self.cursor.1) else {
             return;
         };
-        match &mut self.sim {
-            Sim::Local { .. } => match self.scene.pick_ground(ray.origin, ray.dir) {
-                Some(i) => eprintln!("picked mover #{i}"),
-                None => eprintln!("picked: (none)"),
-            },
-            Sim::Net(net) => {
-                if let Some((x, y)) = self.scene.ground_sim_xy(ray.origin, ray.dir) {
+        match (&mut self.sim, &mut self.scene) {
+            (Sim::Local { .. }, SceneKind::Circle(scene)) => {
+                match scene.pick_ground(ray.origin, ray.dir) {
+                    Some(i) => eprintln!("picked mover #{i}"),
+                    None => eprintln!("picked: (none)"),
+                }
+            }
+            (Sim::Net(net), SceneKind::Circle(scene)) => {
+                if let Some((x, y)) = scene.ground_sim_xy(ray.origin, ray.dir) {
                     let arg = FixedVec3::new(Fixed::from_f64(x), Fixed::from_f64(y), Fixed::ZERO);
                     net.pending.push(Command::at(SPAWN_VERB, arg));
                     eprintln!("spawn @ ({x:.2}, {y:.2})");
                 }
+            }
+            (Sim::Chess(_), SceneKind::Chess(scene)) => {
+                if let Some((sx, sy)) = scene.board_square(ray.origin, ray.dir) {
+                    self.chess_click(sx, sy);
+                }
+            }
+            // sim / scene flavours are constructed together, so the
+            // mixed pairs never occur.
+            _ => {}
+        }
+    }
+
+    /// A board click in chess mode: the first click selects a piece of
+    /// the side to move; the second issues a `move` command to that
+    /// square, then folds the resulting UI events into the HUD state.
+    fn chess_click(&mut self, sx: i8, sy: i8) {
+        let Sim::Chess(chess) = &mut self.sim else {
+            return;
+        };
+        if chess.winner.is_some() {
+            return;
+        }
+        match chess.selected {
+            None => {
+                if let Some(e) = piece_at_square(&chess.world, sx, sy) {
+                    if piece_field(&chess.world, e, "color") == i64::from(chess.to_move) {
+                        chess.selected = Some(e);
+                        chess.status = format!("{} selected — pick a square", square_name(sx, sy));
+                    }
+                }
+            }
+            Some(e) => {
+                chess.selected = None;
+                let arg = FixedVec3::new(
+                    Fixed::from_int(i32::from(sx)),
+                    Fixed::from_int(i32::from(sy)),
+                    Fixed::ZERO,
+                );
+                chess
+                    .backend
+                    .on_command(PlayerId(chess.to_move), &Command::on(MOVE_VERB, e, arg))
+                    .expect("chess command");
+                let events = chess.backend.drain_ui_events();
+                apply_chess_events(chess, &events);
             }
         }
     }
@@ -376,7 +575,7 @@ impl App {
             (f64::from(self.keys.pitch_down) - f64::from(self.keys.pitch_up)) * PITCH_RATE * dt;
         let ddist = (f64::from(self.keys.zoom_out) - f64::from(self.keys.zoom_in)) * ZOOM_RATE * dt;
         if dyaw != 0.0 || dpitch != 0.0 || ddist != 0.0 {
-            self.scene.camera.orbit(dyaw, dpitch, ddist);
+            self.scene.orbit(dyaw, dpitch, ddist);
         }
     }
 
@@ -423,11 +622,15 @@ impl App {
         }
         self.curr_pos = self.sim.positions();
         // The unit count grows as players spawn; rebuild the scene (keeping
-        // the camera) so every live unit has a sprite instance.
+        // the camera) so every live unit has a sprite instance. Net mode
+        // always runs the circle scene.
         if self.live_count != self.curr_pos.len() {
-            let cam = self.scene.camera;
-            self.scene = CircleScene::new(self.curr_pos.len());
-            self.scene.camera = cam;
+            if let SceneKind::Circle(scene) = &mut self.scene {
+                let cam = scene.camera;
+                let mut rebuilt = CircleScene::new(self.curr_pos.len());
+                rebuilt.camera = cam;
+                *scene = rebuilt;
+            }
             self.live_count = self.curr_pos.len();
         }
         self.prev_pos.clone_from(&self.curr_pos);
@@ -474,26 +677,43 @@ impl App {
             self.fps = self.fps.mul_add(0.9, (1.0 / dt) as f32 * 0.1);
         }
 
-        // Advance the sim and compute the render blend factor.
+        // Advance the sim and compute the render blend factor. Chess is
+        // command-driven — no wall-clock tick — so it just snaps to the
+        // current board.
         let alpha = match &self.sim {
             Sim::Local { .. } => self.advance_local(dt),
             Sim::Net(_) => {
                 self.advance_net();
                 1.0
             }
+            Sim::Chess(_) => 1.0,
         };
 
         self.drive_camera(dt);
-        self.scene.update(&self.prev_pos, &self.curr_pos, alpha);
+        // Mode-specific scene update: the circle/net scene interpolates
+        // positions; the chess scene rebuilds from the live board.
+        match (&self.sim, &mut self.scene) {
+            (Sim::Chess(chess), SceneKind::Chess(scene)) => {
+                let pieces = chess_pieces(&chess.world);
+                let selected = chess.selected.and_then(|e| square_of(&chess.world, e));
+                scene.update(&pieces, selected);
+            }
+            (_, SceneKind::Circle(scene)) => {
+                scene.update(&self.prev_pos, &self.curr_pos, alpha);
+            }
+            _ => {}
+        }
 
         if !self.debug_done && std::env::var_os("MONADA_DEBUG").is_some() {
             self.debug_done = true;
             let cam = self.scene.camera();
-            let (center, sample) = self.scene.debug_positions();
             eprintln!("[debug] camera pos={:?} forward={:?}", cam.pos, cam.forward);
-            eprintln!("[debug] board center={center:?}");
-            for (i, p) in sample.iter().enumerate() {
-                eprintln!("[debug] cube[{i}] world={p:?}");
+            if let SceneKind::Circle(scene) = &self.scene {
+                let (center, sample) = scene.debug_positions();
+                eprintln!("[debug] board center={center:?}");
+                for (i, p) in sample.iter().enumerate() {
+                    eprintln!("[debug] cube[{i}] world={p:?}");
+                }
             }
         }
 
@@ -636,14 +856,35 @@ struct NetHud {
     connected: bool,
 }
 
+/// HUD fields specific to a chess match (mirrored from the script's UI
+/// events; the host never reads the game entity itself).
+struct ChessHud {
+    to_move: u32,
+    winner: Option<u32>,
+    moves: u32,
+    /// A piece is picked and awaiting a destination click.
+    picking: bool,
+    status: String,
+}
+
+/// Per-mode HUD state passed to [`build_hud`].
+enum HudState {
+    Local { selected: Option<usize> },
+    Net(NetHud),
+    Chess(ChessHud),
+}
+
+/// Name of a side for the HUD.
+fn side_name(side: u32) -> &'static str {
+    if side == 0 {
+        "white"
+    } else {
+        "black"
+    }
+}
+
 /// Build the HUD widget tree (DESIGN.md §3.2's egui HUD).
-fn build_hud(
-    ctx: &egui::Context,
-    tick: u64,
-    fps: f32,
-    selected: Option<usize>,
-    net: Option<&NetHud>,
-) {
+fn build_hud(ctx: &egui::Context, tick: u64, fps: f32, hud: &HudState) {
     egui::Window::new("monada")
         .title_bar(false)
         .resizable(false)
@@ -651,8 +892,8 @@ fn build_hud(
         .show(ctx, |ui| {
             ui.label(format!("tick {tick}"));
             ui.label(format!("fps  {fps:.0}"));
-            match net {
-                None => {
+            match hud {
+                HudState::Local { selected } => {
                     match selected {
                         Some(i) => ui.label(format!("selected mover #{i}")),
                         None => ui.label("selected mover —"),
@@ -661,7 +902,7 @@ fn build_hud(
                     ui.label("arrows orbit · W/S zoom");
                     ui.label("click a cube to pick · Esc quit");
                 }
-                Some(net) => {
+                HudState::Net(net) => {
                     ui.label(format!("player {} · {} units", net.player, net.units));
                     if net.halted {
                         ui.colored_label(egui::Color32::RED, "DESYNC — halted");
@@ -674,8 +915,116 @@ fn build_hud(
                     ui.label("arrows orbit · W/S zoom");
                     ui.label("click to spawn · Esc quit");
                 }
+                HudState::Chess(chess) => {
+                    ui.label(format!("move {}", chess.moves));
+                    match chess.winner {
+                        Some(w) => ui.colored_label(
+                            egui::Color32::from_rgb(0xF0, 0xC0, 0x40),
+                            format!("{} wins", side_name(w)),
+                        ),
+                        None => ui.label(format!("{} to move", side_name(chess.to_move))),
+                    };
+                    ui.label(&chess.status);
+                    ui.separator();
+                    ui.label("arrows orbit · W/S zoom");
+                    if chess.picking {
+                        ui.label("click a square to move · Esc quit");
+                    } else {
+                        ui.label("click a piece to select · Esc quit");
+                    }
+                }
             }
         });
+}
+
+// --- chess sim <-> host helpers (render side of the wall) ------------
+
+/// Read a piece's integer field (kind / color) from the world.
+fn piece_field(world: &SharedWorld, e: EntityId, field: &str) -> i64 {
+    world
+        .lock()
+        .expect("world mutex")
+        .field(e, field)
+        .map_or(0, |f| i64::from(f.floor_to_int()))
+}
+
+/// The piece entity on board square `(x, y)`, if any.
+fn piece_at_square(world: &SharedWorld, x: i8, y: i8) -> Option<EntityId> {
+    let w = world.lock().expect("world mutex");
+    let target = FixedVec3::new(
+        Fixed::from_int(i32::from(x)),
+        Fixed::from_int(i32::from(y)),
+        Fixed::ZERO,
+    );
+    w.entities(PIECE)
+        .iter()
+        .copied()
+        .find(|&e| w.position(e) == Some(target))
+}
+
+/// The board square a piece entity stands on.
+fn square_of(world: &SharedWorld, e: EntityId) -> Option<(i8, i8)> {
+    let p = world.lock().expect("world mutex").position(e)?;
+    Some((p.x.floor_to_int() as i8, p.y.floor_to_int() as i8))
+}
+
+/// Snapshot the live pieces as render views (square + kind/colour tags).
+fn chess_pieces(world: &SharedWorld) -> Vec<PieceView> {
+    let w = world.lock().expect("world mutex");
+    w.entities(PIECE)
+        .iter()
+        .map(|&e| {
+            let p = w.position(e).unwrap_or(FixedVec3::ZERO);
+            PieceView {
+                x: p.x.floor_to_int() as i8,
+                y: p.y.floor_to_int() as i8,
+                kind: w.field(e, "kind").map_or(0, |f| f.floor_to_int() as u8),
+                color: w.field(e, "color").map_or(0, |f| f.floor_to_int() as u8),
+            }
+        })
+        .collect()
+}
+
+/// Algebraic-ish square label (a1..h8) for the HUD.
+fn square_name(x: i8, y: i8) -> String {
+    let file = (b'a' + x.clamp(0, 7) as u8) as char;
+    format!("{file}{}", y.clamp(0, 7) + 1)
+}
+
+/// Fold the script's UI events into the host's mirrored chess state.
+/// Codes mirror the header of `scripts/chess.rhai`.
+fn apply_chess_events(chess: &mut Chess, events: &[UiEvent]) {
+    for ev in events {
+        match ev.code {
+            1 => {
+                // turn_changed(to_move)
+                chess.to_move = u32::try_from(ev.a).unwrap_or(0);
+                chess.moves += 1;
+                chess.status = format!("{} to move", side_name(chess.to_move));
+            }
+            2 => chess.status = illegal_reason(ev.a).to_string(),
+            3 => chess.status = format!("capture on {}", square_name(ev.a as i8, ev.b as i8)),
+            4 => {
+                // game_over(winner)
+                let w = u32::try_from(ev.a).unwrap_or(0);
+                chess.winner = Some(w);
+                chess.status = format!("{} wins by king capture", side_name(w));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Human-readable text for an `illegal` event's reason code.
+fn illegal_reason(reason: i64) -> &'static str {
+    match reason {
+        0 => "illegal — not your turn",
+        1 => "illegal — not your piece",
+        2 => "illegal — own piece on that square",
+        4 => "the game is over",
+        5 => "illegal — unknown command",
+        _ => "illegal move",
+    }
 }
 
 impl App {

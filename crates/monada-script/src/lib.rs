@@ -50,6 +50,16 @@ pub const WALK_CIRCLE_SCRIPT: &str = include_str!("../scripts/walk_circle.rhai")
 /// command path end to end (`on_command` -> host API -> `World`).
 pub const COMMAND_DEMO_SCRIPT: &str = include_str!("../scripts/command_demo.rhai");
 
+/// The M4 chess map (DESIGN.md §6) — a legal-move subset: piece moves +
+/// capture (`despawn`) + win-on-king-capture. Castling / en passant /
+/// promotion / check-mate detection are a later slice. Every rule lives
+/// in the script; the engine knows nothing of chess (DESIGN.md §4). It
+/// keeps authoritative game state (`to_move`, `winner`) in a singleton
+/// `game` entity and reports turn / capture / illegal-move / game-over to
+/// the host via [`ScriptBackend::drain_ui_events`]. Embedded until the
+/// map archive format lands (M4 slice 2).
+pub const CHESS_SCRIPT: &str = include_str!("../scripts/chess.rhai");
+
 /// Build a seeded world, load `source`, run its `init` trigger then
 /// `ticks` `tick` triggers, and return the shared world. The reusable
 /// scenario runner for tests and the determinism oracle.
@@ -101,6 +111,29 @@ pub trait ScriptBackend {
     /// # Errors
     /// Returns [`ScriptError::Run`] if the script raises.
     fn on_tick(&mut self) -> Result<(), ScriptError>;
+
+    /// Drain the UI/HUD events the script emitted via `ui_emit_event`
+    /// since the last drain (DESIGN.md §3.3). These live strictly on the
+    /// render side of the determinism wall — the host reads them for
+    /// display, they never enter [`World`] state or the desync hash. A
+    /// backend that emits none returns empty (the default).
+    fn drain_ui_events(&mut self) -> Vec<UiEvent> {
+        Vec::new()
+    }
+}
+
+/// A UI/HUD-side event a script pushes via `ui_emit_event` (DESIGN.md
+/// §3.3). Render-side only: the host drains it for display, it never
+/// enters [`World`] state or the desync hash, so it can never desync a
+/// peer. The payload is all-integer (no float crosses the wall); its
+/// field meanings are a script↔host convention (see the chess map's
+/// event codes), opaque to the engine itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UiEvent {
+    pub code: u32,
+    pub a: i64,
+    pub b: i64,
+    pub c: i64,
 }
 
 /// A script compile- or run-time failure (message only; the underlying

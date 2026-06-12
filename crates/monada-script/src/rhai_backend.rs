@@ -10,11 +10,20 @@
     clippy::cast_sign_loss
 )]
 
+use std::sync::{Arc, Mutex};
+
 use monada_fixed::{trig, Fixed, FixedVec3};
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 use rhai::{Array, Dynamic, Engine, ImmutableString, Scope, AST};
 
-use crate::{ScriptBackend, ScriptError, SharedWorld};
+use crate::{ScriptBackend, ScriptError, SharedWorld, UiEvent};
+
+/// The buffer `ui_emit_event` pushes into and [`drain_ui_events`] empties.
+/// Shared (`Arc<Mutex<_>>`) for the same reason as [`SharedWorld`]:
+/// `sync`-feature Rhai needs `Send + Sync` host closures.
+///
+/// [`drain_ui_events`]: ScriptBackend::drain_ui_events
+type UiEventBuffer = Arc<Mutex<Vec<UiEvent>>>;
 
 /// Arity of the map's `command` trigger: `command(player, verb, target, arg)`.
 const COMMAND_ARITY: usize = 4;
@@ -32,6 +41,10 @@ pub struct RhaiBackend {
     /// existing handler — that must surface as the bug it is (it could
     /// otherwise desync one peer silently).
     has_command: bool,
+    /// UI/HUD events the script emitted via `ui_emit_event`, awaiting a
+    /// [`drain_ui_events`](ScriptBackend::drain_ui_events) by the host.
+    /// Render-side only — never part of [`World`](monada_sim::World) state.
+    events: UiEventBuffer,
 }
 
 impl RhaiBackend {
@@ -40,14 +53,16 @@ impl RhaiBackend {
     #[must_use]
     pub fn new(world: SharedWorld) -> RhaiBackend {
         let mut engine = Engine::new();
+        let events: UiEventBuffer = Arc::new(Mutex::new(Vec::new()));
         register_number_types(&mut engine);
-        register_host_api(&mut engine, &world);
+        register_host_api(&mut engine, &world, &events);
         RhaiBackend {
             engine,
             ast: None,
             scope: Scope::new(),
             world,
             has_command: false,
+            events,
         }
     }
 
@@ -112,6 +127,10 @@ impl ScriptBackend for RhaiBackend {
         self.world.lock().expect("world mutex").tick += 1;
         self.call("tick")
     }
+
+    fn drain_ui_events(&mut self) -> Vec<UiEvent> {
+        std::mem::take(&mut self.events.lock().expect("events mutex"))
+    }
 }
 
 /// Register `Fixed` / `Vec3` and the only arithmetic scripts get (all
@@ -126,6 +145,13 @@ fn register_number_types(engine: &mut Engine) {
         Fixed::from_ratio(n as i32, d as i32)
     });
     engine.register_fn("vec3", FixedVec3::new);
+
+    // Bridge `Fixed` -> script `i64` for integer gameplay (chess board
+    // coords, archetype/field tags). Floors toward -inf; values stored
+    // via `fixed(i)` round-trip exactly. Generic — the engine ships no
+    // genre — but it is what lets a board game do its math in native
+    // integers instead of fighting fixed-point for an L-move.
+    engine.register_fn("to_int", |a: Fixed| -> i64 { i64::from(a.floor_to_int()) });
 
     // Read `Vec3` components in scripts (e.g. a command's `arg.x`). The
     // setter side stays in `vec3(...)` reconstruction — vectors are
@@ -154,8 +180,8 @@ fn register_number_types(engine: &mut Engine) {
 
 /// Register the host API (DESIGN.md §3.3). Each function locks the shared
 /// world for the call; the sim is single-threaded so the lock is
-/// uncontended.
-fn register_host_api(engine: &mut Engine, world: &SharedWorld) {
+/// uncontended. `events` backs `ui_emit_event` (render-side, never hashed).
+fn register_host_api(engine: &mut Engine, world: &SharedWorld, events: &UiEventBuffer) {
     let w = world.clone();
     engine.register_fn("archetype", move |names: Array| -> i64 {
         let fields: Vec<String> = names
@@ -229,4 +255,40 @@ fn register_host_api(engine: &mut Engine, world: &SharedWorld) {
     engine.register_fn("rng_below", move |n: i64| -> i64 {
         w.lock().expect("world mutex").rng.gen_below(n as u64) as i64
     });
+
+    // Despawn an entity; returns whether it was present. Needed for
+    // capture (chess), death (RTS) — anything that removes an entity.
+    let w = world.clone();
+    engine.register_fn("entity_despawn", move |e: i64| -> bool {
+        w.lock().expect("world mutex").despawn(EntityId(e as u64))
+    });
+
+    // Ascending ids of one archetype (a coarse `entity_query`, §3.3):
+    // lets a script scan just its pieces (board occupancy) or reach a
+    // singleton, without walking `entities()` across every archetype.
+    let w = world.clone();
+    engine.register_fn("entities_of", move |arch: i64| -> Array {
+        w.lock()
+            .expect("world mutex")
+            .entities(ArchetypeId(arch as u32))
+            .iter()
+            .map(|e| Dynamic::from(e.0 as i64))
+            .collect()
+    });
+
+    // Push a UI/HUD event (DESIGN.md §3.3). Render-side only: it lands in
+    // the drain buffer, never in `World` state or the desync hash. All-
+    // integer payload; the script defines what the codes mean.
+    let ev = events.clone();
+    engine.register_fn(
+        "ui_emit_event",
+        move |code: i64, a: i64, b: i64, c: i64| {
+            ev.lock().expect("events mutex").push(UiEvent {
+                code: code as u32,
+                a,
+                b,
+                c,
+            });
+        },
+    );
 }

@@ -1199,6 +1199,7 @@ name = "monada-host"
 version = "0.0.1"
 dependencies = [
  "egui-winit",
+ "glam",
  "monada-fixed",
  "monada-net",
  "monada-render",
@@ -1206,6 +1207,7 @@ dependencies = [
  "monada-sim",
  "roxlap-core",
  "roxlap-render",
+ "roxlap-scene",
  "winit",
 ]
 

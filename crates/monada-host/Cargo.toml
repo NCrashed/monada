@@ -30,6 +30,12 @@ monada-net = { workspace = true, features = ["quic"] }
 # paints with.
 roxlap-render = { version = "0.7.0", features = ["hud"] }
 roxlap-core = "0.7.0"
+# Scene graph type, named in the host's `SceneKind` accessors so one
+# render path can drive either the circle or the chess board scene.
+roxlap-scene = "0.7.0"
+# Render-side world math for picking-ray params (the sim wall stays in
+# monada-sim; floats live only here, per DESIGN.md §3.1).
+glam = { workspace = true }
 winit = "0.30"
 # egui input/output bridge for winit; egui itself comes via
 # `roxlap_render::egui` so the versions can't drift.
