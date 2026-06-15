@@ -42,8 +42,9 @@ roxlap-formats = { workspace = true }
 glam = { workspace = true }
 winit = "0.30"
 # egui input/output bridge for winit; egui itself comes via
-# `roxlap_render::egui` so the versions can't drift.
-egui-winit = { version = "0.29", default-features = false }
+# `roxlap_render::egui` so the versions can't drift — roxlap 0.9.0 moved to
+# egui 0.34, so this tracks it.
+egui-winit = { version = "0.34", default-features = false }
 # Decode a map's `assets/*.png` skybox to RGBA8 (PNG only — the format
 # the map ships).
 image = { version = "0.25", default-features = false, features = ["png"] }

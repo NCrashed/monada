@@ -767,9 +767,12 @@ impl App {
         let state = self.egui_state.as_mut()?;
 
         let raw = state.take_egui_input(window);
-        let out = ctx.run(raw, |ui_ctx| {
-            build_hud(ui_ctx, tick, fps, &hud);
-        });
+        // egui 0.34 deprecated `Context::run` (its `run_ui` hands a `&mut Ui`,
+        // but `build_hud` paints free-floating `egui::Window`s, which want the
+        // `&Context`) — drive a pass explicitly instead.
+        ctx.begin_pass(raw);
+        build_hud(ctx, tick, fps, &hud);
+        let out = ctx.end_pass();
         state.handle_platform_output(window, out.platform_output);
         let jobs = ctx.tessellate(out.shapes, out.pixels_per_point);
         Some((jobs, out.textures_delta, out.pixels_per_point))
