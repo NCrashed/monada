@@ -180,14 +180,21 @@ impl MapRender {
                 continue; // despawned (e.g. captured)
             };
             let w = world_of(p);
-            let zsiz = sprites
+            // roxlap anchors the kv6's stored pivot at the sprite `pos`, so
+            // seat by the pivot, not an assumed centre: the model's bottom
+            // face sits `(zsiz - zpiv)` below the pivot (z grows down), so
+            // put the pivot that far above the surface to rest the bottom on
+            // it. For a centre-pivot model (`zpiv == zsiz/2`, e.g. the boxes
+            // from `solid_box`) this is exactly the old `w.z - zsiz/2`; a
+            // model whose pivot isn't centred (a hand-made piece) no longer
+            // sinks.
+            let drop = sprites
                 .models
                 .get(model)
-                .map_or(SCALE, |m| f64::from(m.kv6.zsiz));
+                .map_or(SCALE * 0.5, |m| f64::from(m.kv6.zsiz) - f64::from(m.kv6.zpiv));
             sprites.instances.push(SpriteInstanceDesc {
                 model,
-                // Seat the model bottom on the surface (pivot is centre).
-                pos: [w.x as f32, w.y as f32, (w.z - zsiz * 0.5) as f32],
+                pos: [w.x as f32, w.y as f32, (w.z - drop) as f32],
             });
         }
         if let Some(h) = self.highlighted {
