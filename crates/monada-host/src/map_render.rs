@@ -72,14 +72,20 @@ fn sprite_box(w: u32, h: u32, d: u32, color: u32, shaded: bool) -> Sprite {
 }
 
 /// Sim position → world-space point (sprite pivot before z-seating).
-/// Entities are centred in their unit cell (`+0.5`), so a piece at sim
-/// `(sx, sy)` sits in the middle of the voxel square the map painted at
-/// `[sx·SCALE, sx·SCALE+SCALE)`. Picking stays corner-based (sim =
-/// world/SCALE, floored by the script to the cell index), which is the
-/// consistent inverse.
+/// Entities are centred in their unit cell (`+0.5`).
+///
+/// **World X is mirrored** (`-`): roxlap's right-handed camera renders
+/// `screen-right = -world_x` from a low-Y viewpoint, so without this a map
+/// viewed from its near (low-Y) side comes out left-right flipped (files
+/// reversed, board colours inverted — see chess). Negating world X cancels
+/// that, so the natural viewing side reads un-mirrored. It's a pure render
+/// placement (the sim is untouched) and keeps the camera basis right-handed
+/// (only positions move, so the sprite frustum-cull is unaffected); the
+/// grid accepts negative coords (`roxlap-scene` addr is `div_euclid`-based).
+/// `voxel_fill` and the pick inverse mirror X to match.
 fn world_of(p: FixedVec3) -> DVec3 {
     DVec3::new(
-        (p.x.to_f64() + 0.5) * SCALE,
+        -(p.x.to_f64() + 0.5) * SCALE,
         (p.y.to_f64() + 0.5) * SCALE,
         // Smaller z is up: sim z lifts above the board surface.
         GROUND_Z - p.z.to_f64() * SCALE,
@@ -217,7 +223,7 @@ impl MapRender {
             return (FixedVec3::ZERO, -1);
         };
         let point = FixedVec3::new(
-            Fixed::from_f64(hit.x / SCALE),
+            Fixed::from_f64(-hit.x / SCALE), // world X is mirrored (see world_of)
             Fixed::from_f64(hit.y / SCALE),
             Fixed::ZERO,
         );
@@ -324,9 +330,11 @@ impl HostBridge for MapRender {
     fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64) {
         let s = SCALE as i64;
         let g = GROUND_Z as i64;
-        let lo = IVec3::new((x0 * s) as i32, (y0 * s) as i32, (g + z0) as i32);
+        // World X is mirrored (see `world_of`): sim cell x occupies world X
+        // in [-(x+1)·s, -x·s), so the rect flips and swaps its X bounds.
+        let lo = IVec3::new((-(x1 + 1) * s) as i32, (y0 * s) as i32, (g + z0) as i32);
         let hi = IVec3::new(
-            ((x1 + 1) * s - 1) as i32,
+            (-x0 * s - 1) as i32,
             ((y1 + 1) * s - 1) as i32,
             (g + z1) as i32,
         );
@@ -363,6 +371,11 @@ impl HostBridge for MapRender {
 
     fn camera_focus(&mut self, point: FixedVec3) {
         self.camera.center = world_of(point);
+    }
+
+    fn camera_angle(&mut self, yaw: Fixed, pitch: Fixed) {
+        self.camera.yaw = yaw.to_f64();
+        self.camera.pitch = pitch.to_f64();
     }
 
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3) {

@@ -176,6 +176,10 @@ pub trait HostBridge: Send {
     fn status(&mut self, text: &str);
     /// Aim the camera at a point (sim coordinates).
     fn camera_focus(&mut self, point: FixedVec3);
+    /// Orient the camera: `yaw`/`pitch` in radians — the orbit angles the
+    /// view should start at. Lets a map face the scene its own way instead
+    /// of inheriting the host's default angle.
+    fn camera_angle(&mut self, yaw: Fixed, pitch: Fixed);
     /// Queue a sim command for the host to route through the command path
     /// after the current trigger returns (never applied re-entrantly).
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3);
@@ -225,6 +229,7 @@ impl HostBridge for NullBridge {
     }
     fn status(&mut self, _text: &str) {}
     fn camera_focus(&mut self, _point: FixedVec3) {}
+    fn camera_angle(&mut self, _yaw: Fixed, _pitch: Fixed) {}
     fn submit_command(&mut self, _verb: i64, _target: i64, _arg: FixedVec3) {}
     fn local_player(&self) -> Option<i64> {
         None

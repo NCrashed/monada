@@ -102,20 +102,22 @@ fn two_clients_play_a_game_and_replay_reproduces() {
     let mut a = session(P0, ta, &map);
     let mut b = session(P1, tb, &map);
 
-    // A fool's-mate line played to actually capture the king (the subset's
-    // win condition) — exercises moves, a capture, and game-over in sync.
+    // Fool's mate — checkmate in two moves a side — exercises moves and a
+    // game-ending checkmate staying in sync across both clients.
     play(&mut a, &mut b, 5, 1, 5, 2); // 1. f3
     play(&mut a, &mut b, 4, 6, 4, 4); // 1... e5
     play(&mut a, &mut b, 6, 1, 6, 3); // 2. g4
-    play(&mut a, &mut b, 3, 7, 7, 3); // 2... Qh4
-    play(&mut a, &mut b, 0, 1, 0, 2); // 3. a3
-    play(&mut a, &mut b, 7, 3, 4, 0); // 3... Qxe1 — takes the king
+    play(&mut a, &mut b, 3, 7, 7, 3); // 2... Qh4#
 
-    assert_eq!(game_field(a.driver().world(), "winner"), 1, "black wins");
+    assert_eq!(
+        game_field(a.driver().world(), "winner"),
+        1,
+        "black wins by checkmate"
+    );
     assert_eq!(
         a.driver().world().lock().unwrap().count(PIECE),
-        31,
-        "white king removed"
+        32,
+        "checkmate, nothing captured"
     );
 
     // The replay reproduces A's final state through the verified path,

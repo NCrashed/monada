@@ -432,6 +432,11 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     });
 
     let b = bridge.clone();
+    engine.register_fn("camera_angle", move |yaw: Fixed, pitch: Fixed| {
+        b.lock().expect("bridge mutex").camera_angle(yaw, pitch);
+    });
+
+    let b = bridge.clone();
     engine.register_fn(
         "submit_command",
         move |verb: i64, target: i64, arg: FixedVec3| {
