@@ -46,9 +46,9 @@ const MAX_SIDE_SHADE: f32 = 18.0;
 /// Sprite material (`Engine::kv6col`) — the master brightness for pieces in
 /// the lightmode-1 tint path. Below the engine's mid-grey `0x80` default
 /// would halve them; pure white `0xFF` blows the lit faces past the colour
-/// clamp (flat pure-white). `0xB0` sits just under the clamp so pieces show
-/// their own colour with directional form, while highlights still pop.
-const SPRITE_MATERIAL: u32 = 0x00B0_B0B0;
+/// clamp (flat pure-white). `0x6A` is the earlier near-clamp `0xB0` taken
+/// down ~40% so the pieces read darker against the board.
+const SPRITE_MATERIAL: u32 = 0x006A_6A6A;
 /// Outward normals of a grid cube's six faces, in voxlap side-shade order
 /// (top/bottom/left/right/up/down). Used to shade the board by sun angle.
 const CUBE_FACE_NORMALS: [[f64; 3]; 6] = [
@@ -69,6 +69,19 @@ fn sprite_box(w: u32, h: u32, d: u32, color: u32, shaded: bool) -> Sprite {
         s.flags = SPRITE_FLAG_NO_SHADING;
     }
     s
+}
+
+/// One 90°-clockwise quarter-turn of a sprite about the vertical axis,
+/// applied `turns` times by `model_kv6` so a map can face its asymmetric art
+/// (e.g. opposing sides facing each other). Rotating the sprite *basis*
+/// avoids re-baking the assets.
+fn rot90_cw(mut sprite: Sprite) -> Sprite {
+    // Rotate the horizontal basis vectors about +z: (x, y) -> (y, -x). The
+    // vertical axis `f` is unchanged, so the piece still stands upright.
+    let (s, h) = (sprite.s, sprite.h);
+    sprite.s = [s[1], -s[0], s[2]];
+    sprite.h = [h[1], -h[0], h[2]];
+    sprite
 }
 
 /// Sim position → world-space point (sprite pivot before z-seating).
@@ -305,7 +318,7 @@ impl HostBridge for MapRender {
         (self.sprites.models.len() - 1) as i64
     }
 
-    fn model_kv6(&mut self, asset_path: &str) -> i64 {
+    fn model_kv6(&mut self, asset_path: &str, turns: i64) -> i64 {
         let sprite = self
             .assets
             .get(asset_path)
@@ -318,6 +331,11 @@ impl HostBridge for MapRender {
                 // Shaded (no NO_SHADING flag) so the map's sun lights it.
                 |kv6| Sprite::axis_aligned(kv6, [0.0, 0.0, 0.0]),
             );
+        // Face it the way the map asked (quarter-turns CW about vertical).
+        let mut sprite = sprite;
+        for _ in 0..turns.rem_euclid(4) {
+            sprite = rot90_cw(sprite);
+        }
         self.sprites.models.push(sprite);
         (self.sprites.models.len() - 1) as i64
     }

@@ -156,8 +156,10 @@ pub trait HostBridge: Send {
     /// Define a procedural box sprite model; returns its model id.
     fn model_box(&mut self, w: i64, h: i64, d: i64, color: i64) -> i64;
     /// Define a sprite model from a KV6 asset in the map archive (by its
-    /// archive-relative path); returns its model id.
-    fn model_kv6(&mut self, asset_path: &str) -> i64;
+    /// archive-relative path), turned `turns` quarter-steps clockwise about
+    /// the vertical axis (so a map can face asymmetric art whichever way it
+    /// needs — e.g. opposing sides facing each other); returns its model id.
+    fn model_kv6(&mut self, asset_path: &str, turns: i64) -> i64;
     /// Bind an entity to a base render model (render-side, not hashed).
     fn entity_set_model(&mut self, entity: i64, model: i64);
     /// Paint a solid voxel box into the world grid, in sim coordinates.
@@ -215,7 +217,7 @@ impl HostBridge for NullBridge {
     fn model_box(&mut self, _w: i64, _h: i64, _d: i64, _color: i64) -> i64 {
         0
     }
-    fn model_kv6(&mut self, _asset_path: &str) -> i64 {
+    fn model_kv6(&mut self, _asset_path: &str, _turns: i64) -> i64 {
         0
     }
     fn entity_set_model(&mut self, _entity: i64, _model: i64) {}

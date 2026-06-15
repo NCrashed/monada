@@ -382,8 +382,8 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     );
 
     let b = bridge.clone();
-    engine.register_fn("model_kv6", move |path: ImmutableString| -> i64 {
-        b.lock().expect("bridge mutex").model_kv6(path.as_str())
+    engine.register_fn("model_kv6", move |path: ImmutableString, turns: i64| -> i64 {
+        b.lock().expect("bridge mutex").model_kv6(path.as_str(), turns)
     });
 
     let b = bridge.clone();

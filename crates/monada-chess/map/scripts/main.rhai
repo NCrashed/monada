@@ -58,8 +58,8 @@ fn init() {
     let kinds = ["pawn", "knight", "bishop", "rook", "queen", "king"];
     let models = [];
     for k in 0..6 {
-        models.push(model_kv6("assets/pieces/" + kinds[k] + "_white.kv6"));
-        models.push(model_kv6("assets/pieces/" + kinds[k] + "_black.kv6"));
+        models.push(model_kv6("assets/pieces/" + kinds[k] + "_white.kv6", turns_for(0)));
+        models.push(model_kv6("assets/pieces/" + kinds[k] + "_black.kv6", turns_for(1)));
     }
 
     let g = entity_create(1);
@@ -208,7 +208,7 @@ fn command(player, verb, target, arg) {
     let promoted = false;
     if kind == 0 && (ty == 7 || ty == 0) {
         entity_set_field(target, "kind", fixed(4));
-        entity_set_model(target, model_kv6("assets/pieces/queen_" + side(to_move) + ".kv6"));
+        entity_set_model(target, model_kv6("assets/pieces/queen_" + side(to_move) + ".kv6", turns_for(to_move)));
         promoted = true;
     }
 
@@ -265,6 +265,13 @@ fn command(player, verb, target, arg) {
 
 fn side(c) {
     if c == 0 { "white" } else { "black" }
+}
+
+// Quarter-turns (clockwise about vertical) to face a colour's art so the two
+// armies face each other: black one step CW, white the other way (CCW = 3
+// CW). Tweak here if a colour faces the wrong way.
+fn turns_for(color) {
+    if color == 0 { 3 } else { 1 }
 }
 
 // Entity id of the piece on (x, y), or -1. Used only when *applying* a move.
