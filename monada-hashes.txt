@@ -1,5 +1,5 @@
 # monada determinism goldens — @generated, do not hand-edit.
-# scenarios: walk (scripted circle), kernel (pure-Rust anchor), lockstep (two-session command demo); seed "MONADA_0".
+# scenarios: walk (scripted circle), kernel (pure-Rust anchor), lockstep (two-session command demo), chess (turn-based rules), rpg (real-time action-RPG: per-tick input + voxel-query + wave RNG); seed "MONADA_0".
 # Regenerate with `cargo run -p monada-oracle -- --bless`.
 walk@0 = 9359308724793962880
 walk@1 = 18067293261836786764
@@ -19,3 +19,8 @@ lockstep@600 = 6769154635391089060
 chess@0 = 5582778713016339830
 chess@8 = 2851776567933931510
 chess@16 = 14979042734202361504
+rpg@0 = 7966487739324853030
+rpg@1 = 14099251347100148088
+rpg@30 = 14000190259772050321
+rpg@150 = 10911202462687162440
+rpg@600 = 14208105690566244762

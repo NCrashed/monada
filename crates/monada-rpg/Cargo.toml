@@ -1,0 +1,38 @@
+[package]
+name = "monada-rpg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "A co-op action-RPG demo map (scripts + GIF actors) proving the map-agnostic monada core can carry a real-time billboard-sprite game, with a thin `cargo run` launcher."
+publish = false
+
+[[bin]]
+name = "monada-rpg"
+path = "src/main.rs"
+
+[dependencies]
+# The host event loop + shared map CLI + archive loader. Like monada-chess,
+# this crate just loads the bundled `rpg.monada` and hands it to the host.
+monada-host = { path = "../monada-host" }
+monada-format = { workspace = true }
+
+[build-dependencies]
+# build.rs packs `map/` into a deterministic `rpg.monada` in OUT_DIR.
+monada-format = { workspace = true }
+
+[dev-dependencies]
+# Headless determinism / loopback tests drive the Rhai backend directly
+# (no host, no window), mirroring monada-chess.
+monada-format = { workspace = true }
+monada-script = { workspace = true }
+monada-sim = { workspace = true }
+monada-fixed = { workspace = true }
+monada-net = { workspace = true }
+# `examples/gen_sprites.rs` writes the committed 8-direction actor GIFs.
+gif = "0.13"
+
+[lints]
+workspace = true

@@ -13,6 +13,7 @@
 //! position and fields through the host API.
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -182,6 +183,11 @@ pub trait HostBridge: Send {
     /// view should start at. Lets a map face the scene its own way instead
     /// of inheriting the host's default angle.
     fn camera_angle(&mut self, yaw: Fixed, pitch: Fixed);
+
+    /// Set the camera's orbit distance from its focus point (world voxels) —
+    /// how close the view sits. The host clamps it to a sane range. The
+    /// default ignores it (a map that never calls it keeps the host default).
+    fn camera_dist(&mut self, _dist: Fixed) {}
     /// Queue a sim command for the host to route through the command path
     /// after the current trigger returns (never applied re-entrantly).
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3);
@@ -202,6 +208,100 @@ pub trait HostBridge: Send {
     /// Load a sky panorama from an `assets/` image and render it behind the
     /// scene. Render-side only.
     fn set_sky(&mut self, asset_path: &str);
+
+    /// Define an animated, 8-direction billboard "actor" model from GIFs laid
+    /// out as `<dir_path>/<state>/<side>.gif` for the 8 compass sides (one
+    /// `state` per animation). Returns a model id to bind with
+    /// [`entity_set_model`](Self::entity_set_model), or `-1` if any GIF is
+    /// missing. The renderer auto-picks the facing sprite from camera bearing
+    /// vs the actor's facing yaw. Render-side only; the default ignores it.
+    fn model_actor(&mut self, _dir_path: &str, _states: &[String]) -> i64 {
+        -1
+    }
+
+    /// Set an actor entity's current animation state by name (one of the
+    /// `states` given to [`model_actor`](Self::model_actor)). Render-side only.
+    fn entity_set_anim(&mut self, _entity: i64, _state: &str) {}
+
+    /// Set an actor entity's facing yaw in sim radians (`atan2(dy, dx)`); the
+    /// renderer picks the matching directional sprite. Render-side only.
+    fn entity_set_facing(&mut self, _entity: i64, _yaw: Fixed) {}
+
+    /// Query whether a voxel is solid, in sim coordinates — the terrain
+    /// collision primitive a real-time map needs (the script paints the
+    /// world with [`voxel_fill`](Self::voxel_fill) / [`voxel_set`](Self::voxel_set),
+    /// then asks this to keep movers out of it).
+    ///
+    /// **Determinism:** the backing store is a pure function of the
+    /// deterministic script's paint calls, so every peer answers identically
+    /// — results may feed hashed `tick()` decisions safely. The default
+    /// (empty world) lets bridges that paint nothing — and headless callers
+    /// that don't need terrain — skip it.
+    fn voxel_solid(&self, _x: i64, _y: i64, _z: i64) -> bool {
+        false
+    }
+
+    /// The highest solid sim-`z` in column `(x, y)`, or `0` for an unpainted
+    /// column — the "stand on the ground" primitive (assumes columns are
+    /// filled from the floor up). Same determinism contract as
+    /// [`voxel_solid`](Self::voxel_solid).
+    fn ground_height(&self, _x: i64, _y: i64) -> i64 {
+        0
+    }
+}
+
+/// A deterministic sparse terrain store: the highest solid sim-`z` per
+/// `(x, y)` column, fed by [`voxel_fill`](HostBridge::voxel_fill) /
+/// [`voxel_set`](HostBridge::voxel_set) and read by
+/// [`voxel_solid`](HostBridge::voxel_solid) /
+/// [`ground_height`](HostBridge::ground_height). Lives in sim space (no
+/// render-side world-X mirror), so a script queries it in the same
+/// coordinates it paints. Models terrain as per-column heights — fine for
+/// arenas (floor + raised platforms + walls), which fill from the floor up;
+/// it does not represent overhangs or holes.
+#[derive(Default, Clone)]
+pub struct VoxelStore {
+    tops: BTreeMap<(i64, i64), i64>,
+}
+
+impl VoxelStore {
+    /// A fresh, empty store (flat world at height 0).
+    #[must_use]
+    pub fn new() -> VoxelStore {
+        VoxelStore::default()
+    }
+
+    /// Raise each column in the box to at least `max(z0, z1)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64) {
+        let (xa, xb) = (x0.min(x1), x0.max(x1));
+        let (ya, yb) = (y0.min(y1), y0.max(y1));
+        let top = z0.max(z1);
+        for x in xa..=xb {
+            for y in ya..=yb {
+                let e = self.tops.entry((x, y)).or_insert(i64::MIN);
+                *e = (*e).max(top);
+            }
+        }
+    }
+
+    /// Raise a single column to at least `z`.
+    pub fn set(&mut self, x: i64, y: i64, z: i64) {
+        let e = self.tops.entry((x, y)).or_insert(i64::MIN);
+        *e = (*e).max(z);
+    }
+
+    /// Whether `(x, y, z)` is at or below the column's top solid voxel.
+    #[must_use]
+    pub fn solid(&self, x: i64, y: i64, z: i64) -> bool {
+        self.tops.get(&(x, y)).is_some_and(|&top| z <= top)
+    }
+
+    /// The column's top solid sim-`z`, or `0` if unpainted.
+    #[must_use]
+    pub fn ground_height(&self, x: i64, y: i64) -> i64 {
+        self.tops.get(&(x, y)).map_or(0, |&top| top)
+    }
 }
 
 /// A shared host bridge handle: the host owns the concrete render state
@@ -238,6 +338,61 @@ impl HostBridge for NullBridge {
     }
     fn set_light(&mut self, _dir: FixedVec3, _intensity: Fixed) {}
     fn set_sky(&mut self, _asset_path: &str) {}
+}
+
+/// A headless [`HostBridge`] that maintains a real [`VoxelStore`] — the
+/// terrain a real-time map collides against — while no-opping all render /
+/// input calls. The determinism-relevant counterpart to [`NullBridge`]:
+/// used by headless tests and the oracle for maps whose `tick()` queries
+/// [`voxel_solid`](HostBridge::voxel_solid) / [`ground_height`](HostBridge::ground_height),
+/// so the collision the goldens hash matches the map's painted terrain.
+#[derive(Default)]
+pub struct TerrainBridge {
+    terrain: VoxelStore,
+}
+
+impl TerrainBridge {
+    #[must_use]
+    pub fn new() -> TerrainBridge {
+        TerrainBridge::default()
+    }
+}
+
+impl HostBridge for TerrainBridge {
+    fn model_box(&mut self, _w: i64, _h: i64, _d: i64, _color: i64) -> i64 {
+        0
+    }
+    fn model_kv6(&mut self, _asset_path: &str, _turns: i64) -> i64 {
+        0
+    }
+    fn entity_set_model(&mut self, _entity: i64, _model: i64) {}
+    #[allow(clippy::too_many_arguments)]
+    fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, _c: i64) {
+        self.terrain.fill(x0, y0, z0, x1, y1, z1);
+    }
+    fn voxel_set(&mut self, x: i64, y: i64, z: i64, _color: i64) {
+        self.terrain.set(x, y, z);
+    }
+    fn highlight(&mut self, _entity: i64) {}
+    fn highlight_clear(&mut self) {}
+    fn highlighted(&self) -> i64 {
+        -1
+    }
+    fn status(&mut self, _text: &str) {}
+    fn camera_focus(&mut self, _point: FixedVec3) {}
+    fn camera_angle(&mut self, _yaw: Fixed, _pitch: Fixed) {}
+    fn submit_command(&mut self, _verb: i64, _target: i64, _arg: FixedVec3) {}
+    fn local_player(&self) -> Option<i64> {
+        None
+    }
+    fn set_light(&mut self, _dir: FixedVec3, _intensity: Fixed) {}
+    fn set_sky(&mut self, _asset_path: &str) {}
+    fn voxel_solid(&self, x: i64, y: i64, z: i64) -> bool {
+        self.terrain.solid(x, y, z)
+    }
+    fn ground_height(&self, x: i64, y: i64) -> i64 {
+        self.terrain.ground_height(x, y)
+    }
 }
 
 /// A UI/HUD-side event a script pushes via `ui_emit_event` (DESIGN.md

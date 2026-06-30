@@ -47,13 +47,12 @@ use monada_script::{
     shared_world, RhaiBackend, RhaiDriver, ScriptBackend, SharedBridge, SharedWorld,
     COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
 };
-use monada_sim::{ArchetypeId, Command, PlayerId};
+use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
 pub mod cli;
 mod map_render;
 use map_render::MapRender;
 use roxlap_core::opticast::OpticastSettings;
-use roxlap_core::sprite::SpriteLighting;
 use roxlap_core::Camera;
 // egui itself comes through roxlap-render's re-export so the version
 // matches the one `paint_egui` rasterises with.
@@ -75,6 +74,15 @@ const MOVER: ArchetypeId = ArchetypeId(0);
 const UNIT: ArchetypeId = ArchetypeId(0);
 /// `command_demo` verb: spawn a unit at the command's point.
 const SPAWN_VERB: u32 = 1;
+/// Reserved verb for the host's per-tick real-time input snapshot, injected
+/// into a fixed-rate map's command stream (the generic WASD/dodge/attack
+/// primitive). `target` carries the button bitmask, `arg = vec3(move_x,
+/// move_y, aim)`. A map decodes it in its `command(player, verb, ...)`
+/// handler; the engine attaches no meaning to it.
+const VERB_INPUT: u32 = 0;
+/// Real-time input button bits packed into a [`VERB_INPUT`] command's target.
+const BTN_ATTACK: u64 = 1 << 0;
+const BTN_DODGE: u64 = 1 << 1;
 /// Packed `0x00RRGGBB` sky / clear colour.
 const SKY_COLOR: u32 = 0x0099_B3D9;
 
@@ -173,6 +181,47 @@ struct Keys {
     zoom_out: bool,
 }
 
+/// Real-time gameplay input for a fixed-rate map: a held-key snapshot the
+/// host samples once per frame and injects as one [`VERB_INPUT`] command per
+/// sim tick. Generic (move axis + dodge + attack) — the map decides what the
+/// axes and buttons mean. `attack` tracks the left mouse button held.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Default, Clone, Copy)]
+struct Input {
+    fwd: bool,
+    back: bool,
+    left: bool,
+    right: bool,
+    dodge: bool,
+    attack: bool,
+}
+
+impl Input {
+    /// Pack this snapshot into the per-tick command the map decodes: integer
+    /// move axis in `arg.xy` (no float crosses the wall), buttons bitmask in
+    /// `target`. `aim` (`arg.z`) is reserved for a future mouse-aim refine.
+    fn to_command(self) -> Command {
+        let mx = i32::from(self.right) - i32::from(self.left);
+        let my = i32::from(self.fwd) - i32::from(self.back);
+        let buttons =
+            (u64::from(self.attack) * BTN_ATTACK) | (u64::from(self.dodge) * BTN_DODGE);
+        Command::on(
+            VERB_INPUT,
+            EntityId(buttons),
+            FixedVec3::new(Fixed::from_int(mx), Fixed::from_int(my), Fixed::ZERO),
+        )
+    }
+}
+
+/// The map's tick model as a render-loop pace: `Some(1/hz)` for a fixed-rate
+/// (real-time) map, `None` for a command-driven (turn-based) one.
+fn tick_dt(hz: SimHz) -> Option<f64> {
+    match hz {
+        SimHz::OnCommand => None,
+        SimHz::Fixed(h) => Some(1.0 / f64::from(h.max(1))),
+    }
+}
+
 /// A live networked lockstep match.
 struct Net {
     session: LockstepSession<QuicTransport, RhaiDriver>,
@@ -194,9 +243,42 @@ struct MapSim {
     world: SharedWorld,
     backend: Box<RhaiBackend>,
     render: Arc<Mutex<MapRender>>,
+    /// `Some(1/hz)` for a real-time map (drive its `tick` on the wall clock),
+    /// `None` for a command-driven one (chess: advance only on clicks).
+    tick_dt: Option<f64>,
+    accumulator: f64,
+    /// Player id attributed to this peer's input commands (hotseat = 0).
+    local: PlayerId,
 }
 
 impl MapSim {
+    /// Drive a real-time (fixed-rate) map on the wall clock: each accumulated
+    /// tick, feed the local input snapshot as one command, run the map's
+    /// `tick`, then apply any commands the script queued. A command-driven
+    /// map (`tick_dt == None`) does nothing here — it advances only on
+    /// clicks (`pointer`).
+    fn advance(&mut self, dt: f64, input: Input) {
+        let Some(step) = self.tick_dt else { return };
+        self.accumulator = (self.accumulator + dt).min(0.25);
+        let input_cmd = input.to_command();
+        let mut budget = MAX_CATCHUP_TICKS_PER_FRAME;
+        while self.accumulator >= step && budget > 0 {
+            self.backend
+                .on_command(self.local, &input_cmd)
+                .expect("map input command");
+            self.backend.on_tick().expect("map tick");
+            let commands = self.render.lock().expect("render mutex").drain_commands();
+            for command in commands {
+                self.backend
+                    .on_command(self.local, &command)
+                    .expect("map command handler");
+            }
+            self.backend.drain_ui_events();
+            self.accumulator -= step;
+            budget -= 1;
+        }
+    }
+
     /// Forward a pointer click to the map's `pointer` handler, then route
     /// whatever commands the gesture queued. Hotseat: commands apply
     /// immediately. The player id is a placeholder — the script enforces
@@ -232,6 +314,14 @@ struct NetMapSim {
     local: PlayerId,
     /// Local commands queued by clicks; submitted on the next ready tick.
     pending: Vec<Command>,
+    /// `Some(1/hz)` for a real-time map (submit a per-tick input command),
+    /// `None` for a command-driven one (chess: clicks only).
+    tick_dt: Option<f64>,
+    accumulator: f64,
+    /// True when a real-time input command is buffered in the session's
+    /// outbox during a stall, so we don't submit a duplicate next frame
+    /// (the session collapses everything buffered into one tick's bundle).
+    input_pending: bool,
     halted: bool,
     replay_path: String,
     saved: bool,
@@ -257,16 +347,56 @@ impl NetMapSim {
         self.pending.extend(commands);
     }
 
-    /// Advance the lockstep sim: execute every tick whose inputs have
-    /// arrived, handing queued local commands to `step` (buffered, never
-    /// dropped). Mirrors the M3 networked advance.
-    fn advance(&mut self) {
+    /// Advance the lockstep sim. A real-time map paces tick execution on the
+    /// wall clock and submits one input command per scheduled tick; a
+    /// command-driven map (chess) executes every ready tick, routing only
+    /// queued clicks. Queued commands are buffered by `step`, never dropped.
+    fn advance(&mut self, dt: f64, input: Input) {
+        let Some(step) = self.tick_dt else {
+            // Command-driven (chess): execute every ready tick, routing only
+            // queued clicks.
+            let mut budget = MAX_CATCHUP_TICKS_PER_FRAME;
+            while !self.halted && budget > 0 {
+                let cmds = std::mem::take(&mut self.pending);
+                match self.session.step(cmds) {
+                    Ok(true) => budget -= 1,
+                    Ok(false) => break,
+                    Err(desync) => {
+                        eprintln!("monada-host: {desync} — halting");
+                        self.halted = true;
+                    }
+                }
+            }
+            return;
+        };
+
+        // Real-time: pace tick execution on the wall clock, submitting one
+        // input command per scheduled tick.
+        self.accumulator = (self.accumulator + dt).min(0.25);
+        let input_cmd = input.to_command();
         let mut budget = MAX_CATCHUP_TICKS_PER_FRAME;
-        while !self.halted && budget > 0 {
-            let cmds = std::mem::take(&mut self.pending);
+        while !self.halted && self.accumulator >= step && budget > 0 {
+            let mut cmds = std::mem::take(&mut self.pending);
+            // One input per scheduled tick: don't re-submit one the session
+            // already buffered while stalled.
+            let submit_input = !self.input_pending;
+            if submit_input {
+                cmds.push(input_cmd);
+            }
             match self.session.step(cmds) {
-                Ok(true) => budget -= 1,
-                Ok(false) => break,
+                Ok(true) => {
+                    self.input_pending = false;
+                    self.accumulator -= step;
+                    budget -= 1;
+                }
+                Ok(false) => {
+                    // Stalled: anything passed is buffered in the session's
+                    // outbox; remember the input is there.
+                    if submit_input {
+                        self.input_pending = true;
+                    }
+                    break;
+                }
                 Err(desync) => {
                     eprintln!("monada-host: {desync} — halting");
                     self.halted = true;
@@ -452,13 +582,12 @@ struct App {
     /// the unit count grows as players spawn, so the scene is rebuilt when
     /// it changes.
     live_count: usize,
-    /// CPU sprite shading. `default_oracle` needs no engine and is
-    /// `'static`; required (as `Some`) for the CPU backend to draw the
-    /// mover sprites at all.
-    lighting: SpriteLighting<'static>,
     accumulator: f64,
     last_frame: Instant,
     keys: Keys,
+    /// Real-time gameplay input (WASD / dodge / attack), sampled per frame
+    /// and injected per tick into a fixed-rate map.
+    input: Input,
     /// Last cursor position in physical pixels, for click picking.
     cursor: (f64, f64),
     /// Smoothed frames-per-second for the HUD.
@@ -498,10 +627,10 @@ impl App {
             prev_pos: curr_pos.clone(),
             live_count: curr_pos.len(),
             curr_pos,
-            lighting: SpriteLighting::default_oracle(),
             accumulator: 0.0,
             last_frame: Instant::now(),
             keys: Keys::default(),
+            input: Input::default(),
             cursor: (0.0, 0.0),
             fps: 0.0,
             egui_ctx: egui::Context::default(),
@@ -592,6 +721,10 @@ impl App {
             world,
             backend: Box::new(backend),
             render,
+            tick_dt: tick_dt(run.map.manifest.sim_hz),
+            accumulator: 0.0,
+            // Hotseat: one local player drives the real-time input.
+            local: PlayerId(0),
         }))
     }
 
@@ -647,6 +780,9 @@ impl App {
             render,
             local,
             pending: Vec::new(),
+            tick_dt: tick_dt(run.map.manifest.sim_hz),
+            accumulator: 0.0,
+            input_pending: false,
             halted: false,
             replay_path: format!("monada-{tag}.replay"),
             saved: false,
@@ -844,8 +980,12 @@ impl App {
         }
     }
 
-    /// Advance the camera from currently-held keys.
+    /// Advance the camera from currently-held keys. A real-time map owns its
+    /// camera (the script aims it each tick), so host orbit is suppressed.
     fn drive_camera(&mut self, dt: f64) {
+        if self.realtime() {
+            return;
+        }
         let dyaw = (f64::from(self.keys.yaw_right) - f64::from(self.keys.yaw_left)) * YAW_RATE * dt;
         let dpitch =
             (f64::from(self.keys.pitch_down) - f64::from(self.keys.pitch_up)) * PITCH_RATE * dt;
@@ -951,18 +1091,22 @@ impl App {
             self.fps = self.fps.mul_add(0.9, (1.0 / dt) as f32 * 0.1);
         }
 
-        // Advance the sim and compute the render blend factor. A map is
-        // command-driven — no wall-clock tick — so it just snaps to the
-        // current world.
+        // Advance the sim and compute the render blend factor. A real-time
+        // map paces its `tick` on the wall clock with the per-tick input
+        // snapshot; a command-driven map snaps to the current world.
+        let input = self.input;
         let alpha = match &mut self.sim {
             Sim::Local { .. } => self.advance_local(dt),
             Sim::Net(_) => {
                 self.advance_net();
                 1.0
             }
-            Sim::Map(_) => 1.0,
+            Sim::Map(map) => {
+                map.advance(dt, input);
+                1.0
+            }
             Sim::NetMap(nm) => {
-                nm.advance();
+                nm.advance(dt, input);
                 1.0
             }
             Sim::Replay(r) => {
@@ -1013,11 +1157,14 @@ impl App {
             // grid; 0 renders nothing.
             gpu_max_outer_steps: 64,
             gpu_fov_y_rad: 1.2,
-            // Required (Some) for the CPU backend to draw the sprites.
-            sprite_lighting: Some(&self.lighting),
-            // Per-face grid shading (roxlap 0.8). Flat for now; the map
-            // paths override this from their declared sun (step 2/3).
+            // Sprites are flat-lit on both backends in roxlap 0.19; just the
+            // on/off opt-in for the circle scene's movers.
+            draw_sprites: true,
+            // Per-face grid shading. Flat for the circle scene; the map
+            // paths override this from their declared sun.
             side_shades: [0; 6],
+            // Dynamic lighting (GPU-only sun + point lights) — unused here.
+            lights: None,
         };
 
         let Some(renderer) = self.renderer.as_mut() else {
@@ -1032,12 +1179,12 @@ impl App {
                 renderer.render(scene.scene_mut(), &camera, &frame);
             }
             SceneKind::Map(render) => {
-                // The map lights itself: its own sprite sun + grid
-                // side-shades + sky, built per frame from its engine.
+                // The map lights itself (grid side-shades + sky) and drives
+                // its animated actors; `dt` advances their animation clocks.
                 render
                     .lock()
                     .expect("render mutex")
-                    .render_into(renderer, &camera, &settings, SKY_COLOR);
+                    .render_into(renderer, &camera, &settings, SKY_COLOR, dt);
             }
         }
         match hud {
@@ -1124,10 +1271,18 @@ impl ApplicationHandler for App {
                 self.cursor = (position.x, position.y);
             }
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
-            } if !consumed => self.on_click(),
+            } if !consumed => {
+                let down = state == ElementState::Pressed;
+                // Held-attack for a real-time map; a chess-style pick for a
+                // command-driven one (on press only).
+                self.input.attack = down;
+                if down && !self.realtime() {
+                    self.on_click();
+                }
+            }
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
@@ -1228,13 +1383,36 @@ impl App {
             KeyCode::ArrowRight => self.keys.yaw_right = down,
             KeyCode::ArrowUp => self.keys.pitch_up = down,
             KeyCode::ArrowDown => self.keys.pitch_down = down,
+            // W/S zoom the camera for the orbit scenes (circle / chess); for a
+            // real-time map they drive movement and the script owns the camera.
+            KeyCode::KeyW if self.realtime() => self.input.fwd = down,
+            KeyCode::KeyS if self.realtime() => self.input.back = down,
             KeyCode::KeyW => self.keys.zoom_in = down,
             KeyCode::KeyS => self.keys.zoom_out = down,
-            // Replay transport: `[` slower, `]` faster, Space pause.
+            KeyCode::KeyA => self.input.left = down,
+            KeyCode::KeyD => self.input.right = down,
+            // Space is the real-time dodge; for a replay it toggles pause
+            // (the two modes never coexist).
+            KeyCode::Space => {
+                self.input.dodge = down;
+                if down {
+                    self.replay_control(|r| r.paused = !r.paused);
+                }
+            }
+            // Replay transport: `[` slower, `]` faster.
             KeyCode::BracketLeft if down => self.replay_control(|r| r.scale_speed(0.5)),
             KeyCode::BracketRight if down => self.replay_control(|r| r.scale_speed(2.0)),
-            KeyCode::Space if down => self.replay_control(|r| r.paused = !r.paused),
             _ => {}
+        }
+    }
+
+    /// Whether the running sim is a real-time (fixed-rate) map — the script
+    /// drives movement from the input snapshot and owns the camera.
+    fn realtime(&self) -> bool {
+        match &self.sim {
+            Sim::Map(map) => map.tick_dt.is_some(),
+            Sim::NetMap(nm) => nm.tick_dt.is_some(),
+            _ => false,
         }
     }
 

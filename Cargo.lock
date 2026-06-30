@@ -319,6 +319,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -907,6 +913,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ae047235e33e2829703574b54fdec96bfbad892062d97fed2f76022287de61b"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
 name = "gl_generator"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1353,6 +1369,7 @@ name = "monada-host"
 version = "0.0.1"
 dependencies = [
  "egui-winit",
+ "gif",
  "glam",
  "image",
  "monada-fixed",
@@ -1409,6 +1426,19 @@ dependencies = [
  "roxlap-formats",
  "roxlap-render",
  "roxlap-scene",
+]
+
+[[package]]
+name = "monada-rpg"
+version = "0.0.1"
+dependencies = [
+ "gif",
+ "monada-fixed",
+ "monada-format",
+ "monada-host",
+ "monada-net",
+ "monada-script",
+ "monada-sim",
 ]
 
 [[package]]
@@ -2353,18 +2383,18 @@ dependencies = [
 
 [[package]]
 name = "roxlap-cavegen"
-version = "0.9.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c34c1362d9ac3122a3d506c4c2380b2ab1fa5228cb10d7dfdff322ea5ea8aa9"
+checksum = "96e16d86ecdca60c51b3d5ee99bb683a7d8fd3a50bfdc377668622b0286801d6"
 dependencies = [
  "roxlap-formats",
 ]
 
 [[package]]
 name = "roxlap-core"
-version = "0.9.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "220bb8db5e6eb2e09a8a31c03740d8d9fa6b2cbc0f9dbed6586530052f9f961a"
+checksum = "1306f68bb8ee33cdb955e27270feedd410afc194b89ae302a07d51ef06969711"
 dependencies = [
  "rayon",
  "roxlap-formats",
@@ -2372,15 +2402,19 @@ dependencies = [
 
 [[package]]
 name = "roxlap-formats"
-version = "0.9.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d531222b3001e932c080f6caf082b9e268a76bbee3de709a52aea1f2283edb81"
+checksum = "c29061d95fada1f5e1b9a26fdf38c6a39b6f4d79d8f611fc50cc817253cee1f3"
+dependencies = [
+ "gif",
+ "miniz_oxide",
+]
 
 [[package]]
 name = "roxlap-gpu"
-version = "0.9.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea8223f5e278941f5a1622db4c192939ec379a840764ff91445946d8a420bb03"
+checksum = "cf362c7b06f99c95c07a2cf6db8392a25be3f93c5efcc89f6b7afda4a984e7ee"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2395,9 +2429,9 @@ dependencies = [
 
 [[package]]
 name = "roxlap-render"
-version = "0.9.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "897467aedeb0442696257425f86c3b9bc2c0862b4c2aa7ba73ca228c9f67d666"
+checksum = "9dfc63fc93d2c2bcf860668b36627f22b60685509e5c7224b17d79582747c80e"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2415,9 +2449,9 @@ dependencies = [
 
 [[package]]
 name = "roxlap-scene"
-version = "0.9.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a287cab3cbb5572f5835fecce487cbd877f4fa051aa7f14c9de8393fb7f585d"
+checksum = "5ef44689902a6928579813d8906c2dc2347e2b1ad8798e123c3e526cbafe1798"
 dependencies = [
  "crossbeam-channel",
  "glam",
@@ -3364,6 +3398,12 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "weezl"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "wgpu"

@@ -372,6 +372,7 @@ fn register_host_api(engine: &mut Engine, world: &SharedWorld, events: &UiEventB
 /// Kept separate from the sim host API because the *implementation* lives
 /// in the host (roxlap render) while this crate knows only the primitive
 /// signatures — the sim / script wall.
+#[allow(clippy::too_many_lines)] // a flat list of host-fn registrations
 fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     let b = bridge.clone();
     engine.register_fn(
@@ -389,6 +390,29 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     let b = bridge.clone();
     engine.register_fn("entity_set_model", move |e: i64, model: i64| {
         b.lock().expect("bridge mutex").entity_set_model(e, model);
+    });
+
+    // Animated 8-direction billboard actor: `model_actor(dir, [states])`,
+    // then per-entity `entity_set_anim` / `entity_set_facing` (render-side).
+    let b = bridge.clone();
+    engine.register_fn("model_actor", move |path: ImmutableString, states: Array| -> i64 {
+        let states: Vec<String> = states
+            .into_iter()
+            .map(|d| d.into_string().unwrap_or_default())
+            .collect();
+        b.lock()
+            .expect("bridge mutex")
+            .model_actor(path.as_str(), &states)
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("entity_set_anim", move |e: i64, state: ImmutableString| {
+        b.lock().expect("bridge mutex").entity_set_anim(e, state.as_str());
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("entity_set_facing", move |e: i64, yaw: Fixed| {
+        b.lock().expect("bridge mutex").entity_set_facing(e, yaw);
     });
 
     let b = bridge.clone();
@@ -437,6 +461,11 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     });
 
     let b = bridge.clone();
+    engine.register_fn("camera_dist", move |dist: Fixed| {
+        b.lock().expect("bridge mutex").camera_dist(dist);
+    });
+
+    let b = bridge.clone();
     engine.register_fn(
         "submit_command",
         move |verb: i64, target: i64, arg: FixedVec3| {
@@ -465,6 +494,19 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     let b = bridge.clone();
     engine.register_fn("set_sky", move |path: ImmutableString| {
         b.lock().expect("bridge mutex").set_sky(path.as_str());
+    });
+
+    // Terrain collision queries (sim coords). Deterministic: the store is a
+    // pure function of the script's own paint calls, so every peer answers
+    // identically — safe to feed hashed `tick()` decisions.
+    let b = bridge.clone();
+    engine.register_fn("voxel_solid", move |x: i64, y: i64, z: i64| -> bool {
+        b.lock().expect("bridge mutex").voxel_solid(x, y, z)
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("ground_height", move |x: i64, y: i64| -> i64 {
+        b.lock().expect("bridge mutex").ground_height(x, y)
     });
 }
 

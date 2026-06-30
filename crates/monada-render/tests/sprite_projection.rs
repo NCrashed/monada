@@ -2,14 +2,14 @@
 //! basis must be **right-handed** (`right × down = forward`), or roxlap's
 //! sprite frustum cull rejects every sprite (the grid opticast tolerates
 //! a left-handed basis, so the bug shows only as "no sprites"). Drives
-//! roxlap's CPU `draw_sprite` headlessly and checks pixels land, centred.
+//! roxlap's CPU `draw_sprite_dda` headlessly and checks pixels land, centred.
 #![allow(clippy::similar_names)] // minx/maxx/miny/maxy bbox bounds
 
 use glam::DVec3;
 use monada_render::OrbitCamera;
 use roxlap_core::camera_math;
 use roxlap_core::opticast::OpticastSettings;
-use roxlap_core::sprite::{draw_sprite, DrawTarget, SpriteLighting};
+use roxlap_core::draw_sprite_dda;
 use roxlap_formats::kv6::Kv6;
 use roxlap_formats::sprite::Sprite;
 
@@ -22,14 +22,21 @@ fn draw_at(pos: [f32; 3]) -> (u32, (u32, u32)) {
     let cam_state = camera_math::derive(&cam, w, h, settings.hx, settings.hy, settings.hz);
 
     let sprite = Sprite::axis_aligned(Kv6::solid_cube(10, 0x80FF_6B35), pos);
-    let lighting = SpriteLighting::default_oracle();
 
     let mut fb = vec![0u32; (w * h) as usize];
     let mut zb = vec![f32::INFINITY; (w * h) as usize];
-    let written = {
-        let mut target = DrawTarget::new(&mut fb, &mut zb, w as usize, w, h);
-        draw_sprite(&mut target, &cam_state, &settings, &lighting, &sprite)
-    };
+    // roxlap 0.19: the CPU sprite raycaster is `draw_sprite_dda` (flat-lit,
+    // fb/zb in hand) — no more `DrawTarget`/`SpriteLighting` wrapper.
+    let written = draw_sprite_dda(
+        &mut fb,
+        &mut zb,
+        w as usize,
+        w,
+        h,
+        &cam_state,
+        &settings,
+        &sprite,
+    );
 
     let (mut minx, mut miny, mut maxx, mut maxy) = (w, h, 0u32, 0u32);
     for y in 0..h {

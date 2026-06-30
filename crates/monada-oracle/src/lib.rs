@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 
 use monada_script::{
     run_script, shared_world, NullBridge, RhaiBackend, RhaiDriver, ScriptBackend, SharedBridge,
-    SharedWorld, COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
+    SharedWorld, TerrainBridge, COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId, World};
 
@@ -304,6 +304,71 @@ pub fn chess_checkpoints() -> Vec<Checkpoint> {
     out
 }
 
+/// The action-RPG demo map, embedded for the golden (read straight from the
+/// map's script file). Runs headless under a [`TerrainBridge`], so its
+/// `voxel_fill` terrain answers collision while the actor / sky calls no-op.
+const RPG_SCRIPT: &str = include_str!("../../monada-rpg/map/scripts/main.rhai");
+/// Hash the demo run at these tick counts (`rpg@0` = post-init, with
+/// wave 1 deployed and no hero yet).
+const RPG_CHECKPOINTS: &[usize] = &[0, 1, 30, 150, 600];
+
+/// A fixed, deterministic per-tick real-time input for the golden: orbit the
+/// move axis with periodic attack / dodge (verb 0 = input; `target` = button
+/// bitmask; `arg.xy` = move axis).
+fn rpg_input(t: usize) -> Command {
+    let (mx, my) = match t % 4 {
+        0 => (1, 0),
+        1 => (0, 1),
+        2 => (-1, 0),
+        _ => (0, -1),
+    };
+    let mut btn = 0u64;
+    if t % 9 == 0 {
+        btn |= 1; // attack
+    }
+    if t % 23 == 0 {
+        btn |= 2; // dodge
+    }
+    Command::on(
+        0,
+        EntityId(btn),
+        FixedVec3::new(Fixed::from_int(mx), Fixed::from_int(my), Fixed::ZERO),
+    )
+}
+
+/// The action-RPG golden: the real-time demo map driven through its own
+/// script under a headless [`TerrainBridge`], one input command per tick,
+/// hashed at fixed tick counts. Gates cross-platform determinism of the
+/// real-time tick + per-tick input + voxel-query + wave-RNG path.
+///
+/// # Panics
+/// Panics on a script compile/run failure (a bug, not a data condition).
+#[must_use]
+pub fn rpg_checkpoints() -> Vec<Checkpoint> {
+    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let mut driver = RhaiDriver::with_bridge(shared_world(SEED), RPG_SCRIPT, &bridge)
+        .expect("compile rpg");
+
+    let mut out = Vec::new();
+    let mut record = |driver: &RhaiDriver, n: usize| {
+        if RPG_CHECKPOINTS.contains(&n) {
+            out.push(Checkpoint {
+                scenario: "rpg",
+                tick: n as u64,
+                hash: driver.state_hash(),
+            });
+        }
+    };
+
+    record(&driver, 0);
+    for t in 1..=600usize {
+        driver.apply_command(P0, &rpg_input(t));
+        driver.step();
+        record(&driver, t);
+    }
+    out
+}
+
 /// Every gated scenario's checkpoints, in a fixed order.
 #[must_use]
 pub fn all_checkpoints() -> Vec<Checkpoint> {
@@ -311,6 +376,7 @@ pub fn all_checkpoints() -> Vec<Checkpoint> {
     out.extend(kernel_checkpoints());
     out.extend(lockstep_checkpoints());
     out.extend(chess_checkpoints());
+    out.extend(rpg_checkpoints());
     out
 }
 
@@ -333,7 +399,9 @@ pub fn render_goldens(checkpoints: &[Checkpoint]) -> String {
     s.push_str("# monada determinism goldens — @generated, do not hand-edit.\n");
     s.push_str(
         "# scenarios: walk (scripted circle), kernel (pure-Rust anchor), \
-         lockstep (two-session command demo); seed \"MONADA_0\".\n",
+         lockstep (two-session command demo), chess (turn-based rules), \
+         rpg (real-time action-RPG: per-tick input + voxel-query + wave \
+         RNG); seed \"MONADA_0\".\n",
     );
     s.push_str("# Regenerate with `cargo run -p monada-oracle -- --bless`.\n");
     for c in checkpoints {

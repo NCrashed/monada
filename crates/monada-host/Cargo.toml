@@ -25,12 +25,13 @@ monada-format = { workspace = true }
 # Lockstep transport with the QUIC backend (M3 Phase B): the host's
 # `--listen`/`--connect` two-process play.
 monada-net = { workspace = true, features = ["quic"] }
-# Render facade + camera/opticast types. roxlap 0.8.0 via the sibling
-# path checkout (workspace dep), matching monada-render.
-# `hud` enables roxlap's egui overlay (SceneRenderer::paint_egui); the
-# crate re-exports `egui` so we tessellate with the exact version it
-# paints with.
-roxlap-render = { workspace = true, features = ["hud"] }
+# Render facade + camera/opticast types (roxlap 0.19, crates.io workspace
+# dep, matching monada-render).
+# `hud` enables roxlap's egui overlay (SceneRenderer::paint_egui); the crate
+# re-exports `egui` so we tessellate with the exact version it paints with.
+# `gif` re-exports the animated-GIF → VoxelClip importer (`gif_import`) for
+# the RPG demo's directional billboard actors.
+roxlap-render = { workspace = true, features = ["hud", "gif"] }
 roxlap-core = { workspace = true }
 # Scene graph + voxel grid edit API (the map paints its world here), named
 # in the host's scene accessors so one render path drives any map.
@@ -48,6 +49,12 @@ egui-winit = { version = "0.34", default-features = false }
 # Decode a map's `assets/*.png` skybox to RGBA8 (PNG only — the format
 # the map ships).
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+# Encode tiny in-memory GIFs to exercise the actor-bridge decode path
+# headlessly (the renderer half needs a window). Same decoder roxlap's
+# `gif_import` uses.
+gif = "0.13"
 
 [lints]
 workspace = true

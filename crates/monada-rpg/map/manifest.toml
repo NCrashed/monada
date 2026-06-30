@@ -1,0 +1,13 @@
+# A co-op action-RPG demo map — a proof that the map-agnostic monada core can
+# carry a real-time, billboard-sprite game. Manifest schema:
+# monada_format::Manifest.
+name = "monada RPG demo"
+engine_version = "0.0.1"
+# Co-op: 1 for the single-player slice; raise for LAN co-op (--listen /
+# --connect). No PvP — all players fight the waves together.
+players = 1
+# Real-time: the sim advances on a fixed 30 Hz clock; the host injects one
+# per-tick input command per local player (WASD move, Space dodge, LMB attack).
+sim_hz = "30hz"
+script_runtime = "rhai"
+entry = "scripts/main.rhai"
