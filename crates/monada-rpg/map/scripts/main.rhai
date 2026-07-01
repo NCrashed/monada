@@ -743,8 +743,14 @@ fn local_dead() {
 /// Any button the local player is pressing during the intro (LMB / Space), or
 /// `0` before a hero exists — used to skip the typewriter / dismiss the intro.
 fn intro_input() {
-    let players = entities_of(0);
-    if players.len() > 0 { to_int(entity_field(players[0], "btn")) } else { 0 }
+    // Any connected hero can skip the typing / dismiss the intro — co-op has
+    // no privileged player. Deterministic: every peer applies every player's
+    // input, so `started` flips on the same tick on both ends.
+    let btn = 0;
+    for p in entities_of(0) {
+        btn |= to_int(entity_field(p, "btn"));
+    }
+    btn
 }
 
 /// Advance the intro cutscene one tick: reveal the next glyph (blipping the

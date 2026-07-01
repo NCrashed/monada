@@ -3,9 +3,10 @@
 # monada_format::Manifest.
 name = "monada RPG demo"
 engine_version = "0.0.1"
-# Co-op: 1 for the single-player slice; raise for LAN co-op (--listen /
-# --connect). No PvP — all players fight the waves together.
-players = 1
+# Co-op: two players over LAN lockstep (--listen host = player 0, --connect
+# client = player 1). No PvP — both fight the waves together, sharing one
+# deterministic sim. Runs solo too (no flag = hotseat player 0).
+players = 2
 # Real-time: the sim advances on a fixed 30 Hz clock; the host injects one
 # per-tick input command per local player (WASD move, Space dodge, LMB attack).
 sim_hz = "30hz"
