@@ -102,7 +102,11 @@ mod real {
                             let channels = dec.channels();
                             let rate = dec.sample_rate();
                             let samples: Vec<f32> = dec.convert_samples().collect();
-                            Some(Pcm { channels, rate, samples })
+                            Some(Pcm {
+                                channels,
+                                rate,
+                                samples,
+                            })
                         }
                         Err(e) => {
                             eprintln!("monada-host: audio decode {path:?}: {e}");
@@ -113,6 +117,57 @@ mod real {
                 decoded.insert(path.to_string(), pcm);
             }
             decoded.get(path).and_then(Option::as_ref)
+        }
+
+        /// Synthesise a short tone on the fly (the Undertale-style typing
+        /// "voice") and mix it. `wave`: 0 square / 1 saw / 2 triangle / 3 sine /
+        /// 4 noise; `freq` Hz; `dur_ms` length; `gain` 0..1. A tiny attack/
+        /// release envelope de-clicks it. No cache/debounce — blips are meant to
+        /// fire rapidly, one per typed glyph.
+        pub fn blip(&self, wave: i64, freq: i64, dur_ms: i64, gain: f32) {
+            if let Some(handle) = &self.handle {
+                let _ = handle.play_raw(Self::synth(wave, freq, dur_ms, gain));
+            }
+        }
+
+        fn synth(wave: i64, freq: i64, dur_ms: i64, gain: f32) -> SamplesBuffer<f32> {
+            const RATE: u32 = 44_100;
+            let dur_ms = dur_ms.clamp(1, 500) as u32;
+            let freq = (freq.clamp(20, 20_000)) as f32;
+            let n = (RATE * dur_ms / 1000).max(1) as usize;
+            let period = RATE as f32 / freq; // samples per cycle
+            let atk = ((RATE as usize * 2 / 1000).min(n / 4)).max(1); // ~2 ms
+            let rel = ((RATE as usize * 15 / 1000).min(n / 2)).max(1); // ~15 ms
+            let mut seed: u32 = 0x9E37_79B9 ^ (freq as u32); // noise LCG
+            let mut data = Vec::with_capacity(n);
+            for i in 0..n {
+                let phase = (i as f32 / period).fract();
+                let s = match wave {
+                    1 => 2.0 * phase - 1.0,                     // saw
+                    2 => 1.0 - 4.0 * (phase - 0.5).abs(),       // triangle
+                    3 => (phase * std::f32::consts::TAU).sin(), // sine
+                    4 => {
+                        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        (seed >> 8) as f32 / 16_777_216.0 * 2.0 - 1.0 // 24-bit → -1..1
+                    }
+                    _ => {
+                        if phase < 0.5 {
+                            1.0
+                        } else {
+                            -1.0
+                        }
+                    } // 0 = square (default)
+                };
+                let env = if i < atk {
+                    i as f32 / atk as f32
+                } else if i >= n - rel {
+                    (n - i) as f32 / rel as f32
+                } else {
+                    1.0
+                };
+                data.push(s * gain * env);
+            }
+            SamplesBuffer::new(1, RATE, data)
         }
 
         pub fn play(&mut self, path: &str, gain: f32, now: Instant) {
@@ -195,6 +250,7 @@ mod stub {
             Audio
         }
         pub fn play(&mut self, _path: &str, _gain: f32, _now: Instant) {}
+        pub fn blip(&self, _wave: i64, _freq: i64, _dur_ms: i64, _gain: f32) {}
         pub fn play_music(&mut self, _path: &str) {}
         pub fn stop_music(&mut self) {}
         pub fn sync_loops(&mut self, _requested: &[String], _now: Instant) {}

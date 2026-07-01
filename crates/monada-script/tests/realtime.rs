@@ -13,9 +13,9 @@
 use std::sync::{Arc, Mutex};
 
 use monada_fixed::{Fixed, FixedVec3};
-use monada_sim::{Command, EntityId, PlayerId};
 use monada_net::SimDriver;
 use monada_script::{shared_world, RhaiDriver, SharedBridge, TerrainBridge};
+use monada_sim::{Command, EntityId, PlayerId};
 
 const SEED: u64 = 0x4D4F_4E41_4441_5F30;
 const P0: PlayerId = PlayerId(0);

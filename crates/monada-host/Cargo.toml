@@ -46,9 +46,9 @@ winit = "0.30"
 # `roxlap_render::egui` so the versions can't drift — roxlap 0.9.0 moved to
 # egui 0.34, so this tracks it.
 egui-winit = { version = "0.34", default-features = false }
-# Decode a map's `assets/*.png` skybox to RGBA8 (PNG only — the format
-# the map ships).
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Decode a map's `assets/*.png` images (skybox, tiles, UI) to RGBA8, and
+# `.gif` animations (the `ui_gif` talking portrait) into frames + delays.
+image = { version = "0.25", default-features = false, features = ["png", "gif"] }
 # Audio output + MP3 decode for the map's `assets/sounds/*.mp3` (behind the
 # `audio` feature, on by default). rodio pulls cpal, which links the platform
 # audio backend (ALSA on Linux) at BUILD time — so a headless / no-ALSA box

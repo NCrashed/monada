@@ -89,7 +89,11 @@ fn opening_position_is_standard() {
     assert_eq!(game_field(&world, "winner"), -1, "game in progress");
     assert_eq!(game_field(&world, "castle"), 15, "all four castling rights");
     assert_eq!(game_field(&world, "ep_x"), -1, "no en-passant square");
-    assert_eq!(game_field(&world, "halfmove"), 0, "fifty-move clock at zero");
+    assert_eq!(
+        game_field(&world, "halfmove"),
+        0,
+        "fifty-move clock at zero"
+    );
 }
 
 #[test]
@@ -189,7 +193,8 @@ fn fools_mate_is_checkmate() {
     // The game is decided: further commands are no-ops.
     let before = world.lock().unwrap().state_hash();
     let e = piece_at(&world, 0, 1).unwrap(); // white a-pawn, still home
-    b.on_command(ANY, &Command::on(MOVE, e, square(0, 2))).unwrap();
+    b.on_command(ANY, &Command::on(MOVE, e, square(0, 2)))
+        .unwrap();
     assert_eq!(
         world.lock().unwrap().state_hash(),
         before,

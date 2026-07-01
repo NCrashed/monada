@@ -8,8 +8,8 @@
 use glam::DVec3;
 use monada_render::OrbitCamera;
 use roxlap_core::camera_math;
-use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::draw_sprite_dda;
+use roxlap_core::opticast::OpticastSettings;
 use roxlap_formats::kv6::Kv6;
 use roxlap_formats::sprite::Sprite;
 
@@ -28,14 +28,7 @@ fn draw_at(pos: [f32; 3]) -> (u32, (u32, u32)) {
     // roxlap 0.19: the CPU sprite raycaster is `draw_sprite_dda` (flat-lit,
     // fb/zb in hand) — no more `DrawTarget`/`SpriteLighting` wrapper.
     let written = draw_sprite_dda(
-        &mut fb,
-        &mut zb,
-        w as usize,
-        w,
-        h,
-        &cam_state,
-        &settings,
-        &sprite,
+        &mut fb, &mut zb, w as usize, w, h, &cam_state, &settings, &sprite,
     );
 
     let (mut minx, mut miny, mut maxx, mut maxy) = (w, h, 0u32, 0u32);

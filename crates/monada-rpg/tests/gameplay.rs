@@ -60,6 +60,13 @@ fn step(b: &mut RhaiBackend, cmd: &Command) {
     b.on_tick().expect("tick");
 }
 
+/// Dismiss the intro cutscene: two attack presses jump the typewriter to the
+/// end and launch wave 1 (see `advance_dialogue`). Also spawns P0's hero.
+fn skip_intro(b: &mut RhaiBackend) {
+    step(b, &input(0, 0, 1)); // attack bit skips the typewriter
+    step(b, &input(0, 0, 1)); // ... then dismisses the full line → wave 1
+}
+
 fn count(world: &SharedWorld, arch: ArchetypeId) -> usize {
     world.lock().unwrap().count(arch)
 }
@@ -79,8 +86,8 @@ fn player_pos(world: &SharedWorld) -> FixedVec3 {
 #[test]
 fn dead_enemy_lingers_before_despawn() {
     let (world, mut b) = fresh();
-    step(&mut b, &input(0, 0, 0)); // spawn hero
-    // Wait out the summon telegraph so wave-1 enemies materialise.
+    skip_intro(&mut b); // past the intro → wave 1 telegraphed, hero spawned
+                        // Wait out the summon telegraph so wave-1 enemies materialise.
     for _ in 0..50 {
         step(&mut b, &input(0, 0, 0));
     }
@@ -115,11 +122,11 @@ fn dead_enemy_lingers_before_despawn() {
 #[test]
 fn obstacles_block_the_hero() {
     let (world, mut b) = fresh();
-    step(&mut b, &input(0, 0, 0)); // spawn hero at (7, 10)
-    // Movement is camera-relative (yaw 0.8): the `(-1,-1)` input rotates to a
-    // near-straight sim south (−y), driving the hero down its spawn column
-    // (x≈7) into the pillar at cells x∈{6,7}, y∈{6,7}. It must stop above the
-    // pillar (y ≈ 8), never passing through to the far side (y < 6).
+    skip_intro(&mut b); // past the intro so the hero can move
+                        // Movement is camera-relative (yaw 0.8): the `(-1,-1)` input rotates to a
+                        // near-straight sim south (−y), driving the hero down its spawn column
+                        // (x≈7) into the pillar at cells x∈{6,7}, y∈{6,7}. It must stop above the
+                        // pillar (y ≈ 8), never passing through to the far side (y < 6).
     for _ in 0..120 {
         step(&mut b, &input(-1, -1, 0));
     }
@@ -130,23 +137,43 @@ fn obstacles_block_the_hero() {
 #[test]
 fn setup_spawns_arena_and_first_wave() {
     let (world, mut b) = fresh();
-    // Heroes spawn lazily (on first input), so the arena starts hero-less
-    // with wave 1 already TELEGRAPHED — summons first, enemies materialise after
-    // the ~1.5s summon window (so nothing spawns in the player's face).
+    // Fresh = the intro cutscene: no hero, no wave, gameplay frozen.
     assert_eq!(count(&world, PLAYER), 0, "no hero until a player acts");
-    assert_eq!(count(&world, SUMMON), 4, "wave 1 = round(1.2 * (2 + wave)) = 4 summons");
-    assert_eq!(count(&world, ENEMY), 0, "enemies haven't materialised yet");
-    assert!(field(&world, GAME, 0, "wave") > 0.5, "wave director at wave 1");
+    assert_eq!(count(&world, SUMMON), 0, "no wave during the intro");
+    assert!(
+        field(&world, GAME, 0, "started") < 0.5,
+        "still in the intro"
+    );
 
-    step(&mut b, &input(0, 0, 0));
-    assert_eq!(count(&world, PLAYER), 1, "hero spawns on first input");
-    assert!(field(&world, PLAYER, 0, "hp") > 99.0, "hero starts at full hp");
+    // Dismiss the intro → wave 1 TELEGRAPHED as summons; enemies materialise
+    // after the ~1.5s window (so nothing spawns in the player's face).
+    skip_intro(&mut b);
+    assert!(field(&world, GAME, 0, "started") > 0.5, "intro dismissed");
+    assert_eq!(
+        count(&world, SUMMON),
+        4,
+        "wave 1 = round(1.2 * (2 + wave)) = 4 summons"
+    );
+    assert_eq!(count(&world, ENEMY), 0, "enemies haven't materialised yet");
+    assert!(
+        field(&world, GAME, 0, "wave") > 0.5,
+        "wave director at wave 1"
+    );
+    assert_eq!(count(&world, PLAYER), 1, "hero spawned from the skip input");
+    assert!(
+        field(&world, PLAYER, 0, "hp") > 99.0,
+        "hero starts at full hp"
+    );
 
     // After the telegraph the summons become enemies.
     for _ in 0..50 {
         step(&mut b, &input(0, 0, 0));
     }
-    assert_eq!(count(&world, ENEMY), 4, "the 4 summons materialised into enemies");
+    assert_eq!(
+        count(&world, ENEMY),
+        4,
+        "the 4 summons materialised into enemies"
+    );
     assert_eq!(count(&world, SUMMON), 0, "telegraphs cleared");
 }
 
@@ -155,7 +182,8 @@ fn co_op_spawns_a_hero_per_player() {
     let (world, mut b) = fresh();
     // Two peers act this tick — each gets its own hero (no PvP, shared waves).
     b.on_command(P0, &input(0, 0, 0)).expect("p0 input");
-    b.on_command(PlayerId(1), &input(0, 0, 0)).expect("p1 input");
+    b.on_command(PlayerId(1), &input(0, 0, 0))
+        .expect("p1 input");
     b.on_tick().expect("tick");
     assert_eq!(count(&world, PLAYER), 2, "one hero per player");
 }
@@ -163,7 +191,7 @@ fn co_op_spawns_a_hero_per_player() {
 #[test]
 fn input_moves_the_hero() {
     let (world, mut b) = fresh();
-    step(&mut b, &input(0, 0, 0)); // first input spawns the hero (at rest)
+    skip_intro(&mut b); // past the intro; hero spawned
     let start = player_pos(&world).x.to_f64();
     // Walk east for a while.
     for _ in 0..20 {
@@ -177,7 +205,8 @@ fn input_moves_the_hero() {
 #[test]
 fn enemies_chase_and_wound_the_hero() {
     let (world, mut b) = fresh();
-    // Stand still; the four enemies converge and start hitting.
+    skip_intro(&mut b); // past the intro → wave 1
+                        // Stand still; the four enemies converge and start hitting.
     for _ in 0..240 {
         step(&mut b, &input(0, 0, 0));
     }

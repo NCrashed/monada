@@ -124,8 +124,22 @@ fn frame(base: [u8; 3], state: &str, side: &str, f: usize) -> Rgba {
     let top = 4 + bob;
 
     // Legs.
-    rect(&mut buf, cx - 3, H as i32 - 6, cx - 1, H as i32 - 2 - bob, dark);
-    rect(&mut buf, cx + 1, H as i32 - 6, cx + 3, H as i32 - 2 + bob, dark);
+    rect(
+        &mut buf,
+        cx - 3,
+        H as i32 - 6,
+        cx - 1,
+        H as i32 - 2 - bob,
+        dark,
+    );
+    rect(
+        &mut buf,
+        cx + 1,
+        H as i32 - 6,
+        cx + 3,
+        H as i32 - 2 + bob,
+        dark,
+    );
     // Torso.
     rect(&mut buf, cx - 4, top + 5, cx + 4, H as i32 - 6, body);
     // Head.
@@ -139,7 +153,13 @@ fn frame(base: [u8; 3], state: &str, side: &str, f: usize) -> Rgba {
 
     // Attack throws the marker further out (a lunge read).
     if state == "attack" {
-        disc(&mut buf, cx + fx * 7, (top + 8) + fy * 5, 1, [255, 60, 40, 255]);
+        disc(
+            &mut buf,
+            cx + fx * 7,
+            (top + 8) + fy * 5,
+            1,
+            [255, 60, 40, 255],
+        );
     }
     buf
 }
@@ -179,8 +199,7 @@ fn fx_frame(color: [u8; 3], f: usize) -> Rgba {
 fn write_gif(path: &Path, mut frames: Vec<Rgba>, w: usize, h: usize, delay: u16) {
     let mut out = Vec::new();
     {
-        let mut enc =
-            gif::Encoder::new(&mut out, w as u16, h as u16, &[]).expect("gif encoder");
+        let mut enc = gif::Encoder::new(&mut out, w as u16, h as u16, &[]).expect("gif encoder");
         enc.set_repeat(gif::Repeat::Infinite).expect("set repeat");
         for rgba in &mut frames {
             let mut frame = gif::Frame::from_rgba(w as u16, h as u16, rgba);

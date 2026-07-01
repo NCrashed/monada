@@ -383,9 +383,14 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     );
 
     let b = bridge.clone();
-    engine.register_fn("model_kv6", move |path: ImmutableString, turns: i64| -> i64 {
-        b.lock().expect("bridge mutex").model_kv6(path.as_str(), turns)
-    });
+    engine.register_fn(
+        "model_kv6",
+        move |path: ImmutableString, turns: i64| -> i64 {
+            b.lock()
+                .expect("bridge mutex")
+                .model_kv6(path.as_str(), turns)
+        },
+    );
 
     let b = bridge.clone();
     engine.register_fn("entity_set_model", move |e: i64, model: i64| {
@@ -414,7 +419,9 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
 
     let b = bridge.clone();
     engine.register_fn("entity_set_anim", move |e: i64, state: ImmutableString| {
-        b.lock().expect("bridge mutex").entity_set_anim(e, state.as_str());
+        b.lock()
+            .expect("bridge mutex")
+            .entity_set_anim(e, state.as_str());
     });
 
     let b = bridge.clone();
@@ -432,9 +439,23 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").play_sound(path.as_str());
     });
     let b = bridge.clone();
-    engine.register_fn("play_sound_gain", move |path: ImmutableString, gain: Fixed| {
-        b.lock().expect("bridge mutex").play_sound_gain(path.as_str(), gain);
-    });
+    engine.register_fn(
+        "play_sound_gain",
+        move |path: ImmutableString, gain: Fixed| {
+            b.lock()
+                .expect("bridge mutex")
+                .play_sound_gain(path.as_str(), gain);
+        },
+    );
+    let b = bridge.clone();
+    engine.register_fn(
+        "play_blip",
+        move |wave: i64, freq: i64, dur_ms: i64, gain: Fixed| {
+            b.lock()
+                .expect("bridge mutex")
+                .play_blip(wave, freq, dur_ms, gain);
+        },
+    );
     let b = bridge.clone();
     engine.register_fn("play_loop", move |path: ImmutableString| {
         b.lock().expect("bridge mutex").play_loop(path.as_str());
@@ -591,6 +612,14 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").ui_texture(path.as_str())
     });
     let b = bridge.clone();
+    engine.register_fn("ui_gif", move |path: ImmutableString| -> i64 {
+        b.lock().expect("bridge mutex").ui_gif(path.as_str())
+    });
+    let b = bridge.clone();
+    engine.register_fn("ui_anim", move |gif: i64, x: i64, y: i64| {
+        b.lock().expect("bridge mutex").ui_anim(gif, x, y);
+    });
+    let b = bridge.clone();
     engine.register_fn("ui_width", move || -> i64 {
         b.lock().expect("bridge mutex").ui_width()
     });
@@ -611,13 +640,32 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").ui_image(tex, x, y);
     });
     let b = bridge.clone();
-    engine.register_fn("ui_image_clip", move |tex: i64, x: i64, y: i64, frac: Fixed| {
-        b.lock().expect("bridge mutex").ui_image_clip(tex, x, y, frac);
-    });
+    engine.register_fn(
+        "ui_image_clip",
+        move |tex: i64, x: i64, y: i64, frac: Fixed| {
+            b.lock()
+                .expect("bridge mutex")
+                .ui_image_clip(tex, x, y, frac);
+        },
+    );
     let b = bridge.clone();
-    engine.register_fn("ui_text", move |x: i64, y: i64, text: ImmutableString, size: i64| {
-        b.lock().expect("bridge mutex").ui_text(x, y, text.as_str(), size);
-    });
+    engine.register_fn(
+        "ui_text",
+        move |x: i64, y: i64, text: ImmutableString, size: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .ui_text(x, y, text.as_str(), size);
+        },
+    );
+    let b = bridge.clone();
+    engine.register_fn(
+        "ui_text_wrap",
+        move |x: i64, y: i64, text: ImmutableString, size: i64, width: i64, color: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .ui_text_wrap(x, y, text.as_str(), size, width, color);
+        },
+    );
     let b = bridge.clone();
     engine.register_fn(
         "ui_button",

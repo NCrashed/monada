@@ -1056,6 +1056,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
 name = "gl_generator"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1217,6 +1227,8 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif 0.14.2",
  "moxcms",
  "num-traits",
  "png",
@@ -1554,7 +1566,7 @@ name = "monada-host"
 version = "0.0.1"
 dependencies = [
  "egui-winit",
- "gif",
+ "gif 0.13.3",
  "glam",
  "image",
  "monada-fixed",
@@ -1618,7 +1630,7 @@ dependencies = [
 name = "monada-rpg"
 version = "0.0.1"
 dependencies = [
- "gif",
+ "gif 0.13.3",
  "image",
  "monada-fixed",
  "monada-format",
@@ -2700,7 +2712,7 @@ version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfd97b9ec5ff9196f3c8e9205af66ef9401d6ce9ce188614cd58fa68e9bc4ced"
 dependencies = [
- "gif",
+ "gif 0.13.3",
  "miniz_oxide",
 ]
 

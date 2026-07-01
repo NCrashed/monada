@@ -346,8 +346,8 @@ fn rpg_input(t: usize) -> Command {
 #[must_use]
 pub fn rpg_checkpoints() -> Vec<Checkpoint> {
     let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
-    let mut driver = RhaiDriver::with_bridge(shared_world(SEED), RPG_SCRIPT, &bridge)
-        .expect("compile rpg");
+    let mut driver =
+        RhaiDriver::with_bridge(shared_world(SEED), RPG_SCRIPT, &bridge).expect("compile rpg");
 
     let mut out = Vec::new();
     let mut record = |driver: &RhaiDriver, n: usize| {

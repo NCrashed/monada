@@ -38,6 +38,23 @@ fn sep_radius()    { ratio(12, 10) }    // ~1.2 cells (mobs are ~1.3 wide)
 fn sep_gain()      { ratio(6, 100) }
 fn sep_max()       { ratio(8, 100) }
 
+// --- intro dialogue ------------------------------------------------------
+// The goddess's synth "voice": engine `play_blip(wave, freq_hz, dur_ms, gain)`
+// fired once every `blip_every` typed glyphs (wave 2 = triangle, soft). Tune
+// the timbre/pitch here.
+fn goddess_wave()  { 2 }              // 0 square 1 saw 2 triangle 3 sine 4 noise
+fn goddess_freq()  { 380 }            // base Hz (a small per-glyph warble is added)
+fn goddess_dur()   { 45 }             // ms per blip
+fn goddess_gain()  { ratio(22, 100) } // 0.22
+fn blip_every()    { 2 }              // one blip per N glyphs
+fn reveal_hold()   { 90 }             // ticks to hold the full line before play starts
+
+/// The intro line, revealed by the typewriter (`.len()` glyph count +
+/// `.sub_string`).
+fn intro_text() {
+    "Hero, your task is to hold out as long as you can against the forces of evil. Move with WASD, Space to dodge, LMB to swing your sword."
+}
+
 // --- small fixed-point helpers ------------------------------------------
 fn absf(x) { if x < fixed(0) { -x } else { x } }
 
@@ -188,7 +205,7 @@ fn try_move(e, vx, vy) {
 fn init() {
     archetype(["hp", "ix", "iy", "btn", "face", "atk", "dodge", "ddx", "ddy", "cool", "hurt", "dead", "aim", "swing"]);
     archetype(["hp", "face", "atkcd", "hurt", "dead"]);
-    archetype(["wave", "timer", "score"]);
+    archetype(["wave", "timer", "score", "dlg", "started"]); // dlg = typewriter index, started = intro over
     archetype(["life"]); // 3 = attack-burst effect (purely cosmetic, short-lived)
     archetype(["life", "sx", "sy"]); // 4 = summon telegraph: a pending spawn at (sx, sy)
 
@@ -244,12 +261,13 @@ fn init() {
     ui_texture("assets/ui/restart-button.png");         // 5
     ui_texture("assets/ui/restart-button-hover.png");   // 6
     ui_texture("assets/ui/restart-button-pressed.png"); // 7
+    ui_texture("assets/ui/dialog-box.png");             // 8 = dialogue panel
+    ui_gif("assets/ui/goddes-talking.gif");             // gif 0 = talking portrait
 
-    // Wave director singleton, then the first wave. Heroes spawn lazily as
-    // each player's input first arrives (co-op join), so no player count is
-    // needed up front.
-    let g = entity_create(2);
-    next_wave(g);
+    // Wave director singleton. The first wave is deferred until the intro
+    // dialogue finishes (see `advance_dialogue`); heroes spawn lazily as each
+    // player's input first arrives (co-op join), no player count needed up front.
+    entity_create(2);
 
     // Hades-style fixed camera, pulled in close on the hero; follows the
     // local player each tick.
@@ -363,6 +381,16 @@ fn command(player, verb, target, arg) {
 
 // --- one simulation tick ------------------------------------------------
 fn tick() {
+    let g = entities_of(2)[0];
+    // Intro cutscene: the goddess speaks. Gameplay is frozen (no player step,
+    // no enemies) until the dialogue is dismissed and the first wave launches.
+    if to_int(entity_field(g, "started")) == 0 {
+        advance_dialogue(g);
+        follow_camera();
+        build_ui();
+        return;
+    }
+
     for p in entities_of(0) {
         step_player(p);
     }
@@ -712,16 +740,81 @@ fn local_dead() {
 /// widget list between ticks and repaints it every frame, mapping button
 /// clicks back into the next input command. Texture ids are the `init` load
 /// order (0..7). Every ui_* call is render-side — never hashed.
+/// Any button the local player is pressing during the intro (LMB / Space), or
+/// `0` before a hero exists — used to skip the typewriter / dismiss the intro.
+fn intro_input() {
+    let players = entities_of(0);
+    if players.len() > 0 { to_int(entity_field(players[0], "btn")) } else { 0 }
+}
+
+/// Advance the intro cutscene one tick: reveal the next glyph (blipping the
+/// goddess's synth voice every `blip_every` glyphs), let a button skip the
+/// typing, hold the full line briefly, then start the game (`started` = 1 +
+/// first wave). The reveal index `dlg` is hashed sim state, so every peer's
+/// intro is in lockstep; the blip is render-side.
+fn advance_dialogue(g) {
+    let len = intro_text().len();
+    let dlg = to_int(entity_field(g, "dlg"));
+    let btn = intro_input();
+    if dlg < len {
+        if btn != 0 {
+            entity_set_field(g, "dlg", fixed(len)); // skip straight to the full line
+        } else {
+            let nd = dlg + 1;
+            entity_set_field(g, "dlg", fixed(nd));
+            if nd % blip_every() == 0 {
+                // A small per-glyph warble gives the voice some life.
+                play_blip(goddess_wave(), goddess_freq() + (nd % 4) * 20, goddess_dur(), goddess_gain());
+            }
+        }
+    } else if dlg < len + reveal_hold() && btn == 0 {
+        entity_set_field(g, "dlg", fixed(dlg + 1)); // hold, showing the full line
+    } else {
+        entity_set_field(g, "started", fixed(1));
+        next_wave(g);
+    }
+}
+
+/// The intro dialogue box: panel + talking portrait + the revealed text.
+fn build_dialogue(g, w, h) {
+    let dlg = to_int(entity_field(g, "dlg"));
+    let len = intro_text().len();
+    let shown = if dlg > len { len } else { dlg };
+
+    // Panel (dialog-box 230×54) at 3× along the bottom.
+    ui_scale(fixed(3));
+    let bw = 690;
+    let bh = 162;
+    let bx = (w - bw) / 2;
+    let by = h - bh - 30;
+    ui_image(8, bx, by);
+
+    // Talking portrait (256×256) at ~0.8×, pinned to the panel's top-left
+    // corner (rising above it, overlapping the edge a touch).
+    ui_scale(ratio(80, 100));
+    let pw = 205;
+    ui_anim(0, bx + 15, by - pw + 10);
+
+    // The revealed text, word-wrapped across the panel — 30 px tighter on each
+    // side than the panel, a touch smaller, and warm yellow.
+    ui_scale(fixed(2));
+    ui_text_wrap(bx + 100, by + 41, intro_text().sub_string(0, shown), 11, 270, 0xffe066);
+}
+
 fn build_ui() {
     ui_clear();
-    ui_scale(fixed(2)); // draw every HUD texture + number at 2× native size
     let w = ui_width();
     let h = ui_height();
     if w <= 0 {
         return; // no viewport yet (pre-first-frame, or headless oracle)
     }
-
     let g = entities_of(2)[0];
+    if to_int(entity_field(g, "started")) == 0 {
+        build_dialogue(g, w, h);
+        return;
+    }
+
+    ui_scale(fixed(2)); // draw every HUD texture + number at 2× native size
 
     // Texture sizes are doubled by ui_scale, so lay out at 2× dims. Base sizes:
     // health bar 158×22, panels 86×22, restart button 86×26.

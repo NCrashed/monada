@@ -15,11 +15,14 @@
 //! is per-player and never touches `World` or the desync hash.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Cursor;
 
+use image::AnimationDecoder;
+
+use crate::autotile;
 use glam::{DVec3, IVec3};
 use monada_fixed::{Fixed, FixedVec3};
 use monada_render::OrbitCamera;
-use crate::autotile;
 use monada_script::{HostBridge, VoxelStore};
 use monada_sim::{Command, EntityId, World};
 use roxlap_core::opticast::OpticastSettings;
@@ -99,13 +102,50 @@ pub enum MusicCmd {
 }
 
 /// One HUD widget the map described this frame (screen points, top-left
-/// origin). Texture fields index [`MapRender::ui_textures`].
+/// origin). Texture fields index [`MapRender::ui_textures`]. Each widget
+/// captures the `ui_scale` in effect when it was pushed, so a map can mix sizes
+/// in one frame (a big portrait next to a smaller panel).
 #[derive(Clone)]
 pub enum UiWidget {
-    Image { tex: usize, x: i32, y: i32 },
+    Image {
+        tex: usize,
+        x: i32,
+        y: i32,
+        scale: f32,
+    },
     /// A texture clipped to the left `frac` (0..1) of its width (bar fill).
-    ImageClip { tex: usize, x: i32, y: i32, frac: f32 },
-    Text { x: i32, y: i32, text: String, size: f32 },
+    ImageClip {
+        tex: usize,
+        x: i32,
+        y: i32,
+        frac: f32,
+        scale: f32,
+    },
+    Text {
+        x: i32,
+        y: i32,
+        text: String,
+        size: f32,
+        scale: f32,
+    },
+    /// Word-wrapped text within `width` points, `0x00RR_GGBB` (dialogue).
+    TextWrap {
+        x: i32,
+        y: i32,
+        text: String,
+        size: f32,
+        width: f32,
+        color: u32,
+        scale: f32,
+    },
+    /// An animated image (`ui_gif` id); the host draws the wall-clock-current
+    /// frame (a talking portrait).
+    Anim {
+        gif: usize,
+        x: i32,
+        y: i32,
+        scale: f32,
+    },
     /// An image button (normal / hover / pressed textures); a click OR-s
     /// `bit` into the next input command's button mask.
     Button {
@@ -115,6 +155,7 @@ pub enum UiWidget {
         x: i32,
         y: i32,
         bit: u64,
+        scale: f32,
     },
 }
 
@@ -213,12 +254,9 @@ fn merge_box(
     b: Option<(u32, u32, u32, u32)>,
 ) -> Option<(u32, u32, u32, u32)> {
     match (a, b) {
-        (Some((ax0, ax1, az0, az1)), Some((bx0, bx1, bz0, bz1))) => Some((
-            ax0.min(bx0),
-            ax1.max(bx1),
-            az0.min(bz0),
-            az1.max(bz1),
-        )),
+        (Some((ax0, ax1, az0, az1)), Some((bx0, bx1, bz0, bz1))) => {
+            Some((ax0.min(bx0), ax1.max(bx1), az0.min(bz0), az1.max(bz1)))
+        }
         (Some(x), None) | (None, Some(x)) => Some(x),
         (None, None) => None,
     }
@@ -384,12 +422,27 @@ pub struct MapRender {
     /// the same sound in one frame enqueue it once. Render-side; the host owns
     /// the mixer (rodio is `!Send`, this bridge is `Send`).
     sounds_pending: Vec<(String, f32)>,
+    /// Synthesised voice blips queued this frame (`(wave, freq_hz, dur_ms,
+    /// gain)`), NOT de-duplicated — one per typed glyph. Drained with the rest.
+    blips_pending: Vec<(i64, i64, i64, f32)>,
     /// Looping sounds the map requested (via `play_loop`) since the last drain,
     /// de-duplicated by path. A "should this loop play now" snapshot: the host
     /// starts requested loops and stops ones that go unrequested (footsteps).
     loops_pending: Vec<String>,
     /// Background-music change since the last drain (`None` = unchanged).
     music_change: Option<MusicCmd>,
+    /// Animated HUD images (`ui_gif`): decoded RGBA frames + per-frame delay
+    /// (ms) + dims, indexed by the id returned to the script. The host cycles
+    /// frames by wall-clock and draws the current one for a `UiWidget::Anim`.
+    ui_gifs: Vec<UiGif>,
+}
+
+/// A decoded animated HUD image (a portrait): its frames as `(RGBA, delay_ms)`
+/// plus the shared dimensions.
+pub struct UiGif {
+    pub frames: Vec<(Vec<u8>, u32)>,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl MapRender {
@@ -438,8 +491,10 @@ impl MapRender {
             ui_viewport: (0, 0),
             ui_scale: 1.0,
             sounds_pending: Vec::new(),
+            blips_pending: Vec::new(),
             loops_pending: Vec::new(),
             music_change: None,
+            ui_gifs: Vec::new(),
         }
     }
 
@@ -463,8 +518,7 @@ impl MapRender {
         self.actor_targets.clear();
         // Snapshot the bindings so the loop can mutate the disjoint sprite /
         // actor-target fields freely (the map is small — per-entity).
-        let bindings: Vec<(EntityId, usize)> =
-            self.models.iter().map(|(&e, &m)| (e, m)).collect();
+        let bindings: Vec<(EntityId, usize)> = self.models.iter().map(|(&e, &m)| (e, m)).collect();
         for (e, model_id) in bindings {
             let Some(p) = world.position(e) else {
                 continue; // despawned (e.g. captured / killed)
@@ -477,11 +531,9 @@ impl MapRender {
                     // model's bottom face sits `(zsiz - zpiv)` below the pivot
                     // (z grows down). For a centre-pivot box this is the old
                     // `w.z - zsiz/2`; an off-centre piece no longer sinks.
-                    let drop = self
-                        .sprites
-                        .models
-                        .get(si)
-                        .map_or(SCALE * 0.5, |m| f64::from(m.kv6.zsiz) - f64::from(m.kv6.zpiv));
+                    let drop = self.sprites.models.get(si).map_or(SCALE * 0.5, |m| {
+                        f64::from(m.kv6.zsiz) - f64::from(m.kv6.zpiv)
+                    });
                     self.sprites.instances.push(SpriteInstanceDesc {
                         model: si,
                         pos: [w.x as f32, w.y as f32, (w.z - drop) as f32],
@@ -496,8 +548,12 @@ impl MapRender {
                         .get(&e)
                         .map_or(0.0, |a| facing_to_world_yaw(a.facing));
                     let drop = self.actors.get(ai).map_or(0.0, |a| a.drop);
-                    self.actor_targets
-                        .push((e, ai, [w.x as f32, w.y as f32, w.z as f32 + drop], yaw));
+                    self.actor_targets.push((
+                        e,
+                        ai,
+                        [w.x as f32, w.y as f32, w.z as f32 + drop],
+                        yaw,
+                    ));
                 }
                 None => {}
             }
@@ -588,25 +644,34 @@ impl MapRender {
         self.ui_textures.get(id)
     }
 
+    /// A HUD animation's decoded frames, by the id `ui_gif` returned to the map.
+    #[must_use]
+    pub fn ui_gif_data(&self, id: usize) -> Option<&UiGif> {
+        self.ui_gifs.get(id)
+    }
+
     /// Record the current viewport (screen points) so the map can lay the HUD
     /// out relative to the window via `ui_width` / `ui_height`.
     pub fn set_ui_viewport(&mut self, width: i64, height: i64) {
         self.ui_viewport = (width, height);
     }
 
-    /// The uniform scale the map set for its HUD textures/text (`ui_scale`).
-    #[must_use]
-    pub fn ui_scale_factor(&self) -> f32 {
-        self.ui_scale
-    }
-
     /// Take the audio the map queued since the last call: the de-duplicated
-    /// one-shot `(path, gain)` requests, the loops that should be audible this
-    /// frame, and any [`MusicCmd`] (`None` = unchanged). The host owns the mixer
-    /// and plays them (rodio is `!Send`, so it can't live here).
-    pub fn drain_audio(&mut self) -> (Vec<(String, f32)>, Vec<String>, Option<MusicCmd>) {
+    /// one-shot `(path, gain)` requests, the synth `(wave, freq, dur, gain)`
+    /// blips, the loops that should be audible this frame, and any [`MusicCmd`]
+    /// (`None` = unchanged). The host owns the mixer (rodio is `!Send`).
+    #[allow(clippy::type_complexity)]
+    pub fn drain_audio(
+        &mut self,
+    ) -> (
+        Vec<(String, f32)>,
+        Vec<(i64, i64, i64, f32)>,
+        Vec<String>,
+        Option<MusicCmd>,
+    ) {
         (
             std::mem::take(&mut self.sounds_pending),
+            std::mem::take(&mut self.blips_pending),
             std::mem::take(&mut self.loops_pending),
             self.music_change.take(),
         )
@@ -775,7 +840,11 @@ impl MapRender {
             // The target pos includes the model's `model_drop`; the collision
             // ground is the un-dropped z, so the box shows the true footprint.
             let drop = f64::from(self.actors.get(ai).map_or(0.0, |a| a.drop));
-            let (cx, cy, cz) = (f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2]) - drop);
+            let (cx, cy, cz) = (
+                f64::from(pos[0]),
+                f64::from(pos[1]),
+                f64::from(pos[2]) - drop,
+            );
             let corners = [
                 [cx - R, cy - R, cz],
                 [cx + R, cy - R, cz],
@@ -1028,6 +1097,11 @@ impl HostBridge for MapRender {
         self.sounds_pending.push((asset_path.to_string(), g));
     }
 
+    fn play_blip(&mut self, wave: i64, freq: i64, dur_ms: i64, gain: Fixed) {
+        let g = gain.to_f64().clamp(0.0, 1.0) as f32;
+        self.blips_pending.push((wave, freq, dur_ms, g));
+    }
+
     fn play_loop(&mut self, asset_path: &str) {
         if !self.loops_pending.iter().any(|p| p == asset_path) {
             self.loops_pending.push(asset_path.to_string());
@@ -1101,7 +1175,9 @@ impl HostBridge for MapRender {
         let mut cells = Vec::with_capacity((s * s) as usize);
         for ty in 0..s {
             for tx in 0..s {
-                let px = img.get_pixel((tx * w / s).min(w - 1), (ty * h / s).min(h - 1)).0;
+                let px = img
+                    .get_pixel((tx * w / s).min(w - 1), (ty * h / s).min(h - 1))
+                    .0;
                 let [r, g, b, _a] = px;
                 cells.push(0x8000_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b));
             }
@@ -1185,7 +1261,10 @@ impl HostBridge for MapRender {
         // Floor pixel (fx, fy) is sim-aligned; world X is mirrored (`-fx - 1`,
         // matching `tile_fill`/`world_of`), Y direct, at the floor surface.
         autotiler.paint(x0, y0, x1, y1, base_type, |fx, fy, color| {
-            grid.set_voxel(IVec3::new((-fx - 1) as i32, fy as i32, g as i32), Some(color));
+            grid.set_voxel(
+                IVec3::new((-fx - 1) as i32, fy as i32, g as i32),
+                Some(color),
+            );
         });
     }
 
@@ -1208,6 +1287,50 @@ impl HostBridge for MapRender {
         (self.ui_textures.len() - 1) as i64
     }
 
+    fn ui_gif(&mut self, asset_path: &str) -> i64 {
+        let Some(bytes) = self.assets.get(asset_path) else {
+            eprintln!("monada-host: ui_gif: missing asset {asset_path:?}");
+            return -1;
+        };
+        let frames = image::codecs::gif::GifDecoder::new(Cursor::new(bytes.clone()))
+            .and_then(|d| d.into_frames().collect_frames());
+        let frames = match frames {
+            Ok(f) if !f.is_empty() => f,
+            Ok(_) => return -1,
+            Err(e) => {
+                eprintln!("monada-host: ui_gif: {asset_path:?}: {e}");
+                return -1;
+            }
+        };
+        let (mut w, mut h) = (0u32, 0u32);
+        let mut out = Vec::with_capacity(frames.len());
+        for f in frames {
+            let (num, den) = f.delay().numer_denom_ms();
+            let delay = num.checked_div(den).map_or(100, |d| d.max(10));
+            let img = f.into_buffer();
+            w = img.width();
+            h = img.height();
+            out.push((img.into_raw(), delay));
+        }
+        self.ui_gifs.push(UiGif {
+            frames: out,
+            width: w,
+            height: h,
+        });
+        (self.ui_gifs.len() - 1) as i64
+    }
+
+    fn ui_anim(&mut self, gif: i64, x: i64, y: i64) {
+        if let Ok(gif) = usize::try_from(gif) {
+            self.ui_widgets.push(UiWidget::Anim {
+                gif,
+                x: x as i32,
+                y: y as i32,
+                scale: self.ui_scale,
+            });
+        }
+    }
+
     fn ui_width(&self) -> i64 {
         self.ui_viewport.0
     }
@@ -1225,15 +1348,25 @@ impl HostBridge for MapRender {
 
     fn ui_image(&mut self, tex: i64, x: i64, y: i64) {
         if let Ok(tex) = usize::try_from(tex) {
-            self.ui_widgets.push(UiWidget::Image { tex, x: x as i32, y: y as i32 });
+            self.ui_widgets.push(UiWidget::Image {
+                tex,
+                x: x as i32,
+                y: y as i32,
+                scale: self.ui_scale,
+            });
         }
     }
 
     fn ui_image_clip(&mut self, tex: i64, x: i64, y: i64, frac: Fixed) {
         if let Ok(tex) = usize::try_from(tex) {
             let frac = frac.to_f64().clamp(0.0, 1.0) as f32;
-            self.ui_widgets
-                .push(UiWidget::ImageClip { tex, x: x as i32, y: y as i32, frac });
+            self.ui_widgets.push(UiWidget::ImageClip {
+                tex,
+                x: x as i32,
+                y: y as i32,
+                frac,
+                scale: self.ui_scale,
+            });
         }
     }
 
@@ -1243,6 +1376,19 @@ impl HostBridge for MapRender {
             y: y as i32,
             text: text.to_string(),
             size: size.max(1) as f32,
+            scale: self.ui_scale,
+        });
+    }
+
+    fn ui_text_wrap(&mut self, x: i64, y: i64, text: &str, size: i64, width: i64, color: i64) {
+        self.ui_widgets.push(UiWidget::TextWrap {
+            x: x as i32,
+            y: y as i32,
+            text: text.to_string(),
+            size: size.max(1) as f32,
+            width: width.max(1) as f32,
+            color: (color as u32) & 0x00FF_FFFF,
+            scale: self.ui_scale,
         });
     }
 
@@ -1262,6 +1408,7 @@ impl HostBridge for MapRender {
             x: x as i32,
             y: y as i32,
             bit,
+            scale: self.ui_scale,
         });
     }
 

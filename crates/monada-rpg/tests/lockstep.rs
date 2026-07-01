@@ -40,7 +40,14 @@ fn session(player: PlayerId, transport: LoopbackTransport, map: &monada_format::
         map_hash: map.hash,
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
     };
-    LockstepSession::new(driver, transport, player, &[P0, P1], SessionConfig::default(), info)
+    LockstepSession::new(
+        driver,
+        transport,
+        player,
+        &[P0, P1],
+        SessionConfig::default(),
+        info,
+    )
 }
 
 fn input(mx: i32, my: i32, buttons: u64) -> Command {
@@ -128,5 +135,9 @@ fn replay_reproduces_the_co_op_session() {
     let mut fresh =
         RhaiDriver::with_bridge(shared_world(SEED), map.entry_script().unwrap(), &bridge)
             .expect("compile rpg map");
-    assert_eq!(a.replay().playback(&mut fresh), final_hash, "replay reproduces co-op");
+    assert_eq!(
+        a.replay().playback(&mut fresh),
+        final_hash,
+        "replay reproduces co-op"
+    );
 }

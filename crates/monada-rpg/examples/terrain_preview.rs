@@ -25,7 +25,9 @@ const W: i64 = 16;
 const H: i64 = 16;
 
 fn main() {
-    let name = std::env::args().nth(1).unwrap_or_else(|| "grass-dirt".into());
+    let name = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "grass-dirt".into());
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("map/assets/tiles");
     let sheet = image::open(root.join(format!("{name}.png")))
         .unwrap_or_else(|e| panic!("open {name}.png: {e}"))

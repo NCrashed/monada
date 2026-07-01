@@ -254,6 +254,11 @@ pub trait HostBridge: Send {
     fn play_sound(&mut self, _asset_path: &str) {}
     /// [`play_sound`](Self::play_sound) with an explicit gain (`0..1`, clamped).
     fn play_sound_gain(&mut self, _asset_path: &str, _gain: Fixed) {}
+    /// Synthesise a short "voice" blip on the fly — the Undertale-style typing
+    /// sound. `wave`: 0 square / 1 saw / 2 triangle / 3 sine / 4 noise; `freq`
+    /// in Hz (the character's pitch); `dur_ms` length; `gain` 0..1. Mixed in
+    /// parallel, no de-dup (fire one per typed glyph). Render-side.
+    fn play_blip(&mut self, _wave: i64, _freq: i64, _dur_ms: i64, _gain: Fixed) {}
     /// Keep a looping sound audible: call it every tick the loop should play
     /// (e.g. footsteps while moving). The host starts it on the first request
     /// and stops it shortly after the calls stop — so a *state* (moving) drives
@@ -300,7 +305,16 @@ pub trait HostBridge: Send {
     /// [`voxel_fill`](Self::voxel_fill) (so a textured wall still blocks). The
     /// default does nothing.
     #[allow(clippy::too_many_arguments)]
-    fn tile_fill(&mut self, _x0: i64, _y0: i64, _z0: i64, _x1: i64, _y1: i64, _z1: i64, _tile: i64) {
+    fn tile_fill(
+        &mut self,
+        _x0: i64,
+        _y0: i64,
+        _z0: i64,
+        _x1: i64,
+        _y1: i64,
+        _z1: i64,
+        _tile: i64,
+    ) {
     }
 
     /// Register a marching-squares transition sheet (a 4×4 `.png`) for terrain
@@ -329,6 +343,15 @@ pub trait HostBridge: Send {
     fn ui_texture(&mut self, _asset_path: &str) -> i64 {
         -1
     }
+    /// Register an animated HUD image from a `.gif` (a talking portrait);
+    /// returns an id (separate space from `ui_texture`), or `-1`. Draw it with
+    /// [`ui_anim`](Self::ui_anim); the host cycles its frames by wall-clock.
+    fn ui_gif(&mut self, _asset_path: &str) -> i64 {
+        -1
+    }
+    /// Draw animated image `gif` (from [`ui_gif`](Self::ui_gif)) at `(x, y)` —
+    /// its current frame this instant.
+    fn ui_anim(&mut self, _gif: i64, _x: i64, _y: i64) {}
     /// Viewport width / height in screen points (for anchoring), or `0`.
     fn ui_width(&self) -> i64 {
         0
@@ -349,6 +372,19 @@ pub trait HostBridge: Send {
     fn ui_image_clip(&mut self, _tex: i64, _x: i64, _y: i64, _frac: Fixed) {}
     /// Draw `text` (white, `size`-pt) with its top-left at `(x, y)`.
     fn ui_text(&mut self, _x: i64, _y: i64, _text: &str, _size: i64) {}
+    /// Draw word-wrapped `text` within `width` points, in `0xRRGGBB` `color`
+    /// (dialogue paragraphs).
+    #[allow(clippy::too_many_arguments)]
+    fn ui_text_wrap(
+        &mut self,
+        _x: i64,
+        _y: i64,
+        _text: &str,
+        _size: i64,
+        _width: i64,
+        _color: i64,
+    ) {
+    }
     /// Draw an image button (`tex` normal / `hover` / `pressed`) at `(x, y)`.
     /// When clicked, the host OR-s `button_bit` into the next input command's
     /// button mask, so the map handles it in `command` like any button.

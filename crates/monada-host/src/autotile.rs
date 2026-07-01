@@ -22,9 +22,7 @@ use std::collections::BTreeMap;
 /// Bit order `TL=8 TR=4 BR=2 BL=1`. Derived from the reference `grass-dirt`
 /// sheet; both demo sheets share this layout. If a sheet uses a different
 /// layout the transitions look scrambled — re-derive with the inspector.
-pub const CONFIG_TO_TILE: [usize; 16] = [
-    6, 10, 7, 9, 2, 4, 11, 15, 5, 1, 14, 8, 3, 13, 0, 12,
-];
+pub const CONFIG_TO_TILE: [usize; 16] = [6, 10, 7, 9, 2, 4, 11, 15, 5, 1, 14, 8, 3, 13, 0, 12];
 
 /// `config` from the four corner fills `[TL, TR, BR, BL]` (true =
 /// `high`/foreground type).
@@ -107,8 +105,12 @@ impl Terrain {
     /// Register a transition sheet for `high` over `low`, and remember both
     /// types' solid textures.
     pub fn add_transition(&mut self, low: i64, high: i64, t: Transition) {
-        self.solids.entry(low).or_insert_with(|| t.solid_low().to_vec());
-        self.solids.entry(high).or_insert_with(|| t.solid_high().to_vec());
+        self.solids
+            .entry(low)
+            .or_insert_with(|| t.solid_low().to_vec());
+        self.solids
+            .entry(high)
+            .or_insert_with(|| t.solid_high().to_vec());
         self.transitions.insert((low.min(high), low.max(high)), t);
     }
 
@@ -149,15 +151,19 @@ impl Terrain {
                             // Sharp fallback: colour each quadrant by its cell.
                             Tile::Sharp([qtl, qtr, qbr, qbl]) => {
                                 let q = if lx < half {
-                                    if ly < half { qtl } else { qbl }
+                                    if ly < half {
+                                        qtl
+                                    } else {
+                                        qbl
+                                    }
                                 } else if ly < half {
                                     qtr
                                 } else {
                                     qbr
                                 };
-                                self.solids.get(q).map_or(0x8080_8080, |s| {
-                                    s[(ly * cell + lx) as usize]
-                                })
+                                self.solids
+                                    .get(q)
+                                    .map_or(0x8080_8080, |s| s[(ly * cell + lx) as usize])
                             }
                         };
                         put(ox + lx, oy + ly, color);

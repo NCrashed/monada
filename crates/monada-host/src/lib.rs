@@ -49,9 +49,9 @@ use monada_script::{
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
+mod audio;
 pub mod autotile;
 pub mod cli;
-mod audio;
 mod map_render;
 use audio::Audio;
 use map_render::MapRender;
@@ -631,6 +631,11 @@ struct App {
     /// egui texture handles for the map's HUD images, indexed by the id
     /// `ui_texture` returned to the script (uploaded lazily, once each).
     ui_tex_cache: Vec<Option<egui::TextureHandle>>,
+    /// egui texture handles for animated HUD images (`ui_gif`): `[gif][frame]`,
+    /// each frame uploaded lazily the first time it is shown.
+    ui_gif_cache: Vec<Vec<Option<egui::TextureHandle>>>,
+    /// Epoch for wall-clock HUD animation timing (`ui_anim` frame selection).
+    epoch: Instant,
     /// The audio mixer (feature `audio`; a no-op shim otherwise). Fed each
     /// frame by `MapRender::drain_audio`; owns the rodio output (`!Send`).
     audio: Audio,
@@ -687,6 +692,8 @@ impl App {
             egui_ctx: egui::Context::default(),
             egui_state: None,
             ui_tex_cache: Vec::new(),
+            ui_gif_cache: Vec::new(),
+            epoch: Instant::now(),
             debug_hud: false,
             debug_done: false,
         }
@@ -979,16 +986,17 @@ impl App {
     /// Paint the scripted map HUD ([`MapRender::ui_widgets`]) this frame and
     /// route button clicks into the next tick's input command. Screen-space,
     /// render-side only — never touches the sim state hash.
+    #[allow(clippy::too_many_lines)] // a flat per-widget-kind match
     fn paint_map_hud(&mut self, ctx: &egui::Context) {
         let SceneKind::Map(render) = &self.scene else {
             return;
         };
         let render = render.clone();
         let size = ctx.content_rect().size();
-        let (widgets, scale) = {
+        let widgets = {
             let mut r = render.lock().expect("render mutex");
             r.set_ui_viewport(size.x as i64, size.y as i64);
-            (r.ui_widgets().to_vec(), r.ui_scale_factor())
+            r.ui_widgets().to_vec()
         };
         if widgets.is_empty() {
             return;
@@ -997,18 +1005,24 @@ impl App {
         let mut clicked_bits = 0u64;
         for (i, w) in widgets.iter().enumerate() {
             match w {
-                map_render::UiWidget::Image { tex, x, y } => {
+                map_render::UiWidget::Image { tex, x, y, scale } => {
                     if let Some(h) = self.ui_handle(ctx, &render, *tex) {
                         Self::ui_area(ctx, i, *x, *y, |ui| {
-                            let sz = tex_points(&h) * scale;
+                            let sz = tex_points(&h) * *scale;
                             ui.add(egui::Image::new(&h).fit_to_exact_size(sz));
                         });
                     }
                 }
-                map_render::UiWidget::ImageClip { tex, x, y, frac } => {
+                map_render::UiWidget::ImageClip {
+                    tex,
+                    x,
+                    y,
+                    frac,
+                    scale,
+                } => {
                     if let Some(h) = self.ui_handle(ctx, &render, *tex) {
                         Self::ui_area(ctx, i, *x, *y, |ui| {
-                            let full = tex_points(&h) * scale;
+                            let full = tex_points(&h) * *scale;
                             let sz = egui::vec2(full.x * frac, full.y);
                             let uv = egui::Rect::from_min_max(
                                 egui::pos2(0.0, 0.0),
@@ -1022,18 +1036,60 @@ impl App {
                         });
                     }
                 }
-                map_render::UiWidget::Text { x, y, text, size } => {
+                map_render::UiWidget::Anim { gif, x, y, scale } => {
+                    if let Some(h) = self.ui_gif_handle(ctx, &render, *gif) {
+                        Self::ui_area(ctx, i, *x, *y, |ui| {
+                            let sz = tex_points(&h) * *scale;
+                            ui.add(egui::Image::new(&h).fit_to_exact_size(sz));
+                        });
+                    }
+                }
+                map_render::UiWidget::Text {
+                    x,
+                    y,
+                    text,
+                    size,
+                    scale,
+                } => {
                     Self::ui_area(ctx, i, *x, *y, |ui| {
                         // Never wrap — a HUD number like "20" must stay on one
                         // line (the default wraps it to "2" / "0" near an edge).
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(text)
-                                    .size(*size * scale)
+                                    .size(*size * *scale)
                                     .strong()
                                     .color(egui::Color32::WHITE),
                             )
                             .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    });
+                }
+                map_render::UiWidget::TextWrap {
+                    x,
+                    y,
+                    text,
+                    size,
+                    width,
+                    color,
+                    scale,
+                } => {
+                    let col = egui::Color32::from_rgb(
+                        (color >> 16) as u8,
+                        (color >> 8) as u8,
+                        *color as u8,
+                    );
+                    Self::ui_area(ctx, i, *x, *y, |ui| {
+                        // Word-wrap within `width`: a dialogue paragraph.
+                        ui.set_max_width(*width * *scale);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(text)
+                                    .size(*size * *scale)
+                                    .strong()
+                                    .color(col),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Wrap),
                         );
                     });
                 }
@@ -1044,6 +1100,7 @@ impl App {
                     x,
                     y,
                     bit,
+                    scale,
                 } => {
                     // Resolve all three state textures up front (immutable
                     // borrow of self ends before the closure borrows it again).
@@ -1052,7 +1109,7 @@ impl App {
                     let held = self.ui_handle(ctx, &render, *pressed);
                     let Some(normal) = normal else { continue };
                     Self::ui_area(ctx, i, *x, *y, |ui| {
-                        let sz = tex_points(&normal) * scale;
+                        let sz = tex_points(&normal) * *scale;
                         let (rect, resp) = ui.allocate_exact_size(sz, egui::Sense::click());
                         let shown = if resp.is_pointer_button_down_on() {
                             held.as_ref().unwrap_or(&normal)
@@ -1075,13 +1132,7 @@ impl App {
     }
 
     /// A fixed-position, foreground overlay area for one HUD widget.
-    fn ui_area(
-        ctx: &egui::Context,
-        id: usize,
-        x: i32,
-        y: i32,
-        add: impl FnOnce(&mut egui::Ui),
-    ) {
+    fn ui_area(ctx: &egui::Context, id: usize, x: i32, y: i32, add: impl FnOnce(&mut egui::Ui)) {
         egui::Area::new(egui::Id::new(("monada_ui", id)))
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(x as f32, y as f32))
@@ -1102,10 +1153,8 @@ impl App {
         if self.ui_tex_cache[id].is_none() {
             let r = render.lock().expect("render mutex");
             let (pixels, w, h) = r.ui_texture_data(id)?;
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [*w as usize, *h as usize],
-                pixels,
-            );
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], pixels);
             let handle = ctx.load_texture(
                 format!("monada_ui_{id}"),
                 image,
@@ -1114,6 +1163,60 @@ impl App {
             self.ui_tex_cache[id] = Some(handle);
         }
         self.ui_tex_cache[id].clone()
+    }
+
+    /// The egui handle for an animated HUD image's frame at this instant: pick
+    /// the wall-clock-current frame from the gif's per-frame delays, uploading
+    /// it (nearest) the first time it's shown.
+    fn ui_gif_handle(
+        &mut self,
+        ctx: &egui::Context,
+        render: &Arc<Mutex<MapRender>>,
+        id: usize,
+    ) -> Option<egui::TextureHandle> {
+        if id >= self.ui_gif_cache.len() {
+            self.ui_gif_cache.resize_with(id + 1, Vec::new);
+        }
+        let elapsed = Instant::now()
+            .saturating_duration_since(self.epoch)
+            .as_millis() as u64;
+        // Find the current frame + grab its pixels if not yet uploaded.
+        let pixels = {
+            let r = render.lock().expect("render mutex");
+            let gif = r.ui_gif_data(id)?;
+            let n = gif.frames.len();
+            if self.ui_gif_cache[id].len() != n {
+                self.ui_gif_cache[id] = vec![None; n];
+            }
+            let total: u64 = gif
+                .frames
+                .iter()
+                .map(|(_, d)| u64::from(*d))
+                .sum::<u64>()
+                .max(1);
+            let mut t = elapsed % total;
+            let mut idx = n - 1;
+            for (i, (_, d)) in gif.frames.iter().enumerate() {
+                if t < u64::from(*d) {
+                    idx = i;
+                    break;
+                }
+                t -= u64::from(*d);
+            }
+            if self.ui_gif_cache[id][idx].is_some() {
+                return self.ui_gif_cache[id][idx].clone();
+            }
+            (idx, gif.frames[idx].0.clone(), gif.width, gif.height)
+        };
+        let (idx, px, w, h) = pixels;
+        let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px);
+        let handle = ctx.load_texture(
+            format!("monada_gif_{id}_{idx}"),
+            image,
+            egui::TextureOptions::NEAREST,
+        );
+        self.ui_gif_cache[id][idx] = Some(handle.clone());
+        Some(handle)
     }
 
     /// Handle a left-click: pick a mover (local), queue a spawn command at
@@ -1295,12 +1398,15 @@ impl App {
     /// de-duplicated one-shot SFX, then any music change. Drains under the
     /// render lock, releasing it before touching `self.audio` (disjoint state).
     fn play_pending_audio(&mut self, now: Instant) {
-        let (sounds, loops, music) = match &self.scene {
+        let (sounds, blips, loops, music) = match &self.scene {
             SceneKind::Map(render) => render.lock().expect("render mutex").drain_audio(),
             SceneKind::Circle(_) => return,
         };
         for (path, gain) in sounds {
             self.audio.play(&path, gain, now);
+        }
+        for (wave, freq, dur, gain) in blips {
+            self.audio.blip(wave, freq, dur, gain);
         }
         self.audio.sync_loops(&loops, now);
         match music {
@@ -1430,9 +1536,10 @@ impl App {
                 // The map lights itself (grid side-shades + sky) and drives
                 // its animated actors; `dt` advances their animation clocks.
                 // F1 (`debug`) overlays the collision footprints.
-                render.lock().expect("render mutex").render_into(
-                    renderer, &camera, &settings, SKY_COLOR, dt, debug,
-                );
+                render
+                    .lock()
+                    .expect("render mutex")
+                    .render_into(renderer, &camera, &settings, SKY_COLOR, dt, debug);
             }
         }
         match hud {

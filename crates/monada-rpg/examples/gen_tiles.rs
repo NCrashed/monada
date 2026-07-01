@@ -22,10 +22,8 @@ const TILE: u32 = 16;
 
 /// A cheap, deterministic per-pixel hash (no RNG) for brightness speckle.
 fn hash(x: u32, y: u32, seed: u32) -> u32 {
-    let mut h = x
-        .wrapping_mul(73_856_093)
-        ^ y.wrapping_mul(19_349_663)
-        ^ seed.wrapping_mul(83_492_791);
+    let mut h =
+        x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663) ^ seed.wrapping_mul(83_492_791);
     h ^= h >> 13;
     h = h.wrapping_mul(0x5bd1_e995);
     h ^ (h >> 15)
