@@ -211,13 +211,22 @@ pub trait HostBridge: Send {
 
     /// Define an animated, 8-direction billboard "actor" model from GIFs laid
     /// out as `<dir_path>/<state>/<side>.gif` for the 8 compass sides (one
-    /// `state` per animation). Returns a model id to bind with
-    /// [`entity_set_model`](Self::entity_set_model), or `-1` if any GIF is
-    /// missing. The renderer auto-picks the facing sprite from camera bearing
-    /// vs the actor's facing yaw. Render-side only; the default ignores it.
-    fn model_actor(&mut self, _dir_path: &str, _states: &[String]) -> i64 {
+    /// `state` per animation). `height_cells` is the actor's rendered height
+    /// in sim cells — the host scales the art to that regardless of its pixel
+    /// resolution (so swapping art sizes doesn't change the on-screen size).
+    /// Returns a model id to bind with [`entity_set_model`](Self::entity_set_model),
+    /// or `-1` if any GIF is missing. The renderer auto-picks the facing
+    /// sprite from camera bearing vs the actor's facing yaw. Render-side only;
+    /// the default ignores it.
+    fn model_actor(&mut self, _dir_path: &str, _states: &[String], _height_cells: Fixed) -> i64 {
         -1
     }
+
+    /// Nudge an actor model's sprites down (`cells` > 0) or up (< 0) by that
+    /// many cells, on top of the pivot-computed grounding. Lets a map correct
+    /// art whose visible feet aren't at the trimmed opaque bottom (e.g. a baked
+    /// shadow) without re-authoring the GIFs. Render-side only.
+    fn model_drop(&mut self, _model: i64, _cells: Fixed) {}
 
     /// Set an actor entity's current animation state by name (one of the
     /// `states` given to [`model_actor`](Self::model_actor)). Render-side only.
@@ -226,6 +235,36 @@ pub trait HostBridge: Send {
     /// Set an actor entity's facing yaw in sim radians (`atan2(dy, dx)`); the
     /// renderer picks the matching directional sprite. Render-side only.
     fn entity_set_facing(&mut self, _entity: i64, _yaw: Fixed) {}
+
+    /// Tint an actor entity's sprite by an `0x00RR_GGBB` colour multiply
+    /// (`0x00FF_FFFF` = white = no tint; e.g. `0x00FF_4040` = damage red).
+    /// Render-side only — flash a hit without touching the hashed sim.
+    fn entity_set_tint(&mut self, _entity: i64, _tint: i64) {}
+
+    // --- audio (render-side, never hashed) --------------------------------
+    // Sounds are triggered from `tick`, but — like `status`/`entity_set_anim`
+    // — they never touch the world hash: the host mixes them, and a headless
+    // peer/oracle no-ops them, so a match can't desync on audio. The host
+    // COALESCES identical one-shots fired the same frame and rate-limits rapid
+    // repeats, so many entities triggering the same sound at once (a wave of
+    // attackers) plays it once, not stacked into a roar.
+
+    /// Play a one-shot sound (`assets/…` path). Many different sounds mix in
+    /// parallel; identical ones are de-duplicated per frame + debounced.
+    fn play_sound(&mut self, _asset_path: &str) {}
+    /// [`play_sound`](Self::play_sound) with an explicit gain (`0..1`, clamped).
+    fn play_sound_gain(&mut self, _asset_path: &str, _gain: Fixed) {}
+    /// Keep a looping sound audible: call it every tick the loop should play
+    /// (e.g. footsteps while moving). The host starts it on the first request
+    /// and stops it shortly after the calls stop — so a *state* (moving) drives
+    /// a seamless loop with no restart-per-frame and no per-actor timer. Unlike
+    /// [`play_music`](Self::play_music), several loops can overlap.
+    fn play_loop(&mut self, _asset_path: &str) {}
+    /// Start (or replace) the looping background track. Idempotent for the same
+    /// path — re-calling with the current track keeps it playing seamlessly.
+    fn play_music(&mut self, _asset_path: &str) {}
+    /// Stop the background track started by [`play_music`](Self::play_music).
+    fn stop_music(&mut self) {}
 
     /// Query whether a voxel is solid, in sim coordinates — the terrain
     /// collision primitive a real-time map needs (the script paints the
@@ -247,6 +286,82 @@ pub trait HostBridge: Send {
     /// [`voxel_solid`](Self::voxel_solid).
     fn ground_height(&self, _x: i64, _y: i64) -> i64 {
         0
+    }
+
+    /// Load a per-cell tile texture from an `assets/` PNG, resampled to the
+    /// host's cell resolution. Returns a tile id for [`tile_fill`](Self::tile_fill),
+    /// or `-1` if the asset is missing. Render-side only; the default ignores it.
+    fn tile(&mut self, _asset_path: &str) -> i64 {
+        -1
+    }
+
+    /// Paint a cell region (sim coords) from height `z0..z1` with a tile — its
+    /// pixels become the cells' voxel colours — feeding collision exactly like
+    /// [`voxel_fill`](Self::voxel_fill) (so a textured wall still blocks). The
+    /// default does nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn tile_fill(&mut self, _x0: i64, _y0: i64, _z0: i64, _x1: i64, _y1: i64, _z1: i64, _tile: i64) {
+    }
+
+    /// Register a marching-squares transition sheet (a 4×4 `.png`) for terrain
+    /// type `high` blended over `low` (higher type id = higher priority). Used
+    /// by [`terrain_blit`](Self::terrain_blit) to autotile the flat floor.
+    /// Render-side only; the default ignores it.
+    fn transition(&mut self, _low: i64, _high: i64, _asset_path: &str) {}
+
+    /// Set the flat-floor terrain type of every cell in a region (sim coords).
+    /// Render-side only (the floor is walkable; collision is unaffected).
+    fn terrain_fill(&mut self, _x0: i64, _y0: i64, _x1: i64, _y1: i64, _type_id: i64) {}
+
+    /// Autotile-paint the flat floor from the terrain types set so far,
+    /// blending boundaries with the registered transition sheets. `base_type`
+    /// fills cells outside the set region. Render-side only.
+    fn terrain_blit(&mut self, _base_type: i64) {}
+
+    // --- HUD / UI (screen-space overlay, render-side only) ----------------
+    // The map describes its HUD each `tick` in immediate mode: `ui_clear`
+    // then a fresh set of `ui_image` / `ui_text` / `ui_button` calls, in
+    // screen points from the top-left (`ui_width`/`ui_height` give the
+    // viewport for anchoring). The host draws it over the scene each frame.
+    // All render-side; the defaults ignore it (headless / oracle draw no HUD).
+
+    /// Register a UI texture from an `assets/` PNG; returns an id, or `-1`.
+    fn ui_texture(&mut self, _asset_path: &str) -> i64 {
+        -1
+    }
+    /// Viewport width / height in screen points (for anchoring), or `0`.
+    fn ui_width(&self) -> i64 {
+        0
+    }
+    fn ui_height(&self) -> i64 {
+        0
+    }
+    /// Uniform scale applied to every HUD texture + text this frame (positions
+    /// stay as the map gives them — it lays out at scaled sizes). `1` = native
+    /// pixel size; `2` = double. Set per frame before the draws.
+    fn ui_scale(&mut self, _factor: Fixed) {}
+    /// Begin a fresh HUD frame (drop the previous widget list).
+    fn ui_clear(&mut self) {}
+    /// Draw texture `tex` with its top-left at `(x, y)`.
+    fn ui_image(&mut self, _tex: i64, _x: i64, _y: i64) {}
+    /// Draw texture `tex` clipped to the left `frac` (0..1) of its width — the
+    /// health-bar-style fill.
+    fn ui_image_clip(&mut self, _tex: i64, _x: i64, _y: i64, _frac: Fixed) {}
+    /// Draw `text` (white, `size`-pt) with its top-left at `(x, y)`.
+    fn ui_text(&mut self, _x: i64, _y: i64, _text: &str, _size: i64) {}
+    /// Draw an image button (`tex` normal / `hover` / `pressed`) at `(x, y)`.
+    /// When clicked, the host OR-s `button_bit` into the next input command's
+    /// button mask, so the map handles it in `command` like any button.
+    #[allow(clippy::too_many_arguments)]
+    fn ui_button(
+        &mut self,
+        _tex: i64,
+        _hover: i64,
+        _pressed: i64,
+        _x: i64,
+        _y: i64,
+        _button_bit: i64,
+    ) {
     }
 }
 
@@ -392,6 +507,11 @@ impl HostBridge for TerrainBridge {
     }
     fn ground_height(&self, x: i64, y: i64) -> i64 {
         self.terrain.ground_height(x, y)
+    }
+    // Tiles are render-only, but `tile_fill` still feeds collision like
+    // `voxel_fill`, so headless terrain matches the textured live map.
+    fn tile_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, _tile: i64) {
+        self.terrain.fill(x0, y0, z0, x1, y1, z1);
     }
 }
 

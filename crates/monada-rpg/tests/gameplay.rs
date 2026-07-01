@@ -17,6 +17,7 @@ const SEED: u64 = 0x4D4F_4E41_4441_5F30;
 const PLAYER: ArchetypeId = ArchetypeId(0);
 const ENEMY: ArchetypeId = ArchetypeId(1);
 const GAME: ArchetypeId = ArchetypeId(2);
+const SUMMON: ArchetypeId = ArchetypeId(4); // pending-spawn telegraph
 const VERB_INPUT: u32 = 0;
 const P0: PlayerId = PlayerId(0);
 const BTN_ATTACK: u64 = 1;
@@ -76,6 +77,42 @@ fn player_pos(world: &SharedWorld) -> FixedVec3 {
 }
 
 #[test]
+fn dead_enemy_lingers_before_despawn() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0, 0)); // spawn hero
+    // Wait out the summon telegraph so wave-1 enemies materialise.
+    for _ in 0..50 {
+        step(&mut b, &input(0, 0, 0));
+    }
+    let n0 = count(&world, ENEMY);
+    assert!(n0 >= 2, "wave enemies present");
+
+    // Kill one enemy directly (bypasses aiming/positioning).
+    let victim = {
+        let mut w = world.lock().unwrap();
+        let e = w.entities(ENEMY)[0];
+        w.set_field(e, "hp", Fixed::ZERO);
+        e
+    };
+
+    // One tick later it must still exist, playing its death anim — not gone.
+    step(&mut b, &input(0, 0, 0));
+    assert!(
+        world.lock().unwrap().position(victim).is_some(),
+        "dead enemy lingers for its death animation, not removed at once"
+    );
+
+    // After the death window (~death_ticks) it despawns.
+    for _ in 0..60 {
+        step(&mut b, &input(0, 0, 0));
+    }
+    assert!(
+        world.lock().unwrap().position(victim).is_none(),
+        "dead enemy despawns after the death window"
+    );
+}
+
+#[test]
 fn obstacles_block_the_hero() {
     let (world, mut b) = fresh();
     step(&mut b, &input(0, 0, 0)); // spawn hero at (7, 10)
@@ -94,14 +131,23 @@ fn obstacles_block_the_hero() {
 fn setup_spawns_arena_and_first_wave() {
     let (world, mut b) = fresh();
     // Heroes spawn lazily (on first input), so the arena starts hero-less
-    // with wave 1 already deployed.
+    // with wave 1 already TELEGRAPHED — summons first, enemies materialise after
+    // the ~1.5s summon window (so nothing spawns in the player's face).
     assert_eq!(count(&world, PLAYER), 0, "no hero until a player acts");
-    assert_eq!(count(&world, ENEMY), 3, "wave 1 = 2 + wave = 3 enemies");
+    assert_eq!(count(&world, SUMMON), 4, "wave 1 = round(1.2 * (2 + wave)) = 4 summons");
+    assert_eq!(count(&world, ENEMY), 0, "enemies haven't materialised yet");
     assert!(field(&world, GAME, 0, "wave") > 0.5, "wave director at wave 1");
 
     step(&mut b, &input(0, 0, 0));
     assert_eq!(count(&world, PLAYER), 1, "hero spawns on first input");
     assert!(field(&world, PLAYER, 0, "hp") > 99.0, "hero starts at full hp");
+
+    // After the telegraph the summons become enemies.
+    for _ in 0..50 {
+        step(&mut b, &input(0, 0, 0));
+    }
+    assert_eq!(count(&world, ENEMY), 4, "the 4 summons materialised into enemies");
+    assert_eq!(count(&world, SUMMON), 0, "telegraphs cleared");
 }
 
 #[test]

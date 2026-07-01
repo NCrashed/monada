@@ -44,6 +44,11 @@
             # the Mesa/Nvidia ICDs; the loader must be on LD_LIBRARY_PATH
             # for our non-NixOS-managed binaries to find it.
             vulkan-loader
+            # monada-host's `audio` feature (default): rodio → cpal links the
+            # ALSA backend. `alsa-lib` here puts `alsa.pc` on PKG_CONFIG_PATH
+            # (so cpal builds) and `libasound.so` on LD_LIBRARY_PATH (runtime).
+            # Build headless without it via `--no-default-features`.
+            alsa-lib
           ];
 
           # Single source of truth: the same rust-toolchain.toml cargo

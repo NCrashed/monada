@@ -16,8 +16,15 @@ path = "src/main.rs"
 [dependencies]
 # The host event loop + shared map CLI + archive loader. Like monada-chess,
 # this crate just loads the bundled `rpg.monada` and hands it to the host.
-monada-host = { path = "../monada-host" }
+# `default-features = false` here + re-adding `audio` via this crate's own
+# feature lets a headless build (`--no-default-features`) drop cpal/ALSA.
+monada-host = { path = "../monada-host", default-features = false }
 monada-format = { workspace = true }
+
+[features]
+default = ["audio"]
+# Forwards to the host's real sound playback (on by default).
+audio = ["monada-host/audio"]
 
 [build-dependencies]
 # build.rs packs `map/` into a deterministic `rpg.monada` in OUT_DIR.
@@ -33,6 +40,8 @@ monada-fixed = { workspace = true }
 monada-net = { workspace = true }
 # `examples/gen_sprites.rs` writes the committed 8-direction actor GIFs.
 gif = "0.13"
+# `examples/gen_tiles.rs` writes the committed per-cell PNG tile textures.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true

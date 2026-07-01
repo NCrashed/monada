@@ -49,8 +49,11 @@ use monada_script::{
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
+pub mod autotile;
 pub mod cli;
+mod audio;
 mod map_render;
+use audio::Audio;
 use map_render::MapRender;
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::Camera;
@@ -194,21 +197,34 @@ struct Input {
     right: bool,
     dodge: bool,
     attack: bool,
+    /// Aim direction (sim radians): the world-space angle from the local
+    /// player (the camera focus) to the cursor's ground point. Computed
+    /// host-side per frame; the map uses it for e.g. attack direction.
+    aim_yaw: f64,
+    /// Button bits contributed by HUD `ui_button` clicks this frame (the map
+    /// chooses each button's bit). OR-ed into the command's button mask, then
+    /// cleared — a click is a one-tick edge, not a held key.
+    ui_bits: u64,
 }
 
 impl Input {
     /// Pack this snapshot into the per-tick command the map decodes: integer
     /// move axis in `arg.xy` (no float crosses the wall), buttons bitmask in
-    /// `target`. `aim` (`arg.z`) is reserved for a future mouse-aim refine.
+    /// `target`, mouse-aim yaw (radians) in `arg.z`.
     fn to_command(self) -> Command {
         let mx = i32::from(self.right) - i32::from(self.left);
         let my = i32::from(self.fwd) - i32::from(self.back);
-        let buttons =
-            (u64::from(self.attack) * BTN_ATTACK) | (u64::from(self.dodge) * BTN_DODGE);
+        let buttons = (u64::from(self.attack) * BTN_ATTACK)
+            | (u64::from(self.dodge) * BTN_DODGE)
+            | self.ui_bits;
         Command::on(
             VERB_INPUT,
             EntityId(buttons),
-            FixedVec3::new(Fixed::from_int(mx), Fixed::from_int(my), Fixed::ZERO),
+            FixedVec3::new(
+                Fixed::from_int(mx),
+                Fixed::from_int(my),
+                Fixed::from_f64(self.aim_yaw),
+            ),
         )
     }
 }
@@ -257,11 +273,14 @@ impl MapSim {
     /// `tick`, then apply any commands the script queued. A command-driven
     /// map (`tick_dt == None`) does nothing here — it advances only on
     /// clicks (`pointer`).
-    fn advance(&mut self, dt: f64, input: Input) {
-        let Some(step) = self.tick_dt else { return };
+    fn advance(&mut self, dt: f64, input: Input) -> bool {
+        let Some(step) = self.tick_dt else {
+            return false;
+        };
         self.accumulator = (self.accumulator + dt).min(0.25);
         let input_cmd = input.to_command();
         let mut budget = MAX_CATCHUP_TICKS_PER_FRAME;
+        let mut stepped = false;
         while self.accumulator >= step && budget > 0 {
             self.backend
                 .on_command(self.local, &input_cmd)
@@ -276,7 +295,9 @@ impl MapSim {
             self.backend.drain_ui_events();
             self.accumulator -= step;
             budget -= 1;
+            stepped = true;
         }
+        stepped
     }
 
     /// Forward a pointer click to the map's `pointer` handler, then route
@@ -351,7 +372,7 @@ impl NetMapSim {
     /// wall clock and submits one input command per scheduled tick; a
     /// command-driven map (chess) executes every ready tick, routing only
     /// queued clicks. Queued commands are buffered by `step`, never dropped.
-    fn advance(&mut self, dt: f64, input: Input) {
+    fn advance(&mut self, dt: f64, input: Input) -> bool {
         let Some(step) = self.tick_dt else {
             // Command-driven (chess): execute every ready tick, routing only
             // queued clicks.
@@ -367,7 +388,7 @@ impl NetMapSim {
                     }
                 }
             }
-            return;
+            return false;
         };
 
         // Real-time: pace tick execution on the wall clock, submitting one
@@ -375,6 +396,7 @@ impl NetMapSim {
         self.accumulator = (self.accumulator + dt).min(0.25);
         let input_cmd = input.to_command();
         let mut budget = MAX_CATCHUP_TICKS_PER_FRAME;
+        let mut consumed_input = false;
         while !self.halted && self.accumulator >= step && budget > 0 {
             let mut cmds = std::mem::take(&mut self.pending);
             // One input per scheduled tick: don't re-submit one the session
@@ -385,6 +407,9 @@ impl NetMapSim {
             }
             match self.session.step(cmds) {
                 Ok(true) => {
+                    if submit_input {
+                        consumed_input = true;
+                    }
                     self.input_pending = false;
                     self.accumulator -= step;
                     budget -= 1;
@@ -403,6 +428,7 @@ impl NetMapSim {
                 }
             }
         }
+        consumed_input
     }
 }
 
@@ -569,8 +595,15 @@ impl SceneKind {
 }
 
 struct App {
-    window: Option<Arc<Window>>,
+    // Field order matters for GPU teardown: the renderer owns the wgpu
+    // surface/device, which must drop *before* the window it was created from.
+    // Rust drops fields top-to-bottom, so `renderer` is declared before
+    // `window` — this keeps the order correct even on the panic-unwind path,
+    // where `exiting` (the graceful `wait_idle` teardown) never runs. Dropping
+    // the surface after the window can leave the driver/compositor showing
+    // stale buffers (roxlap's "leftover triangles / flicker" symptom).
     renderer: Option<SceneRenderer>,
+    window: Option<Arc<Window>>,
     scene: SceneKind,
     /// The simulation (local walk-circle or a networked lockstep match).
     sim: Sim,
@@ -595,6 +628,16 @@ struct App {
     /// egui context + winit input bridge for the HUD overlay.
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
+    /// egui texture handles for the map's HUD images, indexed by the id
+    /// `ui_texture` returned to the script (uploaded lazily, once each).
+    ui_tex_cache: Vec<Option<egui::TextureHandle>>,
+    /// The audio mixer (feature `audio`; a no-op shim otherwise). Fed each
+    /// frame by `MapRender::drain_audio`; owns the rodio output (`!Send`).
+    audio: Audio,
+    /// Whether the debug overlay (tick / FPS / status / lockstep line) is
+    /// shown. Hidden by default so only the map's own HUD is visible; F1
+    /// toggles it.
+    debug_hud: bool,
     /// One-shot coordinate dump (set `MONADA_DEBUG=1`).
     debug_done: bool,
 }
@@ -619,7 +662,15 @@ impl App {
             Sim::Replay(r) => SceneKind::Map(r.render.clone()),
             _ => SceneKind::Circle(CircleScene::new(curr_pos.len())),
         };
+        // Hand the map's sound assets to the mixer once (opens the audio device
+        // now; a headless box with no output just mutes). Non-map scenes carry
+        // no sounds.
+        let sounds = match &scene {
+            SceneKind::Map(render) => render.lock().expect("render mutex").sound_assets(),
+            SceneKind::Circle(_) => Vec::new(),
+        };
         App {
+            audio: Audio::new(sounds),
             window: None,
             renderer: None,
             scene,
@@ -635,6 +686,8 @@ impl App {
             fps: 0.0,
             egui_ctx: egui::Context::default(),
             egui_state: None,
+            ui_tex_cache: Vec::new(),
+            debug_hud: false,
             debug_done: false,
         }
     }
@@ -899,19 +952,168 @@ impl App {
                 }
             }
         };
-        let ctx = &self.egui_ctx;
-        let state = self.egui_state.as_mut()?;
-
-        let raw = state.take_egui_input(window);
+        // Clone the (Arc-backed) context so `self` is free for the mutable
+        // borrows the map-HUD pass needs (texture cache + input bits).
+        let ctx = self.egui_ctx.clone();
+        let raw = self.egui_state.as_mut()?.take_egui_input(window);
         // egui 0.34 deprecated `Context::run` (its `run_ui` hands a `&mut Ui`,
         // but `build_hud` paints free-floating `egui::Window`s, which want the
         // `&Context`) — drive a pass explicitly instead.
         ctx.begin_pass(raw);
-        build_hud(ctx, tick, fps, &hud);
+        // Debug overlay (tick / FPS / status / lockstep) only when toggled on
+        // with F1 — otherwise just the map's own HUD shows.
+        if self.debug_hud {
+            build_hud(&ctx, tick, fps, &hud);
+        }
+        // The map's own scripted HUD (health bar / panels / buttons), painted
+        // over the status window; button clicks feed the next tick's command.
+        self.paint_map_hud(&ctx);
         let out = ctx.end_pass();
-        state.handle_platform_output(window, out.platform_output);
+        self.egui_state
+            .as_mut()?
+            .handle_platform_output(window, out.platform_output);
         let jobs = ctx.tessellate(out.shapes, out.pixels_per_point);
         Some((jobs, out.textures_delta, out.pixels_per_point))
+    }
+
+    /// Paint the scripted map HUD ([`MapRender::ui_widgets`]) this frame and
+    /// route button clicks into the next tick's input command. Screen-space,
+    /// render-side only — never touches the sim state hash.
+    fn paint_map_hud(&mut self, ctx: &egui::Context) {
+        let SceneKind::Map(render) = &self.scene else {
+            return;
+        };
+        let render = render.clone();
+        let size = ctx.content_rect().size();
+        let (widgets, scale) = {
+            let mut r = render.lock().expect("render mutex");
+            r.set_ui_viewport(size.x as i64, size.y as i64);
+            (r.ui_widgets().to_vec(), r.ui_scale_factor())
+        };
+        if widgets.is_empty() {
+            return;
+        }
+
+        let mut clicked_bits = 0u64;
+        for (i, w) in widgets.iter().enumerate() {
+            match w {
+                map_render::UiWidget::Image { tex, x, y } => {
+                    if let Some(h) = self.ui_handle(ctx, &render, *tex) {
+                        Self::ui_area(ctx, i, *x, *y, |ui| {
+                            let sz = tex_points(&h) * scale;
+                            ui.add(egui::Image::new(&h).fit_to_exact_size(sz));
+                        });
+                    }
+                }
+                map_render::UiWidget::ImageClip { tex, x, y, frac } => {
+                    if let Some(h) = self.ui_handle(ctx, &render, *tex) {
+                        Self::ui_area(ctx, i, *x, *y, |ui| {
+                            let full = tex_points(&h) * scale;
+                            let sz = egui::vec2(full.x * frac, full.y);
+                            let uv = egui::Rect::from_min_max(
+                                egui::pos2(0.0, 0.0),
+                                egui::pos2(*frac, 1.0),
+                            );
+                            // Paint into the exact clipped rect: `fit_to_exact_size`
+                            // keeps aspect and would letterbox (shrinking the bar
+                            // in Y as the width drops), so allocate + `paint_at`.
+                            let (rect, _) = ui.allocate_exact_size(sz, egui::Sense::hover());
+                            egui::Image::new(&h).uv(uv).paint_at(ui, rect);
+                        });
+                    }
+                }
+                map_render::UiWidget::Text { x, y, text, size } => {
+                    Self::ui_area(ctx, i, *x, *y, |ui| {
+                        // Never wrap — a HUD number like "20" must stay on one
+                        // line (the default wraps it to "2" / "0" near an edge).
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(text)
+                                    .size(*size * scale)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    });
+                }
+                map_render::UiWidget::Button {
+                    tex,
+                    hover,
+                    pressed,
+                    x,
+                    y,
+                    bit,
+                } => {
+                    // Resolve all three state textures up front (immutable
+                    // borrow of self ends before the closure borrows it again).
+                    let normal = self.ui_handle(ctx, &render, *tex);
+                    let hovered = self.ui_handle(ctx, &render, *hover);
+                    let held = self.ui_handle(ctx, &render, *pressed);
+                    let Some(normal) = normal else { continue };
+                    Self::ui_area(ctx, i, *x, *y, |ui| {
+                        let sz = tex_points(&normal) * scale;
+                        let (rect, resp) = ui.allocate_exact_size(sz, egui::Sense::click());
+                        let shown = if resp.is_pointer_button_down_on() {
+                            held.as_ref().unwrap_or(&normal)
+                        } else if resp.hovered() {
+                            hovered.as_ref().unwrap_or(&normal)
+                        } else {
+                            &normal
+                        };
+                        egui::Image::new(shown).paint_at(ui, rect);
+                        if resp.clicked() {
+                            clicked_bits |= *bit;
+                        }
+                    });
+                }
+            }
+        }
+        // A click is a one-tick edge: OR it in; the next `to_command` consumes
+        // it and `clear_ui_bits` wipes it so it fires exactly once.
+        self.input.ui_bits |= clicked_bits;
+    }
+
+    /// A fixed-position, foreground overlay area for one HUD widget.
+    fn ui_area(
+        ctx: &egui::Context,
+        id: usize,
+        x: i32,
+        y: i32,
+        add: impl FnOnce(&mut egui::Ui),
+    ) {
+        egui::Area::new(egui::Id::new(("monada_ui", id)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(x as f32, y as f32))
+            .show(ctx, |ui| add(ui));
+    }
+
+    /// The egui texture handle for a map HUD texture id, uploading it (nearest
+    /// filtered, for crisp pixel art) the first time it is referenced.
+    fn ui_handle(
+        &mut self,
+        ctx: &egui::Context,
+        render: &Arc<Mutex<MapRender>>,
+        id: usize,
+    ) -> Option<egui::TextureHandle> {
+        if id >= self.ui_tex_cache.len() {
+            self.ui_tex_cache.resize(id + 1, None);
+        }
+        if self.ui_tex_cache[id].is_none() {
+            let r = render.lock().expect("render mutex");
+            let (pixels, w, h) = r.ui_texture_data(id)?;
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [*w as usize, *h as usize],
+                pixels,
+            );
+            let handle = ctx.load_texture(
+                format!("monada_ui_{id}"),
+                image,
+                egui::TextureOptions::NEAREST,
+            );
+            self.ui_tex_cache[id] = Some(handle);
+        }
+        self.ui_tex_cache[id].clone()
     }
 
     /// Handle a left-click: pick a mover (local), queue a spawn command at
@@ -1074,6 +1276,40 @@ impl App {
         }
     }
 
+    /// Tear the renderer + window down in the order a clean GPU shutdown needs:
+    /// drain in-flight GPU work (`wait_idle`), then drop the renderer (releasing
+    /// the wgpu device/queue/surface), then the egui state, then the window.
+    /// Dropping the surface/device before the window — queue idle, no acquired
+    /// frame — is what stops an exit leaving the driver/compositor showing stale
+    /// buffers (roxlap's "leftover triangles / flicker" symptom). Idempotent.
+    fn teardown(&mut self) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.wait_idle();
+        }
+        self.renderer = None;
+        self.egui_state = None;
+        self.window = None;
+    }
+
+    /// Drain the map's queued audio for this frame and feed the mixer: the
+    /// de-duplicated one-shot SFX, then any music change. Drains under the
+    /// render lock, releasing it before touching `self.audio` (disjoint state).
+    fn play_pending_audio(&mut self, now: Instant) {
+        let (sounds, loops, music) = match &self.scene {
+            SceneKind::Map(render) => render.lock().expect("render mutex").drain_audio(),
+            SceneKind::Circle(_) => return,
+        };
+        for (path, gain) in sounds {
+            self.audio.play(&path, gain, now);
+        }
+        self.audio.sync_loops(&loops, now);
+        match music {
+            Some(map_render::MusicCmd::Play(path)) => self.audio.play_music(&path),
+            Some(map_render::MusicCmd::Stop) => self.audio.stop_music(),
+            None => {}
+        }
+    }
+
     fn redraw(&mut self) {
         let Some(window) = self.window.clone() else {
             return;
@@ -1091,10 +1327,15 @@ impl App {
             self.fps = self.fps.mul_add(0.9, (1.0 / dt) as f32 * 0.1);
         }
 
-        // Advance the sim and compute the render blend factor. A real-time
-        // map paces its `tick` on the wall clock with the per-tick input
-        // snapshot; a command-driven map snaps to the current world.
+        // Refresh the mouse-aim direction, then advance. A real-time map paces
+        // its `tick` on the wall clock with the per-tick input snapshot; a
+        // command-driven map snaps to the current world.
+        self.update_aim();
         let input = self.input;
+        // A HUD button click latches into `input.ui_bits`; clear it only once
+        // a tick has actually consumed the input snapshot, so a click on a
+        // frame that ran zero ticks still fires on the next stepped frame.
+        let mut consumed_input = false;
         let alpha = match &mut self.sim {
             Sim::Local { .. } => self.advance_local(dt),
             Sim::Net(_) => {
@@ -1102,11 +1343,11 @@ impl App {
                 1.0
             }
             Sim::Map(map) => {
-                map.advance(dt, input);
+                consumed_input = map.advance(dt, input);
                 1.0
             }
             Sim::NetMap(nm) => {
-                nm.advance(dt, input);
+                consumed_input = nm.advance(dt, input);
                 1.0
             }
             Sim::Replay(r) => {
@@ -1114,6 +1355,12 @@ impl App {
                 1.0
             }
         };
+        if consumed_input {
+            self.input.ui_bits = 0;
+        }
+
+        // Play whatever sound the map queued in this frame's tick(s).
+        self.play_pending_audio(now);
 
         self.drive_camera(dt);
         self.update_scene(alpha);
@@ -1173,6 +1420,7 @@ impl App {
         // roxlap 0.7: render() composites without presenting; the frame is
         // finished by exactly one of paint_egui (HUD) or present. The map
         // scene lives behind a Mutex, so set + render under one lock.
+        let debug = self.debug_hud;
         match &mut self.scene {
             SceneKind::Circle(scene) => {
                 renderer.set_sprites(scene.sprites());
@@ -1181,10 +1429,10 @@ impl App {
             SceneKind::Map(render) => {
                 // The map lights itself (grid side-shades + sky) and drives
                 // its animated actors; `dt` advances their animation clocks.
-                render
-                    .lock()
-                    .expect("render mutex")
-                    .render_into(renderer, &camera, &settings, SKY_COLOR, dt);
+                // F1 (`debug`) overlays the collision footprints.
+                render.lock().expect("render mutex").render_into(
+                    renderer, &camera, &settings, SKY_COLOR, dt, debug,
+                );
             }
         }
         match hud {
@@ -1207,9 +1455,10 @@ impl ApplicationHandler for App {
                 .expect("winit: create_window"),
         );
 
-        // `ROXLAP_GPU=1` tries the wgpu backend; roxlap-render falls back
-        // to CPU automatically if init fails.
-        let want_gpu = std::env::var_os("ROXLAP_GPU").is_some_and(|v| v != "0" && !v.is_empty());
+        // GPU (wgpu) backend by default; roxlap-render falls back to CPU
+        // automatically if init fails. Set `ROXLAP_GPU=0` to force the CPU
+        // backend (e.g. a headless box or a flaky driver).
+        let want_gpu = std::env::var_os("ROXLAP_GPU").map_or(true, |v| v != "0" && !v.is_empty());
         let opts = RenderOptions {
             want_gpu,
             ..RenderOptions::default()
@@ -1287,6 +1536,20 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
+
+    /// Graceful shutdown: winit calls this once the loop is told to exit
+    /// (`event_loop.exit()` from a close / Esc). Drain and drop the GPU
+    /// cleanly here so an exit never yanks the swapchain mid-frame.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.teardown();
+    }
+
+    /// The platform asked us to release the window/surface (Android-style; rare
+    /// on desktop). Drop the GPU resources cleanly too — `resumed` rebuilds
+    /// them. Same clean-teardown path as `exiting`.
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.teardown();
+    }
 }
 
 /// HUD fields specific to a networked match.
@@ -1317,6 +1580,14 @@ enum HudState {
         status: String,
         net: Option<MapNet>,
     },
+}
+
+/// A HUD texture's size in egui points (its pixel dimensions at 1:1). The map
+/// lays the HUD out at the asset's native pixel size; egui scales to physical
+/// pixels by the display's `pixels_per_point`.
+fn tex_points(handle: &egui::TextureHandle) -> egui::Vec2 {
+    let [w, h] = handle.size();
+    egui::vec2(w as f32, h as f32)
 }
 
 /// Build the HUD widget tree (DESIGN.md §3.2's egui HUD).
@@ -1379,6 +1650,8 @@ impl App {
                 self.save_replay();
                 event_loop.exit();
             }
+            // F1 toggles the debug overlay (tick / FPS / status / lockstep).
+            KeyCode::F1 if down => self.debug_hud = !self.debug_hud,
             KeyCode::ArrowLeft => self.keys.yaw_left = down,
             KeyCode::ArrowRight => self.keys.yaw_right = down,
             KeyCode::ArrowUp => self.keys.pitch_up = down,
@@ -1413,6 +1686,32 @@ impl App {
             Sim::Map(map) => map.tick_dt.is_some(),
             Sim::NetMap(nm) => nm.tick_dt.is_some(),
             _ => false,
+        }
+    }
+
+    /// Recompute `input.aim_yaw`: the sim-space angle from the local player
+    /// (the camera focus) to the cursor's ground point. Only meaningful for a
+    /// real-time map (which owns its camera and runs the input loop).
+    fn update_aim(&mut self) {
+        if !self.realtime() {
+            return;
+        }
+        let cam = self.scene.camera();
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        let Some(ray) = renderer.view_ray(&cam, self.cursor.0, self.cursor.1) else {
+            return;
+        };
+        if let SceneKind::Map(render) = &self.scene {
+            let r = render.lock().expect("render mutex");
+            if let Some((mx, my)) = r.ground_sim(ray.origin, ray.dir) {
+                let (px, py) = r.camera_center_sim();
+                let (dx, dy) = (mx - px, my - py);
+                if dx.mul_add(dx, dy * dy) > 1e-6 {
+                    self.input.aim_yaw = dy.atan2(dx);
+                }
+            }
         }
     }
 

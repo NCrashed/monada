@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use glam::{DVec3, IVec3};
 use monada_fixed::{Fixed, FixedVec3};
 use monada_render::OrbitCamera;
+use crate::autotile;
 use monada_script::{HostBridge, VoxelStore};
 use monada_sim::{Command, EntityId, World};
 use roxlap_core::opticast::OpticastSettings;
@@ -26,11 +27,11 @@ use roxlap_core::sky::Sky;
 use roxlap_core::Camera;
 use roxlap_formats::kv6::{self, Kv6};
 use roxlap_formats::sprite::{Sprite, SPRITE_FLAG_NO_SHADING};
-use roxlap_formats::voxel_clip::DecodedClip;
+use roxlap_formats::voxel_clip::{DecodedClip, LoopMode};
 use roxlap_render::gif_import::{voxel_clip_from_gif, GifImportOpts};
 use roxlap_render::{
-    ActorState, BillboardActorDef, BillboardActorId, FrameParams, SceneRenderer, SpriteInstanceDesc,
-    SpriteSet, VoxelClipId,
+    ActorState, BillboardActorDef, BillboardActorId, BillboardMode, FrameParams, Line3,
+    SceneRenderer, SpriteInstanceDesc, SpriteSet, VoxelClipId,
 };
 use roxlap_scene::{GridId, GridTransform, Scene};
 
@@ -38,6 +39,9 @@ use roxlap_scene::{GridId, GridTransform, Scene};
 const SCALE: f64 = 16.0;
 /// World z of the board surface (z grows downward in voxlap).
 const GROUND_Z: f64 = 100.0;
+/// The no-op actor tint (`0x00RR_GGBB` colour multiply): white leaves the art
+/// unchanged. `entity_set_tint` overrides it (e.g. red for a damage flash).
+const WHITE_TINT: u32 = 0x00FF_FFFF;
 /// Reserved model 0: the selection-highlight marker the host draws on the
 /// locally selected entity. Map-defined models start at 1.
 const HIGHLIGHT_MODEL: usize = 0;
@@ -85,6 +89,35 @@ fn facing_to_world_yaw(sim_yaw: f64) -> f64 {
     std::f64::consts::PI - sim_yaw
 }
 
+/// A pending background-music change the map requested (`play_music` /
+/// `stop_music`), drained by the host each frame.
+pub enum MusicCmd {
+    /// Stop the current track.
+    Stop,
+    /// Start (or keep, if already this track) the looping track at this path.
+    Play(String),
+}
+
+/// One HUD widget the map described this frame (screen points, top-left
+/// origin). Texture fields index [`MapRender::ui_textures`].
+#[derive(Clone)]
+pub enum UiWidget {
+    Image { tex: usize, x: i32, y: i32 },
+    /// A texture clipped to the left `frac` (0..1) of its width (bar fill).
+    ImageClip { tex: usize, x: i32, y: i32, frac: f32 },
+    Text { x: i32, y: i32, text: String, size: f32 },
+    /// An image button (normal / hover / pressed textures); a click OR-s
+    /// `bit` into the next input command's button mask.
+    Button {
+        tex: usize,
+        hover: usize,
+        pressed: usize,
+        x: i32,
+        y: i32,
+        bit: u64,
+    },
+}
+
 /// A model the script bound via `entity_set_model`: either a static sprite
 /// (box / kv6) or an animated billboard [`ActorModel`]. Unifies the public
 /// model-id space the script sees.
@@ -107,6 +140,10 @@ struct ActorModel {
     /// exists. A fresh [`BillboardActorDef`] is rebuilt from these per entity
     /// instance (the def isn't `Clone`, but `VoxelClipId` is `Copy`).
     registered: Option<Vec<(&'static str, Vec<VoxelClipId>)>>,
+    /// Extra world-space vertical offset (`model_drop`), added when seating the
+    /// actor: positive lowers the sprite (world +z is down). Corrects art whose
+    /// visible feet aren't at the trimmed opaque bottom.
+    drop: f32,
 }
 
 /// Build a fresh actor recipe from registered directional clip ids.
@@ -119,7 +156,71 @@ fn actor_def(registered: &[(&'static str, Vec<VoxelClipId>)]) -> BillboardActorD
                 dirs: ids.clone(),
             })
             .collect(),
+        // Cylindrical: the card only yaws to face the camera, staying upright
+        // (its vertical axis is exactly world-up). A grounded character's feet
+        // stay planted on its pivot. Spherical tilts the whole card to face the
+        // camera *including pitch*, which at this steep view leans the body up-
+        // and-back off its ground anchor — the sprite reads as floating above
+        // its collision box even though the feet-pivot is correctly on the
+        // ground. Feet-planted wins for a top-down ARPG.
+        mode: BillboardMode::Cylindrical,
         ..BillboardActorDef::default()
+    }
+}
+
+/// The opaque (non-air) voxel bounding box of a clip — `(min_x, max_x, min_z,
+/// max_z)` across all its frames — or `None` if the clip is fully transparent.
+/// Lets `model_actor` size and ground by the actual art, not the padded frame.
+/// Occupancy layout (roxlap `VoxelFrame`): `col = x + y*dims[0]`, with
+/// `occ_words_per_col` u32 words per column; bit `z & 31` of word `z >> 5`.
+fn opaque_box(clip: &DecodedClip) -> Option<(u32, u32, u32, u32)> {
+    let w = clip.dims[0];
+    let cols = (clip.dims[0] * clip.dims[1]) as usize;
+    let owpc = clip.occ_words_per_col as usize;
+    let (mut min_x, mut max_x, mut min_z, mut max_z) = (u32::MAX, 0u32, u32::MAX, 0u32);
+    let mut any = false;
+    for frame in &clip.frames {
+        if owpc == 0 || frame.occupancy.len() < cols * owpc {
+            continue;
+        }
+        for col in 0..cols {
+            let words = &frame.occupancy[col * owpc..(col + 1) * owpc];
+            let (mut cmin, mut cmax, mut col_any) = (u32::MAX, 0u32, false);
+            for (wi, &word) in words.iter().enumerate() {
+                if word != 0 {
+                    col_any = true;
+                    let base = wi as u32 * 32;
+                    cmin = cmin.min(base + word.trailing_zeros());
+                    cmax = cmax.max(base + 31 - word.leading_zeros());
+                }
+            }
+            if col_any {
+                any = true;
+                let x = col as u32 % w;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_z = min_z.min(cmin);
+                max_z = max_z.max(cmax);
+            }
+        }
+    }
+    any.then_some((min_x, max_x, min_z, max_z))
+}
+
+/// Union of two opaque boxes (`None` = empty).
+fn merge_box(
+    a: Option<(u32, u32, u32, u32)>,
+    b: Option<(u32, u32, u32, u32)>,
+) -> Option<(u32, u32, u32, u32)> {
+    match (a, b) {
+        (Some((ax0, ax1, az0, az1)), Some((bx0, bx1, bz0, bz1))) => Some((
+            ax0.min(bx0),
+            ax1.max(bx1),
+            az0.min(bz0),
+            az1.max(bz1),
+        )),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
     }
 }
 
@@ -137,6 +238,11 @@ struct ActorInst {
     applied_anim: &'static str,
     /// Desired facing yaw in sim radians (script-set).
     facing: f64,
+    /// Desired `0x00RR_GGBB` colour multiply (script-set; `0x00FF_FFFF` =
+    /// white = no tint). Used for the damage-flash.
+    tint: u32,
+    /// The tint last pushed to the renderer — only re-set on change.
+    applied_tint: u32,
 }
 
 /// A box sprite model. `shaded` keeps roxlap's per-face directional
@@ -243,6 +349,12 @@ pub struct MapRender {
     /// collision queries. Mirrors what the roxlap grid holds, but in sim
     /// coords and cheap to query.
     terrain: VoxelStore,
+    /// Per-cell tile textures (`tile`/`tile_fill`): each is a `SCALE×SCALE`
+    /// row-major grid of voxlap colours, painted onto a cell's footprint.
+    tiles: Vec<Vec<u32>>,
+    /// Autotiled flat-floor terrain (`transition`/`terrain_fill`/`terrain_blit`):
+    /// per-cell types blended at boundaries via marching-squares sheets.
+    autotiler: autotile::Terrain,
     /// CPU sky panorama (`FrameParams.sky`), built from the map's image.
     sky: Option<Sky>,
     /// The same panorama as RGBA8 + dims for the GPU backend's separate
@@ -254,6 +366,30 @@ pub struct MapRender {
     /// map must upload its static set exactly once — before any actor exists
     /// — or each frame's `set_sprites` would wipe the actors just created.
     sprites_uploaded: bool,
+    /// HUD textures the map loaded via `ui_texture` (RGBA8 + dims), indexed by
+    /// the id returned to the script. Render-side, never hashed.
+    ui_textures: Vec<(Vec<u8>, u32, u32)>,
+    /// The HUD widget list the map rebuilt this tick (immediate mode: cleared
+    /// by `ui_clear`, appended by `ui_image`/`ui_text`/`ui_button`). The host
+    /// paints it via egui each frame and reports button clicks back.
+    ui_widgets: Vec<UiWidget>,
+    /// The viewport size (screen points) the host last rendered at, so the map
+    /// can lay the HUD out relative to the window (`ui_width`/`ui_height`).
+    ui_viewport: (i64, i64),
+    /// Uniform scale applied to every HUD texture + text (`ui_scale`); the map
+    /// lays out at scaled sizes, the host multiplies each drawn size by this.
+    ui_scale: f32,
+    /// One-shot sound requests (`(asset path, gain)`) the map fired since the
+    /// host last drained them, DE-DUPLICATED by path: many entities triggering
+    /// the same sound in one frame enqueue it once. Render-side; the host owns
+    /// the mixer (rodio is `!Send`, this bridge is `Send`).
+    sounds_pending: Vec<(String, f32)>,
+    /// Looping sounds the map requested (via `play_loop`) since the last drain,
+    /// de-duplicated by path. A "should this loop play now" snapshot: the host
+    /// starts requested loops and stops ones that go unrequested (footsteps).
+    loops_pending: Vec<String>,
+    /// Background-music change since the last drain (`None` = unchanged).
+    music_change: Option<MusicCmd>,
 }
 
 impl MapRender {
@@ -291,10 +427,19 @@ impl MapRender {
             local_player,
             side_shades: [0; 6],
             terrain: VoxelStore::new(),
+            tiles: Vec::new(),
+            autotiler: autotile::Terrain::new(SCALE as usize),
             sky: None,
             sky_panorama: None,
             sky_uploaded: false,
             sprites_uploaded: false,
+            ui_textures: Vec::new(),
+            ui_widgets: Vec::new(),
+            ui_viewport: (0, 0),
+            ui_scale: 1.0,
+            sounds_pending: Vec::new(),
+            loops_pending: Vec::new(),
+            music_change: None,
         }
     }
 
@@ -344,13 +489,15 @@ impl MapRender {
                 }
                 Some(&ModelRef::Actor(ai)) => {
                     // A directional billboard actor: seat its bottom-centre
-                    // pivot on the surface; facing comes from the script.
+                    // pivot on the surface (plus the model's `model_drop`
+                    // offset, world +z = down); facing comes from the script.
                     let yaw = self
                         .entity_actors
                         .get(&e)
                         .map_or(0.0, |a| facing_to_world_yaw(a.facing));
+                    let drop = self.actors.get(ai).map_or(0.0, |a| a.drop);
                     self.actor_targets
-                        .push((e, ai, [w.x as f32, w.y as f32, w.z as f32], yaw));
+                        .push((e, ai, [w.x as f32, w.y as f32, w.z as f32 + drop], yaw));
                 }
                 None => {}
             }
@@ -405,8 +552,75 @@ impl MapRender {
     pub fn orbit(&mut self, dyaw: f64, dpitch: f64, ddist: f64) {
         self.camera.orbit(dyaw, dpitch, ddist);
     }
+
+    /// The sim-space ground point under a world ray (cursor → aim), in the
+    /// same un-mirrored convention as [`pick`](Self::pick). `None` if the ray
+    /// misses the ground plane.
+    #[must_use]
+    #[allow(clippy::unused_self)] // a coordinate transform of this map's space
+    pub fn ground_sim(&self, origin: DVec3, dir: DVec3) -> Option<(f64, f64)> {
+        let hit = ground_hit(origin, dir)?;
+        Some((-hit.x / SCALE, hit.y / SCALE))
+    }
+
+    /// The camera's focus point in the same sim convention as
+    /// [`ground_sim`](Self::ground_sim). Maps follow the local player with
+    /// `camera_focus`, so this is effectively the local player's position —
+    /// the host derives the mouse-aim direction from it without the genre.
+    #[must_use]
+    pub fn camera_center_sim(&self) -> (f64, f64) {
+        (-self.camera.center.x / SCALE, self.camera.center.y / SCALE)
+    }
     pub fn status_text(&self) -> &str {
         &self.status
+    }
+
+    /// The HUD widget list the map rebuilt this tick, for the host's egui pass.
+    #[must_use]
+    pub fn ui_widgets(&self) -> &[UiWidget] {
+        &self.ui_widgets
+    }
+
+    /// A HUD texture's RGBA8 pixels + dimensions, by the id `ui_texture`
+    /// returned to the map. `None` for an out-of-range id.
+    #[must_use]
+    pub fn ui_texture_data(&self, id: usize) -> Option<&(Vec<u8>, u32, u32)> {
+        self.ui_textures.get(id)
+    }
+
+    /// Record the current viewport (screen points) so the map can lay the HUD
+    /// out relative to the window via `ui_width` / `ui_height`.
+    pub fn set_ui_viewport(&mut self, width: i64, height: i64) {
+        self.ui_viewport = (width, height);
+    }
+
+    /// The uniform scale the map set for its HUD textures/text (`ui_scale`).
+    #[must_use]
+    pub fn ui_scale_factor(&self) -> f32 {
+        self.ui_scale
+    }
+
+    /// Take the audio the map queued since the last call: the de-duplicated
+    /// one-shot `(path, gain)` requests, the loops that should be audible this
+    /// frame, and any [`MusicCmd`] (`None` = unchanged). The host owns the mixer
+    /// and plays them (rodio is `!Send`, so it can't live here).
+    pub fn drain_audio(&mut self) -> (Vec<(String, f32)>, Vec<String>, Option<MusicCmd>) {
+        (
+            std::mem::take(&mut self.sounds_pending),
+            std::mem::take(&mut self.loops_pending),
+            self.music_change.take(),
+        )
+    }
+
+    /// A clone of the map's sound assets (`assets/sounds/*`), for the host to
+    /// hand the mixer once at startup — keyed by the same path the map plays.
+    #[must_use]
+    pub fn sound_assets(&self) -> Vec<(String, Vec<u8>)> {
+        self.assets
+            .iter()
+            .filter(|(k, _)| k.starts_with("assets/sounds/"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     /// Drive the animated billboard actors for this frame: register their
@@ -446,13 +660,21 @@ impl MapRender {
                         renderer.set_actor_state(id, inst.anim);
                         inst.applied_anim = inst.anim;
                     }
+                    if inst.tint != inst.applied_tint {
+                        renderer.set_actor_tint(id, inst.tint);
+                        inst.applied_tint = inst.tint;
+                    }
                 }
                 None => {
                     if let Some(reg) = self.actors.get(ai).and_then(|a| a.registered.as_ref()) {
                         let id = renderer.add_billboard_actor(actor_def(reg), pos, yaw);
                         renderer.set_actor_state(id, inst.anim);
+                        if inst.tint != WHITE_TINT {
+                            renderer.set_actor_tint(id, inst.tint);
+                        }
                         inst.id = Some(id);
                         inst.applied_anim = inst.anim;
+                        inst.applied_tint = inst.tint;
                     }
                 }
             }
@@ -491,6 +713,7 @@ impl MapRender {
         settings: &OpticastSettings,
         sky_color: u32,
         dt: f64,
+        debug: bool,
     ) {
         // GPU backend has its own sky path — upload the panorama once.
         if !self.sky_uploaded {
@@ -530,6 +753,54 @@ impl MapRender {
             lights: None,
         };
         renderer.render(&mut self.scene, camera, &frame);
+
+        if debug {
+            self.draw_debug_footprints(renderer, camera);
+        }
+    }
+
+    /// Debug overlay (F1): draw each animated actor's collision footprint — the
+    /// ground square the sim's `clear()` checks — plus a vertical anchor stalk,
+    /// so the sprite's drawn feet can be compared against the position collision
+    /// actually uses. World-space lines, always on top (no depth test).
+    fn draw_debug_footprints(&self, renderer: &mut SceneRenderer, camera: &Camera) {
+        // Half-extent of the footprint, in world units. Mirrors the monada-rpg
+        // map's `clear()` radius (`ratio(40, 100)` = 0.4 cell). Debug-only: the
+        // engine can't know a map's collision shape, so this matches the demo.
+        const R: f64 = 0.4 * SCALE;
+        let box_col = 0xFF00_FF00; // green footprint
+        let stalk_col = 0xFF00_FFFF; // cyan anchor stalk
+        let mut lines = Vec::with_capacity(self.actor_targets.len() * 5);
+        for &(_, ai, pos, _) in &self.actor_targets {
+            // The target pos includes the model's `model_drop`; the collision
+            // ground is the un-dropped z, so the box shows the true footprint.
+            let drop = f64::from(self.actors.get(ai).map_or(0.0, |a| a.drop));
+            let (cx, cy, cz) = (f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2]) - drop);
+            let corners = [
+                [cx - R, cy - R, cz],
+                [cx + R, cy - R, cz],
+                [cx + R, cy + R, cz],
+                [cx - R, cy + R, cz],
+            ];
+            for i in 0..4 {
+                lines.push(Line3 {
+                    a: corners[i],
+                    b: corners[(i + 1) % 4],
+                    color: box_col,
+                    width_px: 2.0,
+                    depth_test: false,
+                });
+            }
+            // Anchor stalk: up is smaller world z, one cell tall.
+            lines.push(Line3 {
+                a: [cx, cy, cz],
+                b: [cx, cy, cz - SCALE],
+                color: stalk_col,
+                width_px: 2.0,
+                depth_test: false,
+            });
+        }
+        renderer.draw_lines(camera, &lines);
     }
 }
 
@@ -565,25 +836,50 @@ impl HostBridge for MapRender {
         self.push_sprite_model(self.sprites.models.len() - 1)
     }
 
-    fn model_actor(&mut self, dir_path: &str, states: &[String]) -> i64 {
-        // Bottom-centre pivot (feet on the ground), looping, 1 voxel/world.
-        let opts = GifImportOpts::default();
+    #[allow(clippy::case_sensitive_file_extension_comparisons)] // assets are lowercase .gif
+    fn model_actor(&mut self, dir_path: &str, states: &[String], height_cells: Fixed) -> i64 {
         let mut actor_states = Vec::with_capacity(states.len());
         for state in states {
-            let mut clips = Vec::with_capacity(ACTOR_SIDES.len());
-            for side in ACTOR_SIDES {
-                let path = format!("{dir_path}/{state}/{side}.gif");
-                let decoded = self
+            // One-shot states hold their last frame instead of looping (a
+            // death pose stays a corpse; a swing doesn't restart mid-play).
+            let mut opts = GifImportOpts::default();
+            if matches!(state.as_str(), "death" | "attack" | "dodge" | "hurt") {
+                opts.loop_mode = LoopMode::Once;
+            }
+            // Directional: all 8 compass GIFs present → one clip per facing.
+            let prefix = format!("{dir_path}/{state}/");
+            let sides: Option<Vec<DecodedClip>> = ACTOR_SIDES
+                .iter()
+                .map(|side| {
+                    self.assets
+                        .get(&format!("{prefix}{side}.gif"))
+                        .and_then(|bytes| voxel_clip_from_gif(bytes, &opts).ok())
+                        .and_then(|clip| clip.decode().ok())
+                })
+                .collect();
+            let clips = if let Some(dir_clips) = sides {
+                dir_clips
+            } else {
+                // Not the 8 compass sides — fall back to a SINGLE non-directional
+                // GIF anywhere in the state dir (a view-independent effect: an
+                // impact flash, a summon circle). roxlap shows the one clip from
+                // every angle (`dirs.len() == 1`). Assets are lowercase `.gif`
+                // (build.rs packs the map verbatim), so a plain suffix match is
+                // exact.
+                let single = self
                     .assets
-                    .get(&path)
+                    .keys()
+                    .filter(|k| k.starts_with(&prefix) && k.ends_with(".gif"))
+                    .min()
+                    .and_then(|k| self.assets.get(k))
                     .and_then(|bytes| voxel_clip_from_gif(bytes, &opts).ok())
                     .and_then(|clip| clip.decode().ok());
-                let Some(c) = decoded else {
-                    eprintln!("monada-host: model_actor: missing/invalid GIF {path:?}");
+                let Some(c) = single else {
+                    eprintln!("monada-host: model_actor: no usable GIF under {prefix:?}");
                     return -1;
                 };
-                clips.push(c);
-            }
+                vec![c]
+            };
             // roxlap's `ActorState` holds `&'static str`; intern the script's
             // state name (actor models are defined once, at `init`).
             let name: &'static str = Box::leak(state.clone().into_boxed_str());
@@ -592,11 +888,71 @@ impl HostBridge for MapRender {
         if actor_states.is_empty() {
             return -1;
         }
+
+        // Measure the *opaque* bounding box across every frame of every state /
+        // side, so transparent padding around the art doesn't shrink the
+        // character or lift it off the ground. Size and ground from that box,
+        // uniformly (so the character stays one size and grounded as it
+        // animates), instead of the raw frame `dims`.
+        let mut bb: Option<(u32, u32, u32, u32)> = None; // (min_x, max_x, min_z, max_z)
+        for (_, clips) in &actor_states {
+            for c in clips {
+                bb = merge_box(bb, opaque_box(c));
+            }
+        }
+        let target_h = height_cells.to_f64() * SCALE;
+        if let Some((_min_x, _max_x, min_z, max_z)) = bb {
+            let opaque_h = f64::from(max_z - min_z + 1);
+            let vws = (target_h / opaque_h) as f32;
+            for (_, clips) in &mut actor_states {
+                for c in clips {
+                    c.voxel_world_size = vws;
+                    // Horizontal pivot = the frame's own centre (the padded
+                    // canvas centre), NOT the trimmed opaque box. The artist
+                    // positions the character within the canvas, so the canvas
+                    // centre is the stable anchor across all 8 sides. Centering
+                    // on the opaque box instead lets each side's / pose's
+                    // differing silhouette extent move the anchor, so the sprite
+                    // drifts from its collision position by a different amount
+                    // per facing (the directional gap). Vertical still uses the
+                    // opaque box: feet (lowest z) on the ground, sized to the
+                    // visible height so padding doesn't shrink/lift the art.
+                    c.pivot = [
+                        f64::from(c.dims[0]) as f32 * 0.5,
+                        f64::from(c.dims[1]) as f32 * 0.5,
+                        min_z as f32,
+                    ];
+                }
+            }
+        } else {
+            // Fully transparent (degenerate) — fall back to the frame height.
+            for (_, clips) in &mut actor_states {
+                for c in clips {
+                    let px_h = f64::from(c.dims[2].max(1));
+                    c.voxel_world_size = (target_h / px_h) as f32;
+                }
+            }
+        }
+
         self.actors.push(ActorModel {
             states: actor_states,
             registered: None,
+            drop: 0.0,
         });
         self.push_model_ref(ModelRef::Actor(self.actors.len() - 1))
+    }
+
+    fn model_drop(&mut self, model: i64, cells: Fixed) {
+        // Resolve the public model id to its actor slot, then store the offset
+        // in world units (down = +z). No-op for a non-actor / bad id.
+        if let Some(&ModelRef::Actor(ai)) = usize::try_from(model)
+            .ok()
+            .and_then(|m| self.model_refs.get(m))
+        {
+            if let Some(actor) = self.actors.get_mut(ai) {
+                actor.drop = (cells.to_f64() * SCALE) as f32;
+            }
+        }
     }
 
     fn entity_set_model(&mut self, entity: i64, model: i64) {
@@ -619,6 +975,8 @@ impl HostBridge for MapRender {
                     anim: initial,
                     applied_anim: "",
                     facing: 0.0,
+                    tint: WHITE_TINT,
+                    applied_tint: WHITE_TINT,
                 },
             );
         }
@@ -645,6 +1003,43 @@ impl HostBridge for MapRender {
         if let Some(inst) = self.entity_actors.get_mut(&EntityId(entity as u64)) {
             inst.facing = yaw.to_f64();
         }
+    }
+
+    fn entity_set_tint(&mut self, entity: i64, tint: i64) {
+        if let Some(inst) = self.entity_actors.get_mut(&EntityId(entity as u64)) {
+            // Keep only the low 24 bits (`0x00RR_GGBB`); the renderer's tint is
+            // a colour multiply, white = no-op.
+            inst.tint = (tint as u32) & 0x00FF_FFFF;
+        }
+    }
+
+    fn play_sound(&mut self, asset_path: &str) {
+        self.play_sound_gain(asset_path, Fixed::from_int(1));
+    }
+
+    fn play_sound_gain(&mut self, asset_path: &str, gain: Fixed) {
+        // De-duplicate by path within this batch: many entities firing the same
+        // sound this frame enqueue it once (the mass-repeat guard). The host
+        // adds a time-debounce across frames.
+        if self.sounds_pending.iter().any(|(p, _)| p == asset_path) {
+            return;
+        }
+        let g = gain.to_f64().clamp(0.0, 1.0) as f32;
+        self.sounds_pending.push((asset_path.to_string(), g));
+    }
+
+    fn play_loop(&mut self, asset_path: &str) {
+        if !self.loops_pending.iter().any(|p| p == asset_path) {
+            self.loops_pending.push(asset_path.to_string());
+        }
+    }
+
+    fn play_music(&mut self, asset_path: &str) {
+        self.music_change = Some(MusicCmd::Play(asset_path.to_string()));
+    }
+
+    fn stop_music(&mut self) {
+        self.music_change = Some(MusicCmd::Stop);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -681,6 +1076,193 @@ impl HostBridge for MapRender {
         if let Some(grid) = self.scene.grid_mut(self.grid) {
             grid.set_voxel(pos, Some(color as u32));
         }
+    }
+
+    #[allow(clippy::many_single_char_names)]
+    fn tile(&mut self, asset_path: &str) -> i64 {
+        let Some(bytes) = self.assets.get(asset_path) else {
+            eprintln!("monada-host: tile: missing asset {asset_path:?}");
+            return -1;
+        };
+        let img = match image::load_from_memory(bytes) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                eprintln!("monada-host: tile: {asset_path:?}: {e}");
+                return -1;
+            }
+        };
+        let (w, h) = img.dimensions();
+        if w == 0 || h == 0 {
+            return -1;
+        }
+        // Nearest-neighbour resample to one cell (SCALE×SCALE voxels); each
+        // pixel becomes a voxlap colour (high byte = 0x80 brightness).
+        let s = SCALE as u32;
+        let mut cells = Vec::with_capacity((s * s) as usize);
+        for ty in 0..s {
+            for tx in 0..s {
+                let px = img.get_pixel((tx * w / s).min(w - 1), (ty * h / s).min(h - 1)).0;
+                let [r, g, b, _a] = px;
+                cells.push(0x8000_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b));
+            }
+        }
+        self.tiles.push(cells);
+        (self.tiles.len() - 1) as i64
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+    fn tile_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, tile: i64) {
+        // Collision is identical to `voxel_fill`; only the colours differ.
+        self.terrain.fill(x0, y0, z0, x1, y1, z1);
+        let Some(cells) = self.tiles.get(tile as usize).cloned() else {
+            return;
+        };
+        let s = SCALE as i64;
+        let g = GROUND_Z as i64;
+        let Some(grid) = self.scene.grid_mut(self.grid) else {
+            return;
+        };
+        for cy in y0.min(y1)..=y0.max(y1) {
+            for cx in x0.min(x1)..=x0.max(x1) {
+                for ly in 0..s {
+                    for lx in 0..s {
+                        let color = cells[(ly * s + lx) as usize];
+                        // World X is mirrored (see `world_of`); tile column `lx`
+                        // maps across the cell's mirrored X span, row `ly` along Y.
+                        let wx = (-cx * s - 1 - lx) as i32;
+                        let wy = (cy * s + ly) as i32;
+                        for z in z0.min(z1)..=z0.max(z1) {
+                            grid.set_voxel(IVec3::new(wx, wy, (g - z) as i32), Some(color));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn transition(&mut self, low: i64, high: i64, asset_path: &str) {
+        let Some(bytes) = self.assets.get(asset_path) else {
+            eprintln!("monada-host: transition: missing asset {asset_path:?}");
+            return;
+        };
+        let rgba = match image::load_from_memory(bytes) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                eprintln!("monada-host: transition: {asset_path:?}: {e}");
+                return;
+            }
+        };
+        let (w, h) = rgba.dimensions();
+        let t = autotile::Transition::from_sheet(&rgba, w, h, SCALE as usize);
+        self.autotiler.add_transition(low, high, t);
+    }
+
+    fn terrain_fill(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, type_id: i64) {
+        for cy in y0.min(y1)..=y0.max(y1) {
+            for cx in x0.min(x1)..=x0.max(x1) {
+                self.autotiler.cells.insert((cx, cy), type_id);
+            }
+        }
+    }
+
+    fn terrain_blit(&mut self, base_type: i64) {
+        // Bounding box of the set cells.
+        let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        for &(cx, cy) in self.autotiler.cells.keys() {
+            x0 = x0.min(cx);
+            y0 = y0.min(cy);
+            x1 = x1.max(cx);
+            y1 = y1.max(cy);
+        }
+        if x0 > x1 {
+            return; // no terrain set
+        }
+        let g = GROUND_Z as i64;
+        let autotiler = &self.autotiler;
+        let Some(grid) = self.scene.grid_mut(self.grid) else {
+            return;
+        };
+        // Floor pixel (fx, fy) is sim-aligned; world X is mirrored (`-fx - 1`,
+        // matching `tile_fill`/`world_of`), Y direct, at the floor surface.
+        autotiler.paint(x0, y0, x1, y1, base_type, |fx, fy, color| {
+            grid.set_voxel(IVec3::new((-fx - 1) as i32, fy as i32, g as i32), Some(color));
+        });
+    }
+
+    // --- HUD / UI overlay (screen-space, render-side only) ----------------
+
+    fn ui_texture(&mut self, asset_path: &str) -> i64 {
+        let Some(bytes) = self.assets.get(asset_path) else {
+            eprintln!("monada-host: ui_texture: missing asset {asset_path:?}");
+            return -1;
+        };
+        let img = match image::load_from_memory(bytes) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                eprintln!("monada-host: ui_texture: {asset_path:?}: {e}");
+                return -1;
+            }
+        };
+        let (w, h) = img.dimensions();
+        self.ui_textures.push((img.into_raw(), w, h));
+        (self.ui_textures.len() - 1) as i64
+    }
+
+    fn ui_width(&self) -> i64 {
+        self.ui_viewport.0
+    }
+    fn ui_height(&self) -> i64 {
+        self.ui_viewport.1
+    }
+
+    fn ui_scale(&mut self, factor: Fixed) {
+        self.ui_scale = (factor.to_f64() as f32).max(0.1);
+    }
+
+    fn ui_clear(&mut self) {
+        self.ui_widgets.clear();
+    }
+
+    fn ui_image(&mut self, tex: i64, x: i64, y: i64) {
+        if let Ok(tex) = usize::try_from(tex) {
+            self.ui_widgets.push(UiWidget::Image { tex, x: x as i32, y: y as i32 });
+        }
+    }
+
+    fn ui_image_clip(&mut self, tex: i64, x: i64, y: i64, frac: Fixed) {
+        if let Ok(tex) = usize::try_from(tex) {
+            let frac = frac.to_f64().clamp(0.0, 1.0) as f32;
+            self.ui_widgets
+                .push(UiWidget::ImageClip { tex, x: x as i32, y: y as i32, frac });
+        }
+    }
+
+    fn ui_text(&mut self, x: i64, y: i64, text: &str, size: i64) {
+        self.ui_widgets.push(UiWidget::Text {
+            x: x as i32,
+            y: y as i32,
+            text: text.to_string(),
+            size: size.max(1) as f32,
+        });
+    }
+
+    fn ui_button(&mut self, tex: i64, hover: i64, pressed: i64, x: i64, y: i64, button_bit: i64) {
+        let (Ok(tex), Ok(hover), Ok(pressed), Ok(bit)) = (
+            usize::try_from(tex),
+            usize::try_from(hover),
+            usize::try_from(pressed),
+            u64::try_from(button_bit),
+        ) else {
+            return;
+        };
+        self.ui_widgets.push(UiWidget::Button {
+            tex,
+            hover,
+            pressed,
+            x: x as i32,
+            y: y as i32,
+            bit,
+        });
     }
 
     fn highlight(&mut self, entity: i64) {
@@ -801,6 +1383,53 @@ mod tests {
         out
     }
 
+    /// An 8×8 GIF whose only opaque content is a full-width band in image rows
+    /// 3..=5 — transparent padding above and below. Voxel `z = 7 - row`, so the
+    /// band occupies `z 2..=4` (feet at z=2, not the frame bottom z=0).
+    fn padded_gif() -> Vec<u8> {
+        let (w, h) = (8u16, 8u16);
+        let mut rgba = vec![0u8; usize::from(w) * usize::from(h) * 4];
+        for row in 3..=5u16 {
+            for col in 0..w {
+                let i = (usize::from(row) * usize::from(w) + usize::from(col)) * 4;
+                rgba[i..i + 4].copy_from_slice(&[200, 80, 60, 255]); // opaque band
+            }
+        }
+        let mut out = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut out, w, h, &[]).expect("gif encoder");
+            let frame = gif::Frame::from_rgba(w, h, &mut rgba);
+            enc.write_frame(&frame).expect("write frame");
+        }
+        out
+    }
+
+    #[test]
+    fn alpha_padding_is_trimmed() {
+        let mut a = BTreeMap::new();
+        for side in ACTOR_SIDES {
+            a.insert(format!("char/hero/idle/{side}.gif"), padded_gif());
+        }
+        let mut r = MapRender::new(a, None);
+        let model = r.model_actor("char/hero", &["idle".to_string()], Fixed::from_int(3));
+        assert!(model >= 0, "actor registered");
+        let clip = &r.actors[0].states[0].1[0];
+        // Feet at the opaque band (z=2), not the padded frame bottom (z=0), so
+        // the actor isn't lifted off the ground.
+        assert!(
+            (clip.pivot[2] - 2.0).abs() < 1e-3,
+            "pivot at the opaque feet (z=2), got {}",
+            clip.pivot[2]
+        );
+        // 3 cells × SCALE(16) over the 3-voxel opaque band → 16 wsu/voxel —
+        // sized by the band, not the 8px padded frame (which would give 6).
+        assert!(
+            (clip.voxel_world_size - 16.0).abs() < 1e-3,
+            "sized by the opaque band, got {}",
+            clip.voxel_world_size
+        );
+    }
+
     /// `char/hero/<state>/<side>.gif` for two states × the 8 compass sides.
     fn hero_assets() -> BTreeMap<String, Vec<u8>> {
         let mut a = BTreeMap::new();
@@ -815,7 +1444,11 @@ mod tests {
     #[test]
     fn model_actor_decodes_binds_and_targets() {
         let mut r = MapRender::new(hero_assets(), Some(0));
-        let model = r.model_actor("char/hero", &["idle".to_string(), "run".to_string()]);
+        let model = r.model_actor(
+            "char/hero",
+            &["idle".to_string(), "run".to_string()],
+            Fixed::from_int(2),
+        );
         assert!(model >= 0, "actor model registered");
         assert_eq!(r.actors.len(), 1);
         assert_eq!(r.actors[0].states.len(), 2, "two animation states");
@@ -856,7 +1489,7 @@ mod tests {
     fn model_actor_missing_gif_is_minus_one() {
         let mut r = MapRender::new(BTreeMap::new(), None);
         assert_eq!(
-            r.model_actor("char/hero", &["idle".to_string()]),
+            r.model_actor("char/hero", &["idle".to_string()], Fixed::from_int(2)),
             -1,
             "a missing GIF aborts the actor model"
         );

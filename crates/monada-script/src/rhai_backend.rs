@@ -395,14 +395,21 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     // Animated 8-direction billboard actor: `model_actor(dir, [states])`,
     // then per-entity `entity_set_anim` / `entity_set_facing` (render-side).
     let b = bridge.clone();
-    engine.register_fn("model_actor", move |path: ImmutableString, states: Array| -> i64 {
-        let states: Vec<String> = states
-            .into_iter()
-            .map(|d| d.into_string().unwrap_or_default())
-            .collect();
-        b.lock()
-            .expect("bridge mutex")
-            .model_actor(path.as_str(), &states)
+    engine.register_fn(
+        "model_actor",
+        move |path: ImmutableString, states: Array, height_cells: Fixed| -> i64 {
+            let states: Vec<String> = states
+                .into_iter()
+                .map(|d| d.into_string().unwrap_or_default())
+                .collect();
+            b.lock()
+                .expect("bridge mutex")
+                .model_actor(path.as_str(), &states, height_cells)
+        },
+    );
+    let b = bridge.clone();
+    engine.register_fn("model_drop", move |model: i64, cells: Fixed| {
+        b.lock().expect("bridge mutex").model_drop(model, cells);
     });
 
     let b = bridge.clone();
@@ -413,6 +420,32 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     let b = bridge.clone();
     engine.register_fn("entity_set_facing", move |e: i64, yaw: Fixed| {
         b.lock().expect("bridge mutex").entity_set_facing(e, yaw);
+    });
+    let b = bridge.clone();
+    engine.register_fn("entity_set_tint", move |e: i64, tint: i64| {
+        b.lock().expect("bridge mutex").entity_set_tint(e, tint);
+    });
+
+    // Audio (render-side).
+    let b = bridge.clone();
+    engine.register_fn("play_sound", move |path: ImmutableString| {
+        b.lock().expect("bridge mutex").play_sound(path.as_str());
+    });
+    let b = bridge.clone();
+    engine.register_fn("play_sound_gain", move |path: ImmutableString, gain: Fixed| {
+        b.lock().expect("bridge mutex").play_sound_gain(path.as_str(), gain);
+    });
+    let b = bridge.clone();
+    engine.register_fn("play_loop", move |path: ImmutableString| {
+        b.lock().expect("bridge mutex").play_loop(path.as_str());
+    });
+    let b = bridge.clone();
+    engine.register_fn("play_music", move |path: ImmutableString| {
+        b.lock().expect("bridge mutex").play_music(path.as_str());
+    });
+    let b = bridge.clone();
+    engine.register_fn("stop_music", move || {
+        b.lock().expect("bridge mutex").stop_music();
     });
 
     let b = bridge.clone();
@@ -508,6 +541,92 @@ fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     engine.register_fn("ground_height", move |x: i64, y: i64| -> i64 {
         b.lock().expect("bridge mutex").ground_height(x, y)
     });
+
+    // Per-cell PNG tiles: `tile(path)` loads, `tile_fill` paints a cell region.
+    let b = bridge.clone();
+    engine.register_fn("tile", move |path: ImmutableString| -> i64 {
+        b.lock().expect("bridge mutex").tile(path.as_str())
+    });
+
+    let b = bridge.clone();
+    engine.register_fn(
+        "tile_fill",
+        move |x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, tile: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .tile_fill(x0, y0, z0, x1, y1, z1, tile);
+        },
+    );
+
+    // Autotiled terrain: register transition sheets, paint per-cell types,
+    // then blit the blended flat floor.
+    let b = bridge.clone();
+    engine.register_fn(
+        "transition",
+        move |low: i64, high: i64, path: ImmutableString| {
+            b.lock()
+                .expect("bridge mutex")
+                .transition(low, high, path.as_str());
+        },
+    );
+
+    let b = bridge.clone();
+    engine.register_fn(
+        "terrain_fill",
+        move |x0: i64, y0: i64, x1: i64, y1: i64, type_id: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .terrain_fill(x0, y0, x1, y1, type_id);
+        },
+    );
+
+    let b = bridge.clone();
+    engine.register_fn("terrain_blit", move |base_type: i64| {
+        b.lock().expect("bridge mutex").terrain_blit(base_type);
+    });
+
+    // HUD / UI overlay.
+    let b = bridge.clone();
+    engine.register_fn("ui_texture", move |path: ImmutableString| -> i64 {
+        b.lock().expect("bridge mutex").ui_texture(path.as_str())
+    });
+    let b = bridge.clone();
+    engine.register_fn("ui_width", move || -> i64 {
+        b.lock().expect("bridge mutex").ui_width()
+    });
+    let b = bridge.clone();
+    engine.register_fn("ui_height", move || -> i64 {
+        b.lock().expect("bridge mutex").ui_height()
+    });
+    let b = bridge.clone();
+    engine.register_fn("ui_scale", move |factor: Fixed| {
+        b.lock().expect("bridge mutex").ui_scale(factor);
+    });
+    let b = bridge.clone();
+    engine.register_fn("ui_clear", move || {
+        b.lock().expect("bridge mutex").ui_clear();
+    });
+    let b = bridge.clone();
+    engine.register_fn("ui_image", move |tex: i64, x: i64, y: i64| {
+        b.lock().expect("bridge mutex").ui_image(tex, x, y);
+    });
+    let b = bridge.clone();
+    engine.register_fn("ui_image_clip", move |tex: i64, x: i64, y: i64, frac: Fixed| {
+        b.lock().expect("bridge mutex").ui_image_clip(tex, x, y, frac);
+    });
+    let b = bridge.clone();
+    engine.register_fn("ui_text", move |x: i64, y: i64, text: ImmutableString, size: i64| {
+        b.lock().expect("bridge mutex").ui_text(x, y, text.as_str(), size);
+    });
+    let b = bridge.clone();
+    engine.register_fn(
+        "ui_button",
+        move |tex: i64, hover: i64, pressed: i64, x: i64, y: i64, bit: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .ui_button(tex, hover, pressed, x, y, bit);
+        },
+    );
 }
 
 /// The `local_player()` script sentinel for "no single local player".

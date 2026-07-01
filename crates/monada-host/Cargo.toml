@@ -49,6 +49,17 @@ egui-winit = { version = "0.34", default-features = false }
 # Decode a map's `assets/*.png` skybox to RGBA8 (PNG only — the format
 # the map ships).
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Audio output + MP3 decode for the map's `assets/sounds/*.mp3` (behind the
+# `audio` feature, on by default). rodio pulls cpal, which links the platform
+# audio backend (ALSA on Linux) at BUILD time — so a headless / no-ALSA box
+# builds with `--no-default-features` and the audio calls become no-ops.
+rodio = { version = "0.19", default-features = false, features = ["symphonia-mp3"], optional = true }
+
+[features]
+default = ["audio"]
+# Real sound playback. Off = the `Audio` shim is a no-op (still compiles with
+# no cpal/ALSA dependency), for headless / CI builds.
+audio = ["dep:rodio"]
 
 [dev-dependencies]
 # Encode tiny in-memory GIFs to exercise the actor-bridge decode path
