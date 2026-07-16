@@ -35,6 +35,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # rodio -> cpal links the platform audio backend at BUILD time; on
+      # Linux that is ALSA, so the default `audio` feature needs its dev
+      # headers present or `alsa-sys` fails to build (DESIGN: audio is a
+      # default feature, dropped only under `--no-default-features`).
+      - name: Install ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@v2
       # `-D warnings` promotes the determinism guardrails to hard
       # failures: the workspace `disallowed-types` (HashMap/HashSet) and
@@ -54,6 +60,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Linux links ALSA for the default `audio` feature (rodio -> cpal);
+      # macOS/Windows use their system backends and need nothing here.
+      - name: Install ALSA dev headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@v2
       # `monada-net/quic` runs the lockstep-over-real-QUIC integration
       # test (M3 Phase B) on every platform too (loopback UDP).
