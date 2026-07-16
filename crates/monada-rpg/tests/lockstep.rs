@@ -33,8 +33,11 @@ fn session(player: PlayerId, transport: LoopbackTransport, map: &monada_format::
     // both inits paint identically, so collision queries agree.
     let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
     let script = map.entry_script().expect("entry script");
-    let driver =
+    let mut driver =
         RhaiDriver::with_bridge(shared_world(SEED), script, &bridge).expect("compile rpg map");
+    if let monada_format::SimHz::Fixed(hz) = map.manifest.sim_hz {
+        driver.set_tick_hz(hz);
+    }
     let info = MatchInfo {
         seed: SEED,
         map_hash: map.hash,
@@ -135,6 +138,9 @@ fn replay_reproduces_the_co_op_session() {
     let mut fresh =
         RhaiDriver::with_bridge(shared_world(SEED), map.entry_script().unwrap(), &bridge)
             .expect("compile rpg map");
+    if let monada_format::SimHz::Fixed(hz) = map.manifest.sim_hz {
+        fresh.set_tick_hz(hz);
+    }
     assert_eq!(
         a.replay().playback(&mut fresh),
         final_hash,

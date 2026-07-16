@@ -774,6 +774,9 @@ impl App {
         // Bridge must be set before `init` calls model_box / voxel_fill / …
         let bridge: SharedBridge = render.clone();
         backend.set_bridge(&bridge);
+        if let SimHz::Fixed(hz) = run.map.manifest.sim_hz {
+            backend.set_tick_hz(hz);
+        }
         backend.load(&script).expect("compile map script");
         backend.on_init().expect("map init");
         backend.drain_ui_events();
@@ -820,8 +823,11 @@ impl App {
             Some(i64::from(local.0)),
         )));
         let bridge: SharedBridge = render.clone();
-        let driver = RhaiDriver::with_bridge(shared_world(SEED), &script, &bridge)
+        let mut driver = RhaiDriver::with_bridge(shared_world(SEED), &script, &bridge)
             .expect("compile map script");
+        if let SimHz::Fixed(hz) = run.map.manifest.sim_hz {
+            driver.set_tick_hz(hz);
+        }
         let info = MatchInfo {
             seed: SEED,
             map_hash: run.map.hash,
@@ -868,8 +874,11 @@ impl App {
         };
         let render = Arc::new(Mutex::new(MapRender::new(run.map.assets, None)));
         let bridge: SharedBridge = render.clone();
-        let driver = RhaiDriver::with_bridge(shared_world(replay.seed), &script, &bridge)
+        let mut driver = RhaiDriver::with_bridge(shared_world(replay.seed), &script, &bridge)
             .expect("compile map script");
+        if let SimHz::Fixed(hz) = run.map.manifest.sim_hz {
+            driver.set_tick_hz(hz);
+        }
 
         // Consume the replay's own canonical grouping — the *same* source
         // `Replay::playback` uses, so the paced viewer can't diverge from

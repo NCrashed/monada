@@ -56,6 +56,12 @@ impl RhaiDriver {
         Ok(RhaiDriver { backend, world })
     }
 
+    /// Configure the tick duration for a fixed-rate map. Forwarded to the
+    /// backend so the script's `tick(dt)` handler receives the correct value.
+    pub fn set_tick_hz(&mut self, hz: u32) {
+        self.backend.set_tick_hz(hz);
+    }
+
     /// The shared world this driver mutates (e.g. for the render bridge to
     /// read positions between ticks).
     #[must_use]
