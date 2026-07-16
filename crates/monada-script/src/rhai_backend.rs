@@ -59,6 +59,12 @@ pub struct RhaiBackend {
     has_pointer: bool,
     has_key: bool,
     has_tick: bool,
+    /// Whether the loaded script defines a `tick/1` handler that receives `dt`
+    /// (the tick duration as a `Fixed`). Takes priority over `tick/0` when set.
+    has_tick_with_dt: bool,
+    /// The tick duration for a fixed-rate map (`ratio(1, hz)`), set via
+    /// [`set_tick_hz`](RhaiBackend::set_tick_hz). `None` for command-driven maps.
+    tick_dt: Option<Fixed>,
     /// UI/HUD events the script emitted via `ui_emit_event`, awaiting a
     /// [`drain_ui_events`](ScriptBackend::drain_ui_events) by the host.
     /// Render-side only — never part of [`World`](monada_sim::World) state.
@@ -88,8 +94,18 @@ impl RhaiBackend {
             has_pointer: false,
             has_key: false,
             has_tick: false,
+            has_tick_with_dt: false,
+            tick_dt: None,
             events,
         }
+    }
+
+    /// Set the tick duration for a fixed-rate map. The value is passed to the
+    /// script's `tick(dt)` handler (arity 1) each tick. Must be called before
+    /// the first [`on_tick`](ScriptBackend::on_tick); calling after [`load`](ScriptBackend::load)
+    /// is fine — `load` only inspects the script's arity, not the dt value.
+    pub fn set_tick_hz(&mut self, hz: u32) {
+        self.tick_dt = Some(Fixed::from_ratio(1, hz.max(1) as i32));
     }
 
     /// Register the host's render / input / command API (DESIGN.md §3.3)
@@ -102,13 +118,13 @@ impl RhaiBackend {
         register_bridge_api(&mut self.engine, bridge);
     }
 
-    fn call(&mut self, name: &str) -> Result<(), ScriptError> {
+    fn call<A: rhai::FuncArgs>(&mut self, name: &str, args: A) -> Result<(), ScriptError> {
         let ast = self
             .ast
             .as_ref()
             .ok_or_else(|| ScriptError::Run("no script loaded".to_string()))?;
         self.engine
-            .call_fn::<()>(&mut self.scope, ast, name, ())
+            .call_fn::<()>(&mut self.scope, ast, name, args)
             .map_err(|e| ScriptError::Run(e.to_string()))
     }
 }
@@ -129,12 +145,13 @@ impl ScriptBackend for RhaiBackend {
         self.has_pointer = defines("pointer", POINTER_ARITY);
         self.has_key = defines("key", KEY_ARITY);
         self.has_tick = defines("tick", TICK_ARITY);
+        self.has_tick_with_dt = defines("tick", 1);
         self.ast = Some(ast);
         Ok(())
     }
 
     fn on_init(&mut self) -> Result<(), ScriptError> {
-        self.call("init")
+        self.call("init", ())
     }
 
     fn on_command(&mut self, player: PlayerId, command: &Command) -> Result<(), ScriptError> {
@@ -167,8 +184,13 @@ impl ScriptBackend for RhaiBackend {
         // state via the host API. A command-driven map (no `tick` handler)
         // still advances the counter — it just runs no per-tick logic.
         self.world.lock().expect("world mutex").tick += 1;
-        if self.has_tick {
-            self.call("tick")
+        if self.has_tick_with_dt {
+            let dt = self
+                .tick_dt
+                .expect("tick(dt) handler requires set_tick_hz before on_tick");
+            self.call("tick", (dt,))
+        } else if self.has_tick {
+            self.call("tick", ())
         } else {
             Ok(())
         }
