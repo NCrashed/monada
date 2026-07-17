@@ -349,6 +349,15 @@ impl Part {
             Part::Right => "right",
         }
     }
+
+    /// The axis part named by a `bindings.toml` key, if it belongs to
+    /// `kind`.
+    fn from_config_key(kind: ActionKind, key: &str) -> Option<Part> {
+        Part::of(kind)
+            .iter()
+            .copied()
+            .find(|p| p.config_key() == key)
+    }
 }
 
 /// One rebindable row in the key-bindings panel: a base action, or one
@@ -650,14 +659,9 @@ impl Bindings {
     /// means one thing per context). Returns the displaced slot's label,
     /// if the key was taken.
     ///
-    /// Known limitation: if the displaced slot is one part of a map axis /
-    /// axis2, that action is left with fewer parts than its kind needs.
-    /// [`to_toml`](Self::to_toml) can't represent a partial axis (the
-    /// manifest `ActionDefault` requires every pole), so on the next load
-    /// that action falls back to its manifest default — the saved state
-    /// diverges from the in-session one. Reaching it needs a deliberate
-    /// cross-binding of a map-axis key onto another map action; the real
-    /// fix is optional-part axes in `monada-format` (plan follow-up).
+    /// Displacing one pole of a map axis leaves that axis partly bound;
+    /// [`to_toml`](Self::to_toml) serialises the partial state faithfully
+    /// (only the bound poles), so a save + reload reproduces it exactly.
     pub fn rebind(&mut self, target: ActionRef, input: PhysInput) -> Option<String> {
         let ctx = Self::target_context(target);
         let displaced = self
@@ -741,18 +745,18 @@ impl Bindings {
         if !self.map_actions.is_empty() {
             let _ = write!(text, "\n[map.\"{}\"]\n", self.map_name);
             for (index, ma) in self.map_actions.iter().enumerate() {
-                if let Some(value) = self.map_action_toml(index, ma) {
-                    let _ = writeln!(text, "\"{}\" = {value}", ma.id);
-                }
+                let _ = writeln!(text, "\"{}\" = {}", ma.id, self.map_action_toml(index, ma));
             }
         }
         text
     }
 
-    /// One map action's value in `bindings.toml` form, or `None` if a
-    /// required axis part is unbound (can't form a valid shape — the
-    /// loader then falls back to the manifest default).
-    fn map_action_toml(&self, index: usize, ma: &MapAction) -> Option<String> {
+    /// One map action's value in `bindings.toml` form. A button is a list
+    /// of its inputs; an axis is a table of only its *bound* parts — a
+    /// partly-rebound axis serialises faithfully (the loader binds those
+    /// parts and leaves the rest unbound), so a reload reproduces the live
+    /// state exactly.
+    fn map_action_toml(&self, index: usize, ma: &MapAction) -> String {
         let first = |part: Part| {
             self.entries
                 .iter()
@@ -769,19 +773,16 @@ impl Bindings {
                     .iter()
                     .map(|i| format!("\"{}\"", i.name()))
                     .collect();
-                Some(format!("[{}]", names.join(", ")))
+                format!("[{}]", names.join(", "))
             }
             ActionKind::Axis | ActionKind::Axis2 => {
-                let parts = Part::of(ma.kind);
-                let mut fields = Vec::with_capacity(parts.len());
-                for &part in parts {
-                    // A partly-unbound axis can't be written (the shape needs
-                    // every pole); `None` here drops the whole action, so it
-                    // reloads at the manifest default — see `rebind`'s note.
-                    let name = first(part)?;
-                    fields.push(format!("{} = \"{name}\"", part.config_key()));
-                }
-                Some(format!("{{ {} }}", fields.join(", ")))
+                let fields: Vec<String> = Part::of(ma.kind)
+                    .iter()
+                    .filter_map(|&part| {
+                        first(part).map(|name| format!("{} = \"{name}\"", part.config_key()))
+                    })
+                    .collect();
+                format!("{{ {} }}", fields.join(", "))
             }
         }
     }
@@ -999,17 +1000,44 @@ fn parse_map_binding(
     }
 }
 
-/// Parse a `[map."<name>"]` override value into `(input, part)` rows,
-/// accepting the same shapes as the manifest's `default`.
+/// Parse a `[map."<name>"]` override value into `(input, part)` rows.
+///
+/// Unlike the manifest `default` (which must be a *complete* shape), an
+/// override may bind a subset of an axis's parts: a `button` is a list of
+/// inputs, and an `axis`/`axis2` is a table of any of its part keys
+/// (`{ up = "KeyI", left = "KeyJ" }`) — the omitted poles are left
+/// unbound. This lets the rebind panel save a partly-rebound axis
+/// faithfully, so a reload reproduces the in-session state exactly.
 fn toml_map_binding(
     kind: ActionKind,
     value: &toml::Value,
 ) -> Result<Vec<(PhysInput, Part)>, String> {
-    let default: ActionDefault = value
-        .clone()
-        .try_into()
-        .map_err(|e| format!("bad binding shape: {e}"))?;
-    parse_map_binding(kind, &default)
+    let one = |name: &toml::Value, part: Part| {
+        name.as_str()
+            .and_then(PhysInput::parse)
+            .map(|input| (input, part))
+            .ok_or_else(|| format!("unknown input {name}"))
+    };
+    match kind {
+        ActionKind::Button => {
+            let list = value
+                .as_array()
+                .ok_or("a button binding must be a list of inputs")?;
+            list.iter().map(|name| one(name, Part::Press)).collect()
+        }
+        ActionKind::Axis | ActionKind::Axis2 => {
+            let table = value
+                .as_table()
+                .ok_or("an axis binding must be a table of parts")?;
+            let mut out = Vec::with_capacity(table.len());
+            for (key, name) in table {
+                let part = Part::from_config_key(kind, key)
+                    .ok_or_else(|| format!("unknown axis part `{key}`"))?;
+                out.push(one(name, part)?);
+            }
+            Ok(out)
+        }
+    }
 }
 
 /// `<config dir>/monada/bindings.toml`: `%APPDATA%` on Windows,
@@ -1388,6 +1416,53 @@ mod tests {
             Some(ActionRef::Map {
                 index: 1,
                 part: Part::Up
+            })
+        );
+    }
+
+    #[test]
+    fn a_stranded_axis_pole_round_trips_partial() {
+        // The former limitation: cross-bind a key that a map axis pole
+        // holds (strafe ↑ = KeyI) onto another map action (cast). That
+        // strands strafe ↑; the partial axis must save + reload faithfully
+        // rather than resurrecting the pole at its manifest default.
+        let (mut a, _) = Bindings::defaults("Test", &decls());
+        let up = ActionRef::Map {
+            index: 1,
+            part: Part::Up,
+        };
+        let cast = ActionRef::Map {
+            index: 0,
+            part: Part::Press,
+        };
+        let displaced = a.rebind(cast, key(KeyCode::KeyI));
+        assert_eq!(displaced.as_deref(), Some("strafe ↑"));
+        assert_eq!(a.resolve(REAL, key(KeyCode::KeyI)), Some(cast));
+        // strafe ↑ is now unbound in-session (KeyI resolves to cast).
+        assert!(!a
+            .slots()
+            .iter()
+            .any(|s| s.target == up && !s.inputs.is_empty()));
+
+        // Save + reload: the stranded pole stays unbound, not resurrected.
+        let toml = a.to_toml();
+        assert!(
+            toml.contains("\"strafe\" = { down ="),
+            "partial axis omits the up pole: {toml}"
+        );
+        let (mut b, _) = Bindings::defaults("Test", &decls());
+        assert!(b.apply_overrides(&toml).is_empty());
+        assert_eq!(b.resolve(REAL, key(KeyCode::KeyI)), Some(cast));
+        assert!(!b
+            .slots()
+            .iter()
+            .any(|s| s.target == up && !s.inputs.is_empty()));
+        // The other poles survive.
+        assert_eq!(
+            b.resolve(REAL, key(KeyCode::KeyK)),
+            Some(ActionRef::Map {
+                index: 1,
+                part: Part::Down
             })
         );
     }

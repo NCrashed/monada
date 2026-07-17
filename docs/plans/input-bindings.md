@@ -19,11 +19,12 @@ inert for the running map — a context not in the active stack, or a key
 a higher context wins — so a no-effect rebind isn't offered; Esc closes
 it; a displaced key is announced. Remaining: `pick_voxel` + `cursor()`
 (deferred until a consumer map), step 6 script-driven contexts +
-`cursor_mode`, gamepad, and **optional-part axes in `monada-format`** —
-today a rebind that strands one pole of a map axis can't be saved (the
-`ActionDefault` shape needs every pole), so it reloads at the manifest
-default and the saved state diverges from the session (see `rebind`'s
-doc note). Companion to DESIGN.md §3.3 (script triggers) and §3.1
+`cursor_mode`, and gamepad. **Optional-part axes: done** — the
+`[map."<name>"]` override format now takes a partial axis part-table
+(`{ up = "KeyI", left = "KeyJ" }`), so a rebind that strands one pole
+saves and reloads faithfully instead of reverting to the manifest
+default (host-side only; the manifest `default` stays a complete
+shape). Companion to DESIGN.md §3.3 (script triggers) and §3.1
 (lockstep). Terminology and constraints here are
 grounded in the current code; file references are as of this writing.
 
