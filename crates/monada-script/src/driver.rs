@@ -12,7 +12,6 @@
 //! - `step` → the map's `tick` trigger (via `on_tick`),
 //! - `state_hash` → the world's canonical [`state_hash`](monada_sim::World::state_hash).
 
-use monada_fixed::FixedVec3;
 use monada_net::SimDriver;
 use monada_sim::{Command, PlayerId};
 
@@ -67,21 +66,6 @@ impl RhaiDriver {
     #[must_use]
     pub fn world(&self) -> &SharedWorld {
         &self.world
-    }
-
-    /// Forward a pointer event to the map's `pointer` trigger (the host's
-    /// click FSM for a networked map). Commands the gesture queues are
-    /// drained from the bridge by the host, not applied here.
-    ///
-    /// # Errors
-    /// Propagates a [`ScriptError`] the handler raises.
-    pub fn on_pointer(
-        &mut self,
-        button: i64,
-        point: FixedVec3,
-        entity: i64,
-    ) -> Result<(), ScriptError> {
-        self.backend.on_pointer(button, point, entity)
     }
 }
 

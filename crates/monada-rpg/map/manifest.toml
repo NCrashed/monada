@@ -7,8 +7,30 @@ engine_version = "0.0.1"
 # client = player 1). No PvP — both fight the waves together, sharing one
 # deterministic sim. Runs solo too (no flag = hotseat player 0).
 players = 2
-# Real-time: the sim advances on a fixed 30 Hz clock; the host injects one
-# per-tick input command per local player (WASD move, Space dodge, LMB attack).
+# Real-time: the sim advances on a fixed 30 Hz clock; the map's local layer
+# (`local_tick` in the entry script) assembles one per-tick input command
+# per local player from the declared actions below.
 sim_hz = "30hz"
 script_runtime = "rhai"
 entry = "scripts/main.rhai"
+
+# Rebindable input actions (docs/plans/input-bindings.md). The local layer
+# polls these in `local_tick`; a user overrides the keys in the host's
+# bindings.toml under [map."monada RPG demo"].
+[[action]]
+id = "move"
+kind = "axis2"
+default = { up = "KeyW", down = "KeyS", left = "KeyA", right = "KeyD" }
+label = { en = "Move" }
+
+[[action]]
+id = "attack"
+kind = "button"
+default = ["MouseLeft"]
+label = { en = "Attack" }
+
+[[action]]
+id = "dodge"
+kind = "button"
+default = ["Space"]
+label = { en = "Dodge" }

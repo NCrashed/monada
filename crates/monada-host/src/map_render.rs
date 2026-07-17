@@ -20,8 +20,10 @@ use std::io::Cursor;
 use image::AnimationDecoder;
 
 use crate::autotile;
+use crate::bindings::{MapActionStates, MapActionValue, Part};
 use glam::{DVec3, IVec3};
 use monada_fixed::{Fixed, FixedVec3};
+use monada_format::ActionDecl;
 use monada_render::OrbitCamera;
 use monada_script::{HostBridge, VoxelStore};
 use monada_sim::{Command, EntityId, World};
@@ -435,6 +437,24 @@ pub struct MapRender {
     /// (ms) + dims, indexed by the id returned to the script. The host cycles
     /// frames by wall-clock and draws the current one for a `UiWidget::Anim`.
     ui_gifs: Vec<UiGif>,
+    /// Ids of the map's declared `[[action]]`s, index-aligned with
+    /// `action_states` (and the binding table's `ActionRef::Map` indexes).
+    action_ids: Vec<String>,
+    /// Live action values, written by the host's input dispatch and read
+    /// by the local script layer via the `action_*` bridge queries.
+    action_states: MapActionStates,
+    /// HUD-button bits clicked since the local layer last took them
+    /// (`ui_clicks` bridge query). Latched by the host's egui pass.
+    ui_click_bits: i64,
+    /// The cursor's ground point in sim coords (`pick_ground`), refreshed
+    /// by the host each frame; `None` while the ray misses.
+    cursor_ground: Option<(f64, f64)>,
+    /// Sim-space aim yaw toward the cursor (`aim_yaw`), holding its last
+    /// value while the ray misses — the twin-stick aim convention.
+    cursor_aim: f64,
+    /// The entity under the cursor (`pick_entity`), refreshed per frame
+    /// by the host alongside the ray; `-1` = none.
+    cursor_entity: i64,
 }
 
 /// A decoded animated HUD image (a portrait): its frames as `(RGBA, delay_ms)`
@@ -450,7 +470,11 @@ impl MapRender {
     /// marker model. (Identity grid so the GPU sprite pass projects the
     /// world camera correctly — see `monada_render`'s circle ground.)
     #[must_use]
-    pub fn new(assets: BTreeMap<String, Vec<u8>>, local_player: Option<i64>) -> MapRender {
+    pub fn new(
+        assets: BTreeMap<String, Vec<u8>>,
+        local_player: Option<i64>,
+        actions: &[ActionDecl],
+    ) -> MapRender {
         let mut scene = Scene::new();
         let grid = scene.add_grid(GridTransform::identity());
         // Model 0: a flat amber tile the size of one cell — highlights the
@@ -495,7 +519,68 @@ impl MapRender {
             loops_pending: Vec::new(),
             music_change: None,
             ui_gifs: Vec::new(),
+            action_ids: actions.iter().map(|a| a.id.clone()).collect(),
+            action_states: MapActionStates::new(actions),
+            ui_click_bits: 0,
+            cursor_ground: None,
+            cursor_aim: 0.0,
+            cursor_entity: -1,
         }
+    }
+
+    /// Apply one input edge to a declared action's live value (the host's
+    /// binding dispatch; `index` is the manifest declaration order).
+    pub fn action_set(&mut self, index: usize, part: Part, down: bool) {
+        self.action_states.set(index, part, down);
+    }
+
+    /// `(id, value)` debug lines for the F1 HUD — a map author watches
+    /// bindings land without wiring any UI.
+    #[must_use]
+    pub fn action_lines(&self) -> Vec<(String, String)> {
+        self.action_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, id)| {
+                self.action_states
+                    .get(i)
+                    .map(|v| (id.clone(), v.describe()))
+            })
+            .collect()
+    }
+
+    /// OR HUD-button bits clicked this frame into the latch `ui_clicks`
+    /// hands to the local layer.
+    pub fn add_ui_clicks(&mut self, bits: i64) {
+        self.ui_click_bits |= bits;
+    }
+
+    /// Refresh the cursor-derived state (`pick_ground` / `pick_entity` /
+    /// `aim_yaw`) from this frame's view ray. Aim holds its last value on
+    /// a miss.
+    pub fn set_cursor_ray(&mut self, world: &World, origin: DVec3, dir: DVec3) {
+        self.cursor_ground = self.ground_sim(origin, dir);
+        self.cursor_entity = self.pick(world, origin, dir).1;
+        if let Some((mx, my)) = self.cursor_ground {
+            let (px, py) = self.camera_center_sim();
+            let (dx, dy) = (mx - px, my - py);
+            if dx.mul_add(dx, dy * dy) > 1e-6 {
+                self.cursor_aim = dy.atan2(dx);
+            }
+        }
+    }
+
+    /// The current aim yaw as the host's float (for the legacy input
+    /// snapshot path; the bridge's `aim_yaw` serves the local layer).
+    #[must_use]
+    pub fn aim_f64(&self) -> f64 {
+        self.cursor_aim
+    }
+
+    /// A declared action's live value, by its manifest id.
+    fn action_value(&self, id: &str) -> Option<MapActionValue> {
+        let index = self.action_ids.iter().position(|a| a == id)?;
+        self.action_states.get(index)
     }
 
     /// Register a static sprite model (by its [`SpriteSet::models`] index)
@@ -1449,6 +1534,55 @@ impl HostBridge for MapRender {
         self.local_player
     }
 
+    // --- local-layer input queries (docs/plans/input-bindings.md §3) ------
+    // Backed by the action states the host's binding dispatch writes and
+    // the per-frame cursor refresh (`set_cursor_ray`). Registered only
+    // into the local backend; the sim backend never sees these.
+
+    fn action_down(&self, id: &str) -> bool {
+        self.action_value(id)
+            .is_some_and(|v| matches!(v, MapActionValue::Button(true)))
+    }
+
+    fn action_axis(&self, id: &str) -> i64 {
+        match self.action_value(id) {
+            Some(MapActionValue::Axis { pos, neg }) => i64::from(pos) - i64::from(neg),
+            _ => 0,
+        }
+    }
+
+    fn action_axis2(&self, id: &str) -> (i64, i64) {
+        match self.action_value(id) {
+            Some(MapActionValue::Axis2 {
+                up,
+                down,
+                left,
+                right,
+            }) => (
+                i64::from(right) - i64::from(left),
+                i64::from(up) - i64::from(down),
+            ),
+            _ => (0, 0),
+        }
+    }
+
+    fn pick_ground(&self) -> Option<FixedVec3> {
+        self.cursor_ground
+            .map(|(x, y)| FixedVec3::new(Fixed::from_f64(x), Fixed::from_f64(y), Fixed::ZERO))
+    }
+
+    fn pick_entity(&self) -> i64 {
+        self.cursor_entity
+    }
+
+    fn aim_yaw(&self) -> Fixed {
+        Fixed::from_f64(self.cursor_aim)
+    }
+
+    fn ui_clicks(&mut self) -> i64 {
+        std::mem::take(&mut self.ui_click_bits)
+    }
+
     fn set_light(&mut self, dir: FixedVec3, intensity: Fixed) {
         let raw = DVec3::new(dir.x.to_f64(), dir.y.to_f64(), dir.z.to_f64());
         let len = raw.length();
@@ -1557,7 +1691,7 @@ mod tests {
         for side in ACTOR_SIDES {
             a.insert(format!("char/hero/idle/{side}.gif"), padded_gif());
         }
-        let mut r = MapRender::new(a, None);
+        let mut r = MapRender::new(a, None, &[]);
         let model = r.model_actor("char/hero", &["idle".to_string()], Fixed::from_int(3));
         assert!(model >= 0, "actor registered");
         let clip = &r.actors[0].states[0].1[0];
@@ -1590,7 +1724,7 @@ mod tests {
 
     #[test]
     fn model_actor_decodes_binds_and_targets() {
-        let mut r = MapRender::new(hero_assets(), Some(0));
+        let mut r = MapRender::new(hero_assets(), Some(0), &[]);
         let model = r.model_actor(
             "char/hero",
             &["idle".to_string(), "run".to_string()],
@@ -1634,7 +1768,7 @@ mod tests {
 
     #[test]
     fn model_actor_missing_gif_is_minus_one() {
-        let mut r = MapRender::new(BTreeMap::new(), None);
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
         assert_eq!(
             r.model_actor("char/hero", &["idle".to_string()], Fixed::from_int(2)),
             -1,

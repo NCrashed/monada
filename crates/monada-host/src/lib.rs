@@ -44,16 +44,18 @@ use monada_format::{Map, SimHz};
 use monada_net::{LockstepSession, MatchInfo, QuicTransport, Replay, SessionConfig, SimDriver};
 use monada_render::CircleScene;
 use monada_script::{
-    shared_world, RhaiBackend, RhaiDriver, ScriptBackend, SharedBridge, SharedWorld,
+    shared_world, LocalBackend, RhaiBackend, RhaiDriver, ScriptBackend, SharedBridge, SharedWorld,
     COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
 mod audio;
 pub mod autotile;
+mod bindings;
 pub mod cli;
 mod map_render;
 use audio::Audio;
+use bindings::{Action, ActionRef, Bindings, Context, PhysInput};
 use map_render::MapRender;
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::Camera;
@@ -62,9 +64,9 @@ use roxlap_core::Camera;
 use roxlap_render::{egui, FrameParams, RenderOptions, SceneRenderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 /// Fixed simulation step (25 Hz, the WC3-parity default — DESIGN.md §3.1).
@@ -258,6 +260,9 @@ struct Net {
 struct MapSim {
     world: SharedWorld,
     backend: Box<RhaiBackend>,
+    /// The map's local, unsynchronized script layer: pointer gestures,
+    /// action edges, per-tick input assembly (plan step 3).
+    local_layer: Box<LocalBackend>,
     render: Arc<Mutex<MapRender>>,
     /// `Some(1/hz)` for a real-time map (drive its `tick` on the wall clock),
     /// `None` for a command-driven one (chess: advance only on clicks).
@@ -278,13 +283,34 @@ impl MapSim {
             return false;
         };
         self.accumulator = (self.accumulator + dt).min(0.25);
+        let script_input = self.local_layer.has_local_tick();
         let input_cmd = input.to_command();
+        let step_fixed = Fixed::from_f64(step);
         let mut budget = MAX_CATCHUP_TICKS_PER_FRAME;
         let mut stepped = false;
         while self.accumulator >= step && budget > 0 {
-            self.backend
-                .on_command(self.local, &input_cmd)
-                .expect("map input command");
+            if script_input {
+                // The map assembles its own per-tick input in `local_tick`
+                // (submitted via the bridge, drained here) — the host's
+                // legacy snapshot stays out of the stream. Note a deliberate
+                // catch-up difference vs that legacy path: `ui_clicks()` is
+                // take-and-clear, so a HUD click lands in exactly ONE of the
+                // ticks run this frame; the old snapshot replayed the click
+                // bits into every catch-up tick.
+                self.local_layer
+                    .on_local_tick(step_fixed)
+                    .expect("map local_tick");
+                let commands = self.render.lock().expect("render mutex").drain_commands();
+                for command in commands {
+                    self.backend
+                        .on_command(self.local, &command)
+                        .expect("map input command");
+                }
+            } else {
+                self.backend
+                    .on_command(self.local, &input_cmd)
+                    .expect("map input command");
+            }
             self.backend.on_tick().expect("map tick");
             let commands = self.render.lock().expect("render mutex").drain_commands();
             for command in commands {
@@ -300,20 +326,35 @@ impl MapSim {
         stepped
     }
 
-    /// Forward a pointer click to the map's `pointer` handler, then route
-    /// whatever commands the gesture queued. Hotseat: commands apply
-    /// immediately. The player id is a placeholder — the script enforces
-    /// turn from game state, not the id; the networked player↔command
-    /// mapping lands in slice 4.
+    /// Forward a pointer click to the map's local-layer `pointer` handler,
+    /// then route whatever commands the gesture queued. Hotseat: commands
+    /// apply immediately. The player id is a placeholder — the script
+    /// enforces turn from game state, not the id; the networked
+    /// player↔command mapping lands in slice 4.
     fn pointer(&mut self, button: i64, origin: DVec3, dir: DVec3) {
         let (point, entity) = {
             let r = self.render.lock().expect("render mutex");
             let w = self.world.lock().expect("world mutex");
             r.pick(&w, origin, dir)
         };
-        self.backend
+        self.local_layer
             .on_pointer(button, point, entity)
             .expect("map pointer handler");
+        self.route_local_commands();
+    }
+
+    /// Forward one action edge to the local layer, then route whatever
+    /// commands it submitted.
+    fn action(&mut self, id: &str, down: bool) {
+        self.local_layer
+            .on_action(id, down)
+            .expect("map action handler");
+        self.route_local_commands();
+    }
+
+    /// Apply commands the local layer queued through the bridge (hotseat:
+    /// immediately, as the click path always did).
+    fn route_local_commands(&mut self) {
         let commands = self.render.lock().expect("render mutex").drain_commands();
         for command in commands {
             self.backend
@@ -331,6 +372,9 @@ impl MapSim {
 /// peers re-derive identical state from the shared input stream.
 struct NetMapSim {
     session: LockstepSession<QuicTransport, RhaiDriver>,
+    /// The map's local, unsynchronized script layer (plan step 3);
+    /// commands it submits are routed through the lockstep session.
+    local_layer: Box<LocalBackend>,
     render: Arc<Mutex<MapRender>>,
     local: PlayerId,
     /// Local commands queued by clicks; submitted on the next ready tick.
@@ -360,10 +404,19 @@ impl NetMapSim {
             let w = world.lock().expect("world mutex");
             r.pick(&w, origin, dir)
         };
-        self.session
-            .driver_mut()
+        self.local_layer
             .on_pointer(button, point, entity)
             .expect("map pointer handler");
+        let commands = self.render.lock().expect("render mutex").drain_commands();
+        self.pending.extend(commands);
+    }
+
+    /// Forward one action edge to the local layer; submitted commands are
+    /// routed through the session like clicks.
+    fn action(&mut self, id: &str, down: bool) {
+        self.local_layer
+            .on_action(id, down)
+            .expect("map action handler");
         let commands = self.render.lock().expect("render mutex").drain_commands();
         self.pending.extend(commands);
     }
@@ -394,7 +447,9 @@ impl NetMapSim {
         // Real-time: pace tick execution on the wall clock, submitting one
         // input command per scheduled tick.
         self.accumulator = (self.accumulator + dt).min(0.25);
+        let script_input = self.local_layer.has_local_tick();
         let input_cmd = input.to_command();
+        let step_fixed = Fixed::from_f64(step);
         let mut budget = MAX_CATCHUP_TICKS_PER_FRAME;
         let mut consumed_input = false;
         while !self.halted && self.accumulator >= step && budget > 0 {
@@ -403,7 +458,16 @@ impl NetMapSim {
             // already buffered while stalled.
             let submit_input = !self.input_pending;
             if submit_input {
-                cmds.push(input_cmd);
+                if script_input {
+                    // The map assembles this tick's input in `local_tick`;
+                    // whatever it submitted rides this tick's bundle.
+                    self.local_layer
+                        .on_local_tick(step_fixed)
+                        .expect("map local_tick");
+                    cmds.extend(self.render.lock().expect("render mutex").drain_commands());
+                } else {
+                    cmds.push(input_cmd);
+                }
             }
             match self.session.step(cmds) {
                 Ok(true) => {
@@ -618,6 +682,10 @@ struct App {
     accumulator: f64,
     last_frame: Instant,
     keys: Keys,
+    /// Physical-input → action table (engine defaults + the map's
+    /// `[[action]]` declarations + the user's `bindings.toml`), resolved
+    /// per event in `window_event`.
+    bindings: Bindings,
     /// Real-time gameplay input (WASD / dodge / attack), sampled per frame
     /// and injected per tick into a fixed-rate map.
     input: Input,
@@ -649,6 +717,16 @@ struct App {
 
 impl App {
     fn new(config: RunConfig) -> App {
+        // The binding table wants the map's name + `[[action]]`
+        // declarations before `config` is consumed by sim construction.
+        let (map_name, map_actions) = match &config {
+            RunConfig::Map { run, .. } | RunConfig::Replay { run, .. } => (
+                run.map.manifest.name.clone(),
+                run.map.manifest.actions.clone(),
+            ),
+            _ => (String::new(), Vec::new()),
+        };
+        let bindings = Bindings::load(&map_name, &map_actions);
         let sim = match config {
             RunConfig::Local => Self::new_local(),
             RunConfig::Net(role) => Self::new_net(&role),
@@ -686,6 +764,7 @@ impl App {
             accumulator: 0.0,
             last_frame: Instant::now(),
             keys: Keys::default(),
+            bindings,
             input: Input::default(),
             cursor: (0.0, 0.0),
             fps: 0.0,
@@ -768,9 +847,18 @@ impl App {
             .entry_script()
             .expect("map declares an entry script")
             .to_string();
+        let local_script = run
+            .map
+            .local_script()
+            .expect("map declares a local script")
+            .to_string();
         // Hotseat: one window drives every side, so there is no single
         // local player (-1) — the script enforces turns by piece colour.
-        let render = Arc::new(Mutex::new(MapRender::new(run.map.assets, None)));
+        let render = Arc::new(Mutex::new(MapRender::new(
+            run.map.assets,
+            None,
+            &run.map.manifest.actions,
+        )));
         // Bridge must be set before `init` calls model_box / voxel_fill / …
         let bridge: SharedBridge = render.clone();
         backend.set_bridge(&bridge);
@@ -780,9 +868,17 @@ impl App {
         backend.load(&script).expect("compile map script");
         backend.on_init().expect("map init");
         backend.drain_ui_events();
+        // The local layer boots after the sim's `init` so `local_init`
+        // observes the populated world.
+        let mut local_layer = LocalBackend::new(&world, &bridge);
+        local_layer
+            .load(&local_script)
+            .expect("compile local script");
+        local_layer.on_local_init().expect("map local_init");
         Sim::Map(Box::new(MapSim {
             world,
             backend: Box::new(backend),
+            local_layer: Box::new(local_layer),
             render,
             tick_dt: tick_dt(run.map.manifest.sim_hz),
             accumulator: 0.0,
@@ -816,11 +912,17 @@ impl App {
             .entry_script()
             .expect("map declares an entry script")
             .to_string();
+        let local_script = run
+            .map
+            .local_script()
+            .expect("map declares a local script")
+            .to_string();
         // This peer plays the side matching its player id; the script gates
         // off-turn input on `local_player()`.
         let render = Arc::new(Mutex::new(MapRender::new(
             run.map.assets,
             Some(i64::from(local.0)),
+            &run.map.manifest.actions,
         )));
         let bridge: SharedBridge = render.clone();
         let mut driver = RhaiDriver::with_bridge(shared_world(SEED), &script, &bridge)
@@ -828,6 +930,12 @@ impl App {
         if let SimHz::Fixed(hz) = run.map.manifest.sim_hz {
             driver.set_tick_hz(hz);
         }
+        // The local layer reads the same shared world the driver mutates.
+        let mut local_layer = LocalBackend::new(driver.world(), &bridge);
+        local_layer
+            .load(&local_script)
+            .expect("compile local script");
+        local_layer.on_local_init().expect("map local_init");
         let info = MatchInfo {
             seed: SEED,
             map_hash: run.map.hash,
@@ -843,6 +951,7 @@ impl App {
         );
         Sim::NetMap(Box::new(NetMapSim {
             session,
+            local_layer: Box::new(local_layer),
             render,
             local,
             pending: Vec::new(),
@@ -872,7 +981,13 @@ impl App {
             SimHz::OnCommand => (true, REPLAY_MOVE_DT),
             SimHz::Fixed(hz) => (false, 1.0 / f64::from(hz.max(1))),
         };
-        let render = Arc::new(Mutex::new(MapRender::new(run.map.assets, None)));
+        // No local layer for a replay: the recorded command stream *is*
+        // the input; live clicks/actions are ignored.
+        let render = Arc::new(Mutex::new(MapRender::new(
+            run.map.assets,
+            None,
+            &run.map.manifest.actions,
+        )));
         let bridge: SharedBridge = render.clone();
         let mut driver = RhaiDriver::with_bridge(shared_world(replay.seed), &script, &bridge)
             .expect("compile map script");
@@ -979,7 +1094,13 @@ impl App {
         // Debug overlay (tick / FPS / status / lockstep) only when toggled on
         // with F1 — otherwise just the map's own HUD shows.
         if self.debug_hud {
-            build_hud(&ctx, tick, fps, &hud);
+            // Live values of the map's declared actions, so a map author
+            // can watch bindings land without wiring any UI.
+            let map_actions = match &self.scene {
+                SceneKind::Map(render) => render.lock().expect("render mutex").action_lines(),
+                SceneKind::Circle(_) => Vec::new(),
+            };
+            build_hud(&ctx, tick, fps, &hud, &map_actions);
         }
         // The map's own scripted HUD (health bar / panels / buttons), painted
         // over the status window; button clicks feed the next tick's command.
@@ -1135,9 +1256,22 @@ impl App {
                 }
             }
         }
-        // A click is a one-tick edge: OR it in; the next `to_command` consumes
-        // it and `clear_ui_bits` wipes it so it fires exactly once.
-        self.input.ui_bits |= clicked_bits;
+        // A click is a one-tick edge, latched into exactly the path the
+        // map consumes: the bridge latch (taken by `local_tick` via
+        // `ui_clicks()`) for a script-input map, else the legacy snapshot
+        // (consumed by the next `to_command`).
+        if clicked_bits != 0 {
+            if self.script_input() {
+                if let SceneKind::Map(render) = &self.scene {
+                    render
+                        .lock()
+                        .expect("render mutex")
+                        .add_ui_clicks(clicked_bits as i64);
+                }
+            } else {
+                self.input.ui_bits |= clicked_bits;
+            }
+        }
     }
 
     /// A fixed-position, foreground overlay area for one HUD widget.
@@ -1446,6 +1580,7 @@ impl App {
         // its `tick` on the wall clock with the per-tick input snapshot; a
         // command-driven map snaps to the current world.
         self.update_aim();
+        self.drive_local_frame(dt);
         let input = self.input;
         // A HUD button click latches into `input.ui_bits`; clear it only once
         // a tick has actually consumed the input snapshot, so a click on a
@@ -1631,21 +1766,19 @@ impl ApplicationHandler for App {
                         ..
                     },
                 ..
-            } if !consumed => self.on_key(event_loop, code, state),
+            } if !consumed => {
+                self.dispatch_input(
+                    event_loop,
+                    PhysInput::Key(code),
+                    state == ElementState::Pressed,
+                );
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
             }
-            WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Left,
-                ..
-            } if !consumed => {
-                let down = state == ElementState::Pressed;
-                // Held-attack for a real-time map; a chess-style pick for a
-                // command-driven one (on press only).
-                self.input.attack = down;
-                if down && !self.realtime() {
-                    self.on_click();
+            WindowEvent::MouseInput { state, button, .. } if !consumed => {
+                if let Some(input) = PhysInput::from_mouse(button) {
+                    self.dispatch_input(event_loop, input, state == ElementState::Pressed);
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(),
@@ -1707,7 +1840,14 @@ fn tex_points(handle: &egui::TextureHandle) -> egui::Vec2 {
 }
 
 /// Build the HUD widget tree (DESIGN.md §3.2's egui HUD).
-fn build_hud(ctx: &egui::Context, tick: u64, fps: f32, hud: &HudState) {
+/// `map_actions` = the map's declared actions as `(id, value)` lines.
+fn build_hud(
+    ctx: &egui::Context,
+    tick: u64,
+    fps: f32,
+    hud: &HudState,
+    map_actions: &[(String, String)],
+) {
     egui::Window::new("monada")
         .title_bar(false)
         .resizable(false)
@@ -1755,42 +1895,99 @@ fn build_hud(ctx: &egui::Context, tick: u64, fps: f32, hud: &HudState) {
                     ui.label("arrows orbit · W/S zoom · Esc quit");
                 }
             }
+            if !map_actions.is_empty() {
+                ui.separator();
+                for (id, value) in map_actions {
+                    ui.label(format!("{id} {value}"));
+                }
+            }
         });
 }
 
 impl App {
-    fn on_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, state: ElementState) {
-        let down = state == ElementState::Pressed;
-        match code {
-            KeyCode::Escape => {
+    /// The binding contexts active right now, bottom → top. The host
+    /// picks the gameplay context from the map's tick model; the map
+    /// itself gains push/pop control in a later plan step.
+    fn context_stack(&self) -> Vec<Context> {
+        let mut stack = vec![Context::Global];
+        stack.push(if self.realtime() {
+            Context::RealTime
+        } else {
+            Context::TurnBased
+        });
+        // The map's own `[[action]]` bindings shadow the engine's
+        // gameplay keys, but replay transport stays on top of both.
+        if matches!(self.scene, SceneKind::Map(_)) {
+            stack.push(Context::MapGameplay);
+        }
+        if matches!(self.sim, Sim::Replay(_)) {
+            stack.push(Context::Replay);
+        }
+        stack
+    }
+
+    /// Resolve one physical input through the binding table and apply
+    /// the action it lands on (if any).
+    fn dispatch_input(&mut self, event_loop: &ActiveEventLoop, input: PhysInput, down: bool) {
+        if let Some(action) = self.bindings.resolve(&self.context_stack(), input) {
+            self.apply_action(event_loop, action, down);
+        }
+    }
+
+    /// Execute a resolved action. Held actions (camera / move axis)
+    /// track `down`; one-shot actions fire on press only.
+    fn apply_action(&mut self, event_loop: &ActiveEventLoop, action: ActionRef, down: bool) {
+        let action = match action {
+            ActionRef::Base(action) => action,
+            // A map-declared action: update its live value (polled by the
+            // local layer / debug HUD), then fire the edge into the map's
+            // `action(id, down)` handler.
+            ActionRef::Map { index, part } => {
+                if let SceneKind::Map(render) = &self.scene {
+                    render
+                        .lock()
+                        .expect("render mutex")
+                        .action_set(index, part, down);
+                }
+                if let Some(id) = self.bindings.map_actions().get(index).map(|a| a.id.clone()) {
+                    match &mut self.sim {
+                        Sim::Map(map) => map.action(&id, down),
+                        Sim::NetMap(nm) => nm.action(&id, down),
+                        // Replay / non-map sims take no live map input.
+                        _ => {}
+                    }
+                }
+                return;
+            }
+        };
+        match action {
+            Action::Quit if down => {
                 self.save_replay();
                 event_loop.exit();
             }
             // F1 toggles the debug overlay (tick / FPS / status / lockstep).
-            KeyCode::F1 if down => self.debug_hud = !self.debug_hud,
-            KeyCode::ArrowLeft => self.keys.yaw_left = down,
-            KeyCode::ArrowRight => self.keys.yaw_right = down,
-            KeyCode::ArrowUp => self.keys.pitch_up = down,
-            KeyCode::ArrowDown => self.keys.pitch_down = down,
-            // W/S zoom the camera for the orbit scenes (circle / chess); for a
-            // real-time map they drive movement and the script owns the camera.
-            KeyCode::KeyW if self.realtime() => self.input.fwd = down,
-            KeyCode::KeyS if self.realtime() => self.input.back = down,
-            KeyCode::KeyW => self.keys.zoom_in = down,
-            KeyCode::KeyS => self.keys.zoom_out = down,
-            KeyCode::KeyA => self.input.left = down,
-            KeyCode::KeyD => self.input.right = down,
-            // Space is the real-time dodge; for a replay it toggles pause
-            // (the two modes never coexist).
-            KeyCode::Space => {
-                self.input.dodge = down;
-                if down {
-                    self.replay_control(|r| r.paused = !r.paused);
-                }
-            }
-            // Replay transport: `[` slower, `]` faster.
-            KeyCode::BracketLeft if down => self.replay_control(|r| r.scale_speed(0.5)),
-            KeyCode::BracketRight if down => self.replay_control(|r| r.scale_speed(2.0)),
+            Action::DebugHud if down => self.debug_hud = !self.debug_hud,
+            Action::OrbitLeft => self.keys.yaw_left = down,
+            Action::OrbitRight => self.keys.yaw_right = down,
+            Action::OrbitUp => self.keys.pitch_up = down,
+            Action::OrbitDown => self.keys.pitch_down = down,
+            // Zoom binds in the turn-based context; for a real-time map the
+            // same keys land on the move axis and the script owns the camera.
+            Action::ZoomIn => self.keys.zoom_in = down,
+            Action::ZoomOut => self.keys.zoom_out = down,
+            Action::MoveFwd => self.input.fwd = down,
+            Action::MoveBack => self.input.back = down,
+            Action::MoveLeft => self.input.left = down,
+            Action::MoveRight => self.input.right = down,
+            Action::Dodge => self.input.dodge = down,
+            // Held-attack for a real-time map; the primary pointer is the
+            // chess-style click gesture (press only).
+            Action::Attack => self.input.attack = down,
+            Action::PointerPrimary if down => self.on_click(),
+            // Replay transport.
+            Action::ReplayPause if down => self.replay_control(|r| r.paused = !r.paused),
+            Action::ReplaySlower if down => self.replay_control(|r| r.scale_speed(0.5)),
+            Action::ReplayFaster if down => self.replay_control(|r| r.scale_speed(2.0)),
             _ => {}
         }
     }
@@ -1805,11 +2002,66 @@ impl App {
         }
     }
 
-    /// Recompute `input.aim_yaw`: the sim-space angle from the local player
-    /// (the camera focus) to the cursor's ground point. Only meaningful for a
-    /// real-time map (which owns its camera and runs the input loop).
+    /// Run the map's `local_frame(dt)` handler (hover / tooltips / camera —
+    /// the presentation cadence) and route whatever it submitted.
+    fn drive_local_frame(&mut self, dt: f64) {
+        let dt = Fixed::from_f64(dt);
+        match &mut self.sim {
+            Sim::Map(map) if map.local_layer.has_local_frame() => {
+                map.local_layer
+                    .on_local_frame(dt)
+                    .expect("map local_frame handler");
+                map.route_local_commands();
+            }
+            Sim::NetMap(nm) if nm.local_layer.has_local_frame() => {
+                nm.local_layer
+                    .on_local_frame(dt)
+                    .expect("map local_frame handler");
+                let commands = nm.render.lock().expect("render mutex").drain_commands();
+                nm.pending.extend(commands);
+            }
+            // Replays and non-map sims have no local layer.
+            _ => {}
+        }
+    }
+
+    /// Whether the running map consumes cursor-derived state at all: its
+    /// local layer polls `pick_*`/`aim_yaw` (has `local_frame`/`local_tick`)
+    /// or the legacy real-time snapshot needs `aim_yaw` refreshed. A plain
+    /// turn-based map (chess) hits neither — skip the per-frame world lock
+    /// + entity pick entirely.
+    fn wants_cursor(&self) -> bool {
+        match &self.sim {
+            Sim::Map(map) => {
+                map.tick_dt.is_some()
+                    || map.local_layer.has_local_frame()
+                    || map.local_layer.has_local_tick()
+            }
+            Sim::NetMap(nm) => {
+                nm.tick_dt.is_some()
+                    || nm.local_layer.has_local_frame()
+                    || nm.local_layer.has_local_tick()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the running map assembles its own per-tick input in
+    /// `local_tick` (⇒ HUD clicks route via the bridge latch, not the
+    /// legacy snapshot).
+    fn script_input(&self) -> bool {
+        match &self.sim {
+            Sim::Map(map) => map.local_layer.has_local_tick(),
+            Sim::NetMap(nm) => nm.local_layer.has_local_tick(),
+            _ => false,
+        }
+    }
+
+    /// Refresh the cursor-derived state on the render bridge (`pick_ground`
+    /// / `aim_yaw` for the local layer), and mirror the aim into the legacy
+    /// input snapshot for maps that predate `local_tick`.
     fn update_aim(&mut self) {
-        if !self.realtime() {
+        if !self.wants_cursor() {
             return;
         }
         let cam = self.scene.camera();
@@ -1820,14 +2072,11 @@ impl App {
             return;
         };
         if let SceneKind::Map(render) = &self.scene {
-            let r = render.lock().expect("render mutex");
-            if let Some((mx, my)) = r.ground_sim(ray.origin, ray.dir) {
-                let (px, py) = r.camera_center_sim();
-                let (dx, dy) = (mx - px, my - py);
-                if dx.mul_add(dx, dy * dy) > 1e-6 {
-                    self.input.aim_yaw = dy.atan2(dx);
-                }
-            }
+            let world = self.sim.world();
+            let mut r = render.lock().expect("render mutex");
+            let w = world.lock().expect("world mutex");
+            r.set_cursor_ray(&w, ray.origin, ray.dir);
+            self.input.aim_yaw = r.aim_f64();
         }
     }
 

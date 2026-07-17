@@ -361,6 +361,24 @@ fn ensure_hero(player) {
     }
 }
 
+// --- local layer (unsynced, this client only) ---------------------------
+// Assemble the per-tick input command the sim's `command` handler decodes
+// below: buttons in `target` (bit 0 attack, bit 1 dodge, bit 16 the HUD
+// restart button), move axis in `arg.xy`, mouse-aim yaw in `arg.z`. The
+// action ids and default keys live in manifest.toml `[[action]]`; the
+// host resolves rebinds, this layer only reads named actions.
+fn local_tick(dt) {
+    let btn = ui_clicks();
+    if action_down("attack") {
+        btn |= 1;
+    }
+    if action_down("dodge") {
+        btn |= 2;
+    }
+    let mv = action_axis2("move");
+    submit_command(0, btn, vec3(mv.x, mv.y, aim_yaw()));
+}
+
 // --- input: store this peer's intent on its player entity ---------------
 fn command(player, verb, target, arg) {
     if verb == 0 {

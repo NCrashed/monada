@@ -21,9 +21,11 @@ use monada_fixed::{Fixed, FixedVec3};
 use monada_sim::{Command, PlayerId, World};
 
 mod driver;
+mod local_backend;
 mod rhai_backend;
 
 pub use driver::RhaiDriver;
+pub use local_backend::LocalBackend;
 pub use rhai_backend::RhaiBackend;
 
 /// The shared, lockable world a [`ScriptBackend`] mutates.
@@ -104,31 +106,10 @@ pub trait ScriptBackend {
     /// Returns [`ScriptError::Run`] if the script raises.
     fn on_tick(&mut self) -> Result<(), ScriptError>;
 
-    /// Run the map's `pointer` trigger for a pointer event (DESIGN.md
-    /// §3.3 input events): a button at sim-space `point` over the picked
-    /// `entity` (or `-1` for none). The map owns the gesture state machine
-    /// (select → act); the host only forwards the raw event. A map with no
-    /// `pointer` handler ignores it (the default).
-    ///
-    /// # Errors
-    /// Returns [`ScriptError::Run`] if the handler raises.
-    fn on_pointer(
-        &mut self,
-        _button: i64,
-        _point: FixedVec3,
-        _entity: i64,
-    ) -> Result<(), ScriptError> {
-        Ok(())
-    }
-
-    /// Run the map's `key` trigger for a keyboard event. A map with no
-    /// `key` handler ignores it (the default).
-    ///
-    /// # Errors
-    /// Returns [`ScriptError::Run`] if the handler raises.
-    fn on_key(&mut self, _code: i64, _down: bool) -> Result<(), ScriptError> {
-        Ok(())
-    }
+    // Input events (`pointer` / `action`) are *not* part of this trigger
+    // set: they belong to the map's local, unsynchronized script layer
+    // ([`LocalBackend`]) — the sim backend receives player input only as
+    // [`Command`]s (docs/plans/input-bindings.md).
 
     /// Drain the UI/HUD events the script emitted via `ui_emit_event`
     /// since the last drain (DESIGN.md §3.3). These live strictly on the
@@ -199,6 +180,53 @@ pub trait HostBridge: Send {
     /// meaning to it. The script-side sentinel (`None` → a negative id)
     /// lives in exactly one place — the `local_player` host-fn registration.
     fn local_player(&self) -> Option<i64>;
+
+    // --- local-layer input queries (docs/plans/input-bindings.md) ---------
+    // Served to the map's *local* script layer only ([`LocalBackend`]) —
+    // never registered into the sim backend, so the deterministic sim
+    // physically cannot observe raw input. The host resolves physical
+    // keys through its binding table and exposes only the map's declared
+    // action ids here. Every return type is a sim type (bool / int /
+    // fixed-point), so a value can flow straight into a `Command` payload.
+    // Defaults = "no input" for headless bridges.
+
+    /// Whether the map-declared `button` action `id` is currently held.
+    fn action_down(&self, _id: &str) -> bool {
+        false
+    }
+    /// The map-declared `axis` action's value: `-1`, `0` or `+1`.
+    fn action_axis(&self, _id: &str) -> i64 {
+        0
+    }
+    /// The map-declared `axis2` action's value: `(x, y)`, each `-1..=+1`
+    /// (x = right − left, y = up − down).
+    fn action_axis2(&self, _id: &str) -> (i64, i64) {
+        (0, 0)
+    }
+    /// The cursor's ground-plane point in sim coordinates, or `None` when
+    /// the cursor ray misses the world. Quantized fixed-point — safe to
+    /// embed in a command payload as-is.
+    fn pick_ground(&self) -> Option<FixedVec3> {
+        None
+    }
+    /// The entity under the cursor (nearest model-bound entity within the
+    /// host's pick radius), or `-1`. Refreshed by the host each frame —
+    /// the WC3 invisible-unit-sphere hack, made a one-call primitive.
+    fn pick_entity(&self) -> i64 {
+        -1
+    }
+    /// The sim-space yaw (radians, fixed-point) from the local player /
+    /// camera focus toward the cursor's ground point. Holds its last
+    /// value while the ray misses (matches the classic twin-stick aim).
+    fn aim_yaw(&self) -> Fixed {
+        Fixed::ZERO
+    }
+    /// Take (return **and clear**) the HUD-button bits clicked since the
+    /// last call ([`ui_button`](Self::ui_button)'s `button_bit`s, OR-ed).
+    /// The local layer folds these into its per-tick input command.
+    fn ui_clicks(&mut self) -> i64 {
+        0
+    }
 
     /// Declare the map's directional "sun": `dir` is the direction the
     /// light travels, `intensity` its strength. The host shades the map's

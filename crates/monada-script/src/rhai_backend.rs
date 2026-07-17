@@ -27,10 +27,6 @@ type UiEventBuffer = Arc<Mutex<Vec<UiEvent>>>;
 
 /// Arity of the map's `command` trigger: `command(player, verb, target, arg)`.
 const COMMAND_ARITY: usize = 4;
-/// Arity of the map's `pointer` trigger: `pointer(button, point, entity)`.
-const POINTER_ARITY: usize = 3;
-/// Arity of the map's `key` trigger: `key(code, down)`.
-const KEY_ARITY: usize = 2;
 /// Arity of the map's `tick` trigger: `tick()`.
 const TICK_ARITY: usize = 0;
 
@@ -51,13 +47,11 @@ pub struct RhaiBackend {
     /// existing handler — that must surface as the bug it is (it could
     /// otherwise desync one peer silently).
     has_command: bool,
-    /// Whether the loaded script defines a `pointer/3` / `key/2` / `tick/0`
-    /// handler (decided at [`load`](RhaiBackend::load), like `has_command`).
-    /// A command-driven map (e.g. turn-based chess) has no `tick`, so
+    /// Whether the loaded script defines a `tick/0` handler (decided at
+    /// [`load`](RhaiBackend::load), like `has_command`). A command-driven
+    /// map (e.g. turn-based chess) has no `tick`, so
     /// [`on_tick`](RhaiBackend::on_tick) still advances the counter but
     /// calls nothing.
-    has_pointer: bool,
-    has_key: bool,
     has_tick: bool,
     /// Whether the loaded script defines a `tick/1` handler that receives `dt`
     /// (the tick duration as a `Fixed`). Takes priority over `tick/0` when set.
@@ -91,8 +85,6 @@ impl RhaiBackend {
             scope: Scope::new(),
             world,
             has_command: false,
-            has_pointer: false,
-            has_key: false,
             has_tick: false,
             has_tick_with_dt: false,
             tick_dt: None,
@@ -142,8 +134,6 @@ impl ScriptBackend for RhaiBackend {
                 .any(|f| f.name == name && f.params.len() == arity)
         };
         self.has_command = defines("command", COMMAND_ARITY);
-        self.has_pointer = defines("pointer", POINTER_ARITY);
-        self.has_key = defines("key", KEY_ARITY);
         self.has_tick = defines("tick", TICK_ARITY);
         self.has_tick_with_dt = defines("tick", 1);
         self.ast = Some(ast);
@@ -196,37 +186,6 @@ impl ScriptBackend for RhaiBackend {
         }
     }
 
-    fn on_pointer(
-        &mut self,
-        button: i64,
-        point: FixedVec3,
-        entity: i64,
-    ) -> Result<(), ScriptError> {
-        if !self.has_pointer {
-            return Ok(());
-        }
-        let ast = self
-            .ast
-            .as_ref()
-            .ok_or_else(|| ScriptError::Run("no script loaded".to_string()))?;
-        self.engine
-            .call_fn::<()>(&mut self.scope, ast, "pointer", (button, point, entity))
-            .map_err(|e| ScriptError::Run(e.to_string()))
-    }
-
-    fn on_key(&mut self, code: i64, down: bool) -> Result<(), ScriptError> {
-        if !self.has_key {
-            return Ok(());
-        }
-        let ast = self
-            .ast
-            .as_ref()
-            .ok_or_else(|| ScriptError::Run("no script loaded".to_string()))?;
-        self.engine
-            .call_fn::<()>(&mut self.scope, ast, "key", (code, down))
-            .map_err(|e| ScriptError::Run(e.to_string()))
-    }
-
     fn drain_ui_events(&mut self) -> Vec<UiEvent> {
         std::mem::take(&mut self.events.lock().expect("events mutex"))
     }
@@ -234,7 +193,7 @@ impl ScriptBackend for RhaiBackend {
 
 /// Register `Fixed` / `Vec3` and the only arithmetic scripts get (all
 /// fixed-point — `no_float` Rhai forbids IEEE math entirely).
-fn register_number_types(engine: &mut Engine) {
+pub(crate) fn register_number_types(engine: &mut Engine) {
     engine.register_type_with_name::<Fixed>("Fixed");
     engine.register_type_with_name::<FixedVec3>("Vec3");
 
@@ -307,14 +266,6 @@ fn register_host_api(engine: &mut Engine, world: &SharedWorld, events: &UiEventB
     });
 
     let w = world.clone();
-    engine.register_fn("entity_position", move |e: i64| -> FixedVec3 {
-        w.lock()
-            .expect("world mutex")
-            .position(EntityId(e as u64))
-            .unwrap_or(FixedVec3::ZERO)
-    });
-
-    let w = world.clone();
     engine.register_fn(
         "entity_set_field",
         move |e: i64, name: ImmutableString, v: Fixed| {
@@ -323,6 +274,54 @@ fn register_host_api(engine: &mut Engine, world: &SharedWorld, events: &UiEventB
                 .set_field(EntityId(e as u64), name.as_str(), v);
         },
     );
+
+    let w = world.clone();
+    engine.register_fn("rng01", move || -> Fixed {
+        w.lock().expect("world mutex").rng.next_fixed_01()
+    });
+
+    let w = world.clone();
+    engine.register_fn("rng_below", move |n: i64| -> i64 {
+        w.lock().expect("world mutex").rng.gen_below(n as u64) as i64
+    });
+
+    // Despawn an entity; returns whether it was present. Needed for
+    // capture (chess), death (RTS) — anything that removes an entity.
+    let w = world.clone();
+    engine.register_fn("entity_despawn", move |e: i64| -> bool {
+        w.lock().expect("world mutex").despawn(EntityId(e as u64))
+    });
+
+    // The read-only world queries are shared with the local layer.
+    register_world_read_api(engine, world);
+
+    // Push a UI/HUD event (DESIGN.md §3.3). Render-side only: it lands in
+    // the drain buffer, never in `World` state or the desync hash. All-
+    // integer payload; the script defines what the codes mean.
+    let ev = events.clone();
+    engine.register_fn("ui_emit_event", move |code: i64, a: i64, b: i64, c: i64| {
+        ev.lock().expect("events mutex").push(UiEvent {
+            code: code as u32,
+            a,
+            b,
+            c,
+        });
+    });
+}
+
+/// Register the **read-only** world queries — the subset of the sim host
+/// API that is safe on both sides of the sync wall: the sim backend gets
+/// them alongside the mutators, the local layer ([`crate::LocalBackend`])
+/// gets *only* these (it may observe the world to drive UI/selection, but
+/// can never mutate hashed state or advance the shared RNG).
+pub(crate) fn register_world_read_api(engine: &mut Engine, world: &SharedWorld) {
+    let w = world.clone();
+    engine.register_fn("entity_position", move |e: i64| -> FixedVec3 {
+        w.lock()
+            .expect("world mutex")
+            .position(EntityId(e as u64))
+            .unwrap_or(FixedVec3::ZERO)
+    });
 
     let w = world.clone();
     engine.register_fn(
@@ -345,23 +344,6 @@ fn register_host_api(engine: &mut Engine, world: &SharedWorld, events: &UiEventB
             .collect()
     });
 
-    let w = world.clone();
-    engine.register_fn("rng01", move || -> Fixed {
-        w.lock().expect("world mutex").rng.next_fixed_01()
-    });
-
-    let w = world.clone();
-    engine.register_fn("rng_below", move |n: i64| -> i64 {
-        w.lock().expect("world mutex").rng.gen_below(n as u64) as i64
-    });
-
-    // Despawn an entity; returns whether it was present. Needed for
-    // capture (chess), death (RTS) — anything that removes an entity.
-    let w = world.clone();
-    engine.register_fn("entity_despawn", move |e: i64| -> bool {
-        w.lock().expect("world mutex").despawn(EntityId(e as u64))
-    });
-
     // Ascending ids of one archetype (a coarse `entity_query`, §3.3):
     // lets a script scan just its pieces (board occupancy) or reach a
     // singleton, without walking `entities()` across every archetype.
@@ -374,19 +356,6 @@ fn register_host_api(engine: &mut Engine, world: &SharedWorld, events: &UiEventB
             .map(|e| Dynamic::from(e.0 as i64))
             .collect()
     });
-
-    // Push a UI/HUD event (DESIGN.md §3.3). Render-side only: it lands in
-    // the drain buffer, never in `World` state or the desync hash. All-
-    // integer payload; the script defines what the codes mean.
-    let ev = events.clone();
-    engine.register_fn("ui_emit_event", move |code: i64, a: i64, b: i64, c: i64| {
-        ev.lock().expect("events mutex").push(UiEvent {
-            code: code as u32,
-            a,
-            b,
-            c,
-        });
-    });
 }
 
 /// Register the host's render / input / command API (DESIGN.md §3.3),
@@ -395,7 +364,7 @@ fn register_host_api(engine: &mut Engine, world: &SharedWorld, events: &UiEventB
 /// in the host (roxlap render) while this crate knows only the primitive
 /// signatures — the sim / script wall.
 #[allow(clippy::too_many_lines)] // a flat list of host-fn registrations
-fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
+pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     let b = bridge.clone();
     engine.register_fn(
         "model_box",

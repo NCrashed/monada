@@ -41,7 +41,13 @@ roxlap-formats = { workspace = true }
 # Render-side world math for picking-ray params (the sim wall stays in
 # monada-sim; floats live only here, per DESIGN.md §3.1).
 glam = { workspace = true }
-winit = "0.30"
+# `serde` derives string (de)serialization for `KeyCode`, so
+# `bindings.toml` names keys by their winit variant ("KeyW", "Space" —
+# docs/plans/input-bindings.md step 1).
+winit = { version = "0.30", features = ["serde"] }
+# Parse the user's `bindings.toml` overrides (same major as
+# monada-format's manifest parsing).
+toml = "1"
 # egui input/output bridge for winit; egui itself comes via
 # `roxlap_render::egui` so the versions can't drift — roxlap 0.9.0 moved to
 # egui 0.34, so this tracks it.
