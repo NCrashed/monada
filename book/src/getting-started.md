@@ -23,8 +23,10 @@ $ cargo run --release -p monada-rpg
 ```
 
 Each opens a window with the map already loaded. Arrow keys orbit the
-camera and `Esc` quits; the rest of the controls belong to the map, and you
-can rebind them (see [Input, actions, bindings](input.md)).
+camera and `Esc` quits; `F2` opens a key-bindings panel where you can rebind
+any control — engine or map — and the change is saved for next time. The
+rest of the controls belong to the map (see
+[Input, actions, bindings](input.md)).
 
 ## Run a map archive directly
 

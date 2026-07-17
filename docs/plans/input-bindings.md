@@ -1,16 +1,30 @@
 # Plan: actions, key bindings, and the local script layer
 
-Status: steps 1–3 landed, plus most of step 4. Done: binding resolver +
+Status: steps 1–5 landed, plus most of step 4. Done: binding resolver +
 `bindings.toml` (host key hardcode removed); manifest `[[action]]` +
 per-map config; the sim/local backend split (`LocalBackend`:
 `local_init` / `local_frame(dt)` / `local_tick(dt)` / `action` /
 `pointer`; sim backend lost `on_pointer`/`on_key`); pick API
 (`pick_ground` / `pick_entity` / `aim_yaw` / `ui_clicks`); rpg map
 migrated to declared actions + `local_tick` packing; chess unchanged;
-all goldens pass un-re-blessed. Remaining: `pick_voxel` + `cursor()`
-(deferred until a consumer map), step 5 rebind UI, step 6 script-driven
-contexts + `cursor_mode`, gamepad. Companion to DESIGN.md §3.3 (script
-triggers) and §3.1 (lockstep). Terminology and constraints here are
+all goldens pass un-re-blessed. **Step 5 (rebind UI):** an egui panel
+(base action `ui.bindings`, default F2) lists every slot — base actions
+plus each map action's parts — grouped by context; click a row then
+press a key to rebind (a key means one thing per context, so a conflict
+displaces the other slot), per-slot and global reset-to-default, and
+writes `bindings.toml` on every change. `Bindings` gained
+`slots`/`rebind`/`reset`/`reset_all`/`is_modified`/`to_toml`/`save`
+(unit-tested, incl. an axis2 round-trip). The panel dims rows that are
+inert for the running map — a context not in the active stack, or a key
+a higher context wins — so a no-effect rebind isn't offered; Esc closes
+it; a displaced key is announced. Remaining: `pick_voxel` + `cursor()`
+(deferred until a consumer map), step 6 script-driven contexts +
+`cursor_mode`, gamepad, and **optional-part axes in `monada-format`** —
+today a rebind that strands one pole of a map axis can't be saved (the
+`ActionDefault` shape needs every pole), so it reloads at the manifest
+default and the saved state diverges from the session (see `rebind`'s
+doc note). Companion to DESIGN.md §3.3 (script triggers) and §3.1
+(lockstep). Terminology and constraints here are
 grounded in the current code; file references are as of this writing.
 
 ## 0. Problem and core idea

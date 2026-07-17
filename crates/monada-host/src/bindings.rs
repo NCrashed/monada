@@ -69,6 +69,12 @@ impl PhysInput {
             .map(PhysInput::Key)
     }
 
+    /// A display/config label for this input (`KeyW`, `MouseLeft`).
+    #[must_use]
+    pub fn label(self) -> String {
+        self.name()
+    }
+
     /// The config-file name of this input (inverse of [`Self::parse`]).
     fn name(self) -> String {
         match self {
@@ -120,6 +126,18 @@ impl Context {
             _ => None,
         }
     }
+
+    /// A heading for this context's group in the rebind panel.
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            Context::Global => "General",
+            Context::TurnBased => "Turn-based",
+            Context::RealTime => "Real-time",
+            Context::MapGameplay => "This map",
+            Context::Replay => "Replay",
+        }
+    }
 }
 
 /// The engine's base action set — every hardcoded host key, promoted to
@@ -128,6 +146,8 @@ impl Context {
 pub enum Action {
     Quit,
     DebugHud,
+    /// Toggle the key-bindings panel.
+    OpenBindings,
     OrbitLeft,
     OrbitRight,
     OrbitUp,
@@ -150,9 +170,10 @@ pub enum Action {
 }
 
 /// Every base action, in template / documentation order.
-const ALL_ACTIONS: [Action; 18] = [
+const ALL_ACTIONS: [Action; 19] = [
     Action::Quit,
     Action::DebugHud,
+    Action::OpenBindings,
     Action::OrbitLeft,
     Action::OrbitRight,
     Action::OrbitUp,
@@ -178,6 +199,7 @@ impl Action {
         match self {
             Action::Quit => "ui.quit",
             Action::DebugHud => "ui.debug_hud",
+            Action::OpenBindings => "ui.bindings",
             Action::OrbitLeft => "camera.orbit_left",
             Action::OrbitRight => "camera.orbit_right",
             Action::OrbitUp => "camera.orbit_up",
@@ -201,11 +223,37 @@ impl Action {
         ALL_ACTIONS.into_iter().find(|a| a.id() == id)
     }
 
+    /// A human-readable label for the rebind UI.
+    fn label(self) -> &'static str {
+        match self {
+            Action::Quit => "Quit",
+            Action::DebugHud => "Debug overlay",
+            Action::OpenBindings => "Key bindings",
+            Action::OrbitLeft => "Camera left",
+            Action::OrbitRight => "Camera right",
+            Action::OrbitUp => "Camera up",
+            Action::OrbitDown => "Camera down",
+            Action::ZoomIn => "Zoom in",
+            Action::ZoomOut => "Zoom out",
+            Action::PointerPrimary => "Primary click",
+            Action::MoveFwd => "Move forward",
+            Action::MoveBack => "Move back",
+            Action::MoveLeft => "Move left",
+            Action::MoveRight => "Move right",
+            Action::Dodge => "Dodge",
+            Action::Attack => "Attack",
+            Action::ReplayPause => "Replay pause",
+            Action::ReplaySlower => "Replay slower",
+            Action::ReplayFaster => "Replay faster",
+        }
+    }
+
     /// The single context each base action belongs to.
     fn context(self) -> Context {
         match self {
             Action::Quit
             | Action::DebugHud
+            | Action::OpenBindings
             | Action::OrbitLeft
             | Action::OrbitRight
             | Action::OrbitUp
@@ -231,6 +279,7 @@ impl Action {
         match self {
             Action::Quit => &[PhysInput::Key(KeyCode::Escape)],
             Action::DebugHud => &[PhysInput::Key(KeyCode::F1)],
+            Action::OpenBindings => &[PhysInput::Key(KeyCode::F2)],
             Action::OrbitLeft => &[PhysInput::Key(KeyCode::ArrowLeft)],
             Action::OrbitRight => &[PhysInput::Key(KeyCode::ArrowRight)],
             Action::OrbitUp => &[PhysInput::Key(KeyCode::ArrowUp)],
@@ -264,6 +313,58 @@ pub enum Part {
     Right,
 }
 
+impl Part {
+    /// The parts a map action of `kind` binds — one for a button, a pole
+    /// pair for an axis, a quad for an axis2.
+    fn of(kind: ActionKind) -> &'static [Part] {
+        match kind {
+            ActionKind::Button => &[Part::Press],
+            ActionKind::Axis => &[Part::Pos, Part::Neg],
+            ActionKind::Axis2 => &[Part::Up, Part::Down, Part::Left, Part::Right],
+        }
+    }
+
+    /// A label suffix distinguishing an axis part in the rebind UI.
+    fn suffix(self) -> &'static str {
+        match self {
+            Part::Press => "",
+            Part::Pos => " +",
+            Part::Neg => " −",
+            Part::Up => " ↑",
+            Part::Down => " ↓",
+            Part::Left => " ←",
+            Part::Right => " →",
+        }
+    }
+
+    /// The `bindings.toml` key for an axis part (`pos`/`neg`/`up`/…).
+    fn config_key(self) -> &'static str {
+        match self {
+            Part::Press => "",
+            Part::Pos => "pos",
+            Part::Neg => "neg",
+            Part::Up => "up",
+            Part::Down => "down",
+            Part::Left => "left",
+            Part::Right => "right",
+        }
+    }
+}
+
+/// One rebindable row in the key-bindings panel: a base action, or one
+/// part of a map action (an axis pole, an axis2 direction).
+pub struct BindSlot {
+    /// Display label (`"Move ↑"`, `"Zoom in"`).
+    pub label: String,
+    /// The context the slot binds in (for the conflict rule + the panel's
+    /// grouping).
+    pub context: Context,
+    /// The action/part this slot rebinds.
+    pub target: ActionRef,
+    /// The inputs currently bound to it (usually one).
+    pub inputs: Vec<PhysInput>,
+}
+
 /// A resolved binding target: an engine base action, or one part of the
 /// running map's declared action `index`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -272,11 +373,13 @@ pub enum ActionRef {
     Map { index: usize, part: Part },
 }
 
-/// A map-declared action as the binding table knows it (id + kind; the
-/// full declaration, labels included, stays in the manifest).
+/// A map-declared action as the binding table knows it: id + kind + a
+/// display label for the rebind UI (the manifest's `label.en`, else the
+/// id).
 pub struct MapAction {
     pub id: String,
     pub kind: ActionKind,
+    pub label: String,
 }
 
 /// The live value of one map action, driven by input dispatch and (from
@@ -381,6 +484,7 @@ impl MapActionStates {
 }
 
 /// One binding-table row.
+#[derive(Clone)]
 struct Entry {
     input: PhysInput,
     context: Context,
@@ -392,6 +496,9 @@ struct Entry {
 pub struct Bindings {
     /// ~20 base + a handful of map entries — linear scan beats a map.
     entries: Vec<Entry>,
+    /// The engine + map default table, snapshot before any user override,
+    /// so the rebind UI can reset one action (or all) to its default.
+    defaults: Vec<Entry>,
     /// The map's declared actions ([`ActionRef::Map`] indexes here).
     map_actions: Vec<MapAction>,
     /// The map's name, for the `[map."<name>"]` config section.
@@ -430,10 +537,16 @@ impl Bindings {
             map_actions.push(MapAction {
                 id: decl.id.clone(),
                 kind: decl.kind,
+                label: decl
+                    .label
+                    .get("en")
+                    .cloned()
+                    .unwrap_or_else(|| decl.id.clone()),
             });
         }
         (
             Bindings {
+                defaults: entries.clone(),
                 entries,
                 map_actions,
                 map_name: map_name.to_owned(),
@@ -471,6 +584,222 @@ impl Bindings {
     /// [`ActionRef::Map`] and [`MapActionStates`]).
     pub fn map_actions(&self) -> &[MapAction] {
         &self.map_actions
+    }
+
+    /// Every rebindable slot, in panel display order: the engine base
+    /// actions, then each map action expanded into its parts.
+    #[must_use]
+    pub fn slots(&self) -> Vec<BindSlot> {
+        let mut out = Vec::new();
+        for action in ALL_ACTIONS {
+            let target = ActionRef::Base(action);
+            out.push(BindSlot {
+                label: action.label().to_owned(),
+                context: action.context(),
+                target,
+                inputs: self.inputs_for(target),
+            });
+        }
+        for (index, ma) in self.map_actions.iter().enumerate() {
+            for &part in Part::of(ma.kind) {
+                let target = ActionRef::Map { index, part };
+                out.push(BindSlot {
+                    label: format!("{}{}", ma.label, part.suffix()),
+                    context: Context::MapGameplay,
+                    target,
+                    inputs: self.inputs_for(target),
+                });
+            }
+        }
+        out
+    }
+
+    /// The inputs currently bound to one target.
+    fn inputs_for(&self, target: ActionRef) -> Vec<PhysInput> {
+        self.entries
+            .iter()
+            .filter(|e| e.action == target)
+            .map(|e| e.input)
+            .collect()
+    }
+
+    /// The context a target binds in.
+    fn target_context(target: ActionRef) -> Context {
+        match target {
+            ActionRef::Base(a) => a.context(),
+            ActionRef::Map { .. } => Context::MapGameplay,
+        }
+    }
+
+    /// The display label of a target (for the "unbound X" notice).
+    fn target_label(&self, target: ActionRef) -> String {
+        match target {
+            ActionRef::Base(a) => a.label().to_owned(),
+            ActionRef::Map { index, part } => {
+                let name = self
+                    .map_actions
+                    .get(index)
+                    .map_or("?", |m| m.label.as_str());
+                format!("{name}{}", part.suffix())
+            }
+        }
+    }
+
+    /// Bind `input` to `target`, replacing whatever it was bound to and
+    /// unbinding `input` from any other slot in the same context (a key
+    /// means one thing per context). Returns the displaced slot's label,
+    /// if the key was taken.
+    ///
+    /// Known limitation: if the displaced slot is one part of a map axis /
+    /// axis2, that action is left with fewer parts than its kind needs.
+    /// [`to_toml`](Self::to_toml) can't represent a partial axis (the
+    /// manifest `ActionDefault` requires every pole), so on the next load
+    /// that action falls back to its manifest default — the saved state
+    /// diverges from the in-session one. Reaching it needs a deliberate
+    /// cross-binding of a map-axis key onto another map action; the real
+    /// fix is optional-part axes in `monada-format` (plan follow-up).
+    pub fn rebind(&mut self, target: ActionRef, input: PhysInput) -> Option<String> {
+        let ctx = Self::target_context(target);
+        let displaced = self
+            .entries
+            .iter()
+            .find(|e| e.input == input && e.context == ctx && e.action != target)
+            .map(|e| self.target_label(e.action));
+        // Drop the key from this context, and clear the target's slot,
+        // then bind the two together.
+        self.entries
+            .retain(|e| !(e.input == input && e.context == ctx) && e.action != target);
+        self.entries.push(Entry {
+            input,
+            context: ctx,
+            action: target,
+        });
+        displaced
+    }
+
+    /// Restore one target's default binding.
+    pub fn reset(&mut self, target: ActionRef) {
+        self.entries.retain(|e| e.action != target);
+        let restored: Vec<Entry> = self
+            .defaults
+            .iter()
+            .filter(|e| e.action == target)
+            .cloned()
+            .collect();
+        self.entries.extend(restored);
+    }
+
+    /// Restore every binding to its engine/map default.
+    pub fn reset_all(&mut self) {
+        self.entries = self.defaults.clone();
+    }
+
+    /// Whether the current table differs from the defaults (drives the
+    /// panel's "modified" hint / whether a save is worthwhile).
+    #[must_use]
+    pub fn is_modified(&self) -> bool {
+        // Compare as sets — rebind/reset reorder the entry list. A single
+        // full-tuple debug string is a cheap total order over the ~20
+        // rows (no Ord on the input/context/action types).
+        let sorted = |entries: &[Entry]| {
+            let mut keys: Vec<String> = entries
+                .iter()
+                .map(|e| format!("{:?}", (e.input, e.context, e.action)))
+                .collect();
+            keys.sort();
+            keys
+        };
+        sorted(&self.entries) != sorted(&self.defaults)
+    }
+
+    /// Serialise the current table to `bindings.toml` form: base actions
+    /// grouped by context section, map actions reassembled under
+    /// `[map."<name>"]` in their declared shapes.
+    #[must_use]
+    pub fn to_toml(&self) -> String {
+        let mut text =
+            String::from("# monada key bindings — written by the in-app rebind panel.\n");
+        for context in [
+            Context::Global,
+            Context::TurnBased,
+            Context::RealTime,
+            Context::Replay,
+        ] {
+            let _ = write!(text, "\n[{}]\n", context.section());
+            for action in ALL_ACTIONS {
+                if action.context() != context {
+                    continue;
+                }
+                let names: Vec<String> = self
+                    .inputs_for(ActionRef::Base(action))
+                    .iter()
+                    .map(|i| format!("\"{}\"", i.name()))
+                    .collect();
+                let _ = writeln!(text, "\"{}\" = [{}]", action.id(), names.join(", "));
+            }
+        }
+        if !self.map_actions.is_empty() {
+            let _ = write!(text, "\n[map.\"{}\"]\n", self.map_name);
+            for (index, ma) in self.map_actions.iter().enumerate() {
+                if let Some(value) = self.map_action_toml(index, ma) {
+                    let _ = writeln!(text, "\"{}\" = {value}", ma.id);
+                }
+            }
+        }
+        text
+    }
+
+    /// One map action's value in `bindings.toml` form, or `None` if a
+    /// required axis part is unbound (can't form a valid shape — the
+    /// loader then falls back to the manifest default).
+    fn map_action_toml(&self, index: usize, ma: &MapAction) -> Option<String> {
+        let first = |part: Part| {
+            self.entries
+                .iter()
+                .find(|e| e.action == ActionRef::Map { index, part })
+                .map(|e| e.input.name())
+        };
+        match ma.kind {
+            ActionKind::Button => {
+                let names: Vec<String> = self
+                    .inputs_for(ActionRef::Map {
+                        index,
+                        part: Part::Press,
+                    })
+                    .iter()
+                    .map(|i| format!("\"{}\"", i.name()))
+                    .collect();
+                Some(format!("[{}]", names.join(", ")))
+            }
+            ActionKind::Axis | ActionKind::Axis2 => {
+                let parts = Part::of(ma.kind);
+                let mut fields = Vec::with_capacity(parts.len());
+                for &part in parts {
+                    // A partly-unbound axis can't be written (the shape needs
+                    // every pole); `None` here drops the whole action, so it
+                    // reloads at the manifest default — see `rebind`'s note.
+                    let name = first(part)?;
+                    fields.push(format!("{} = \"{name}\"", part.config_key()));
+                }
+                Some(format!("{{ {} }}", fields.join(", ")))
+            }
+        }
+    }
+
+    /// Write the current table to the user's `bindings.toml`. Best-effort
+    /// — a read-only config dir just means the change stays in-session.
+    pub fn save(&self) {
+        let Some(path) = config_path() else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            if fs::create_dir_all(dir).is_err() {
+                return;
+            }
+        }
+        if let Err(err) = fs::write(&path, self.to_toml()) {
+            eprintln!("monada-host: {}: {err}", path.display());
+        }
     }
 
     /// Apply `bindings.toml` overrides. Each `[context]` section maps a
@@ -952,5 +1281,114 @@ mod tests {
         let mut b = MapActionValue::new(ActionKind::Button);
         b.set(Part::Press, true);
         assert_eq!(b.describe(), "down");
+    }
+
+    #[test]
+    fn slots_enumerate_base_then_map_parts() {
+        let (b, _) = Bindings::defaults("Test", &decls());
+        let slots = b.slots();
+        // Every base action gets one slot.
+        assert_eq!(
+            slots
+                .iter()
+                .filter(|s| matches!(s.target, ActionRef::Base(_)))
+                .count(),
+            ALL_ACTIONS.len()
+        );
+        // `cast` (button) = 1 slot, `strafe` (axis2) = 4 slots.
+        let map_slots: Vec<_> = slots
+            .iter()
+            .filter(|s| matches!(s.target, ActionRef::Map { .. }))
+            .collect();
+        assert_eq!(map_slots.len(), 5);
+        let up = map_slots
+            .iter()
+            .find(|s| s.label == "strafe ↑")
+            .expect("axis2 up slot");
+        assert_eq!(up.inputs, vec![key(KeyCode::KeyI)]);
+    }
+
+    #[test]
+    fn rebind_moves_a_key_and_reports_the_conflict() {
+        let mut b = base();
+        // Zoom-in defaults to W (turn-based). Rebind it to E: W frees up.
+        let displaced = b.rebind(ActionRef::Base(Action::ZoomIn), key(KeyCode::KeyE));
+        assert!(displaced.is_none());
+        assert_eq!(
+            b.resolve(TURN, key(KeyCode::KeyE)),
+            Some(ActionRef::Base(Action::ZoomIn))
+        );
+        assert_eq!(b.resolve(TURN, key(KeyCode::KeyW)), None);
+        // Now rebind zoom-out (currently S) to E too: it steals E from
+        // zoom-in and the call reports the displaced action.
+        let displaced = b.rebind(ActionRef::Base(Action::ZoomOut), key(KeyCode::KeyE));
+        assert_eq!(displaced.as_deref(), Some("Zoom in"));
+        assert_eq!(
+            b.resolve(TURN, key(KeyCode::KeyE)),
+            Some(ActionRef::Base(Action::ZoomOut))
+        );
+        // A different context is untouched: W still moves in real-time.
+        assert_eq!(
+            b.resolve(REAL, key(KeyCode::KeyW)),
+            Some(ActionRef::Base(Action::MoveFwd))
+        );
+    }
+
+    #[test]
+    fn reset_restores_one_slot_and_all() {
+        let mut b = base();
+        b.rebind(ActionRef::Base(Action::ZoomIn), key(KeyCode::KeyE));
+        assert!(b.is_modified());
+        b.reset(ActionRef::Base(Action::ZoomIn));
+        assert_eq!(
+            b.resolve(TURN, key(KeyCode::KeyW)),
+            Some(ActionRef::Base(Action::ZoomIn))
+        );
+        assert!(!b.is_modified());
+        // reset_all after several edits.
+        b.rebind(ActionRef::Base(Action::Quit), key(KeyCode::KeyP));
+        b.rebind(ActionRef::Base(Action::ZoomOut), key(KeyCode::KeyO));
+        b.reset_all();
+        assert!(!b.is_modified());
+        assert_eq!(
+            b.resolve(TURN, key(KeyCode::Escape)),
+            Some(ActionRef::Base(Action::Quit))
+        );
+    }
+
+    #[test]
+    fn to_toml_round_trips_including_map_axis2() {
+        let (mut a, _) = Bindings::defaults("Test", &decls());
+        // Rebind a base action and one axis2 part.
+        a.rebind(ActionRef::Base(Action::ZoomIn), key(KeyCode::KeyE));
+        a.rebind(
+            ActionRef::Map {
+                index: 1,
+                part: Part::Up,
+            },
+            key(KeyCode::KeyT),
+        );
+        let toml = a.to_toml();
+        // Reload onto a fresh default table and compare resolved bindings.
+        let (mut b, _) = Bindings::defaults("Test", &decls());
+        let warnings = b.apply_overrides(&toml);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        for stack in [TURN, REAL] {
+            for code in [KeyCode::KeyE, KeyCode::KeyT, KeyCode::KeyI, KeyCode::Escape] {
+                assert_eq!(
+                    a.resolve(stack, key(code)),
+                    b.resolve(stack, key(code)),
+                    "{stack:?} {code:?}"
+                );
+            }
+        }
+        // The rebinds actually took.
+        assert_eq!(
+            b.resolve(REAL, key(KeyCode::KeyT)),
+            Some(ActionRef::Map {
+                index: 1,
+                part: Part::Up
+            })
+        );
     }
 }

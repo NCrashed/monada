@@ -686,6 +686,14 @@ struct App {
     /// `[[action]]` declarations + the user's `bindings.toml`), resolved
     /// per event in `window_event`.
     bindings: Bindings,
+    /// Whether the key-bindings panel is open (toggled by `ui.bindings`).
+    rebind_open: bool,
+    /// While `Some`, the panel is waiting for a key/mouse press to bind to
+    /// this target; the next input is captured instead of dispatched.
+    capturing: Option<ActionRef>,
+    /// The label of the slot a just-completed rebind took its key from, if
+    /// any — shown once in the panel so the displacement isn't silent.
+    rebind_notice: Option<String>,
     /// Real-time gameplay input (WASD / dodge / attack), sampled per frame
     /// and injected per tick into a fixed-rate map.
     input: Input,
@@ -765,6 +773,9 @@ impl App {
             last_frame: Instant::now(),
             keys: Keys::default(),
             bindings,
+            rebind_open: false,
+            capturing: None,
+            rebind_notice: None,
             input: Input::default(),
             cursor: (0.0, 0.0),
             fps: 0.0,
@@ -1105,6 +1116,10 @@ impl App {
         // The map's own scripted HUD (health bar / panels / buttons), painted
         // over the status window; button clicks feed the next tick's command.
         self.paint_map_hud(&ctx);
+        // The key-bindings panel (F2), on top of everything.
+        if self.rebind_open {
+            self.build_rebind_panel(&ctx);
+        }
         let out = ctx.end_pass();
         self.egui_state
             .as_mut()?
@@ -1766,19 +1781,43 @@ impl ApplicationHandler for App {
                         ..
                     },
                 ..
-            } if !consumed => {
-                self.dispatch_input(
-                    event_loop,
-                    PhysInput::Key(code),
-                    state == ElementState::Pressed,
-                );
+            } => {
+                let pressed = state == ElementState::Pressed;
+                let escape = code == winit::keyboard::KeyCode::Escape;
+                // Key capture for the rebind panel takes priority (no text
+                // field can hold focus, so egui never consumes keys here).
+                // Esc cancels the capture instead of binding.
+                if self.capturing.is_some() {
+                    if pressed {
+                        if escape {
+                            self.capturing = None;
+                        } else {
+                            self.capture_input(PhysInput::Key(code));
+                        }
+                    }
+                } else if self.rebind_open && pressed && escape {
+                    // Esc closes the open panel rather than quitting the app.
+                    self.rebind_open = false;
+                    self.rebind_notice = None;
+                } else if !consumed {
+                    self.dispatch_input(event_loop, PhysInput::Key(code), pressed);
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
             }
+            // A click on the panel is consumed by egui (so a "rebind"
+            // button doesn't capture its own click); an off-panel click
+            // while capturing binds that mouse button.
             WindowEvent::MouseInput { state, button, .. } if !consumed => {
                 if let Some(input) = PhysInput::from_mouse(button) {
-                    self.dispatch_input(event_loop, input, state == ElementState::Pressed);
+                    if self.capturing.is_some() {
+                        if state == ElementState::Pressed {
+                            self.capture_input(input);
+                        }
+                    } else {
+                        self.dispatch_input(event_loop, input, state == ElementState::Pressed);
+                    }
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(),
@@ -1814,6 +1853,20 @@ struct MapNet {
     player: u32,
     halted: bool,
     connected: bool,
+}
+
+/// A rebind-panel interaction, recorded during the egui closure and
+/// applied after it (so the closure needn't hold `&mut self.bindings`).
+#[derive(Clone, Copy)]
+enum PanelAction {
+    /// Begin capturing the next key/mouse press for this target.
+    Capture(ActionRef),
+    /// Reset one target to its default.
+    Reset(ActionRef),
+    /// Reset every binding to its default.
+    ResetAll,
+    /// Close the panel.
+    Close,
 }
 
 /// Per-mode HUD state passed to [`build_hud`].
@@ -1967,6 +2020,13 @@ impl App {
             }
             // F1 toggles the debug overlay (tick / FPS / status / lockstep).
             Action::DebugHud if down => self.debug_hud = !self.debug_hud,
+            // F2 toggles the key-bindings panel; closing cancels any capture.
+            Action::OpenBindings if down => {
+                self.rebind_open = !self.rebind_open;
+                if !self.rebind_open {
+                    self.capturing = None;
+                }
+            }
             Action::OrbitLeft => self.keys.yaw_left = down,
             Action::OrbitRight => self.keys.yaw_right = down,
             Action::OrbitUp => self.keys.pitch_up = down,
@@ -1989,6 +2049,144 @@ impl App {
             Action::ReplaySlower if down => self.replay_control(|r| r.scale_speed(0.5)),
             Action::ReplayFaster if down => self.replay_control(|r| r.scale_speed(2.0)),
             _ => {}
+        }
+    }
+
+    /// Complete a rebind capture: bind the pressed `input` to the pending
+    /// target, note any slot it was taken from, and persist the table.
+    fn capture_input(&mut self, input: PhysInput) {
+        if let Some(target) = self.capturing.take() {
+            self.rebind_notice = self.bindings.rebind(target, input);
+            self.bindings.save();
+        }
+    }
+
+    /// Paint the key-bindings panel (F2). Immediate-mode egui can't hold a
+    /// `&mut self.bindings` across the closure, so widget clicks record a
+    /// [`PanelAction`] that is applied afterwards.
+    fn build_rebind_panel(&mut self, ctx: &egui::Context) {
+        let slots = self.bindings.slots();
+        let capturing = self.capturing;
+        let modified = self.bindings.is_modified();
+        let notice = self.rebind_notice.clone();
+        // A slot is inert if its context is not active for the running map,
+        // or a higher active context wins its key — rebinding it would have
+        // no visible effect (e.g. the base real-time move actions once a map
+        // declares its own on the same keys). Precompute against the live
+        // context stack so those rows can be shown disabled.
+        let active = self.context_stack();
+        let inert: Vec<bool> = slots
+            .iter()
+            .map(|s| {
+                !active.contains(&s.context)
+                    || (!s.inputs.is_empty()
+                        && s.inputs
+                            .iter()
+                            .all(|&i| self.bindings.resolve(&active, i) != Some(s.target)))
+            })
+            .collect();
+        let mut act: Option<PanelAction> = None;
+        egui::Window::new("Key bindings")
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Click a binding, then press a key. Esc closes.");
+                if let Some(displaced) = &notice {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0xE0, 0xA0, 0x30),
+                        format!("Took the key from “{displaced}”."),
+                    );
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        let mut group: Option<Context> = None;
+                        for (slot, &dim) in slots.iter().zip(&inert) {
+                            if group != Some(slot.context) {
+                                ui.separator();
+                                ui.strong(slot.context.title());
+                                group = Some(slot.context);
+                            }
+                            ui.horizontal(|ui| {
+                                ui.set_min_width(240.0);
+                                // Dim inert rows and disable their controls,
+                                // so a no-effect rebind isn't offered.
+                                ui.add_enabled_ui(!dim, |ui| {
+                                    if dim {
+                                        ui.weak(&slot.label);
+                                    } else {
+                                        ui.label(&slot.label);
+                                    }
+                                    let label = if capturing == Some(slot.target) {
+                                        "press a key…".to_owned()
+                                    } else if slot.inputs.is_empty() {
+                                        "—".to_owned()
+                                    } else {
+                                        slot.inputs
+                                            .iter()
+                                            .map(|i| i.label())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    };
+                                    let mut btn = ui.button(label);
+                                    if dim {
+                                        btn = btn.on_hover_text(
+                                            "Shadowed by this map — no effect here.",
+                                        );
+                                    }
+                                    if btn.clicked() {
+                                        act = Some(PanelAction::Capture(slot.target));
+                                    }
+                                    if ui.small_button("↺").on_hover_text("reset").clicked() {
+                                        act = Some(PanelAction::Reset(slot.target));
+                                    }
+                                });
+                            });
+                        }
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(modified, egui::Button::new("Reset all"))
+                        .clicked()
+                    {
+                        act = Some(PanelAction::ResetAll);
+                    }
+                    if ui.button("Close").clicked() {
+                        act = Some(PanelAction::Close);
+                    }
+                });
+            });
+        if let Some(act) = act {
+            self.apply_panel_action(act);
+        }
+    }
+
+    /// Apply one [`PanelAction`] recorded during the panel's egui pass.
+    fn apply_panel_action(&mut self, act: PanelAction) {
+        // Any interaction but starting a fresh capture clears the notice.
+        match act {
+            PanelAction::Capture(target) => {
+                self.capturing = Some(target);
+                self.rebind_notice = None;
+            }
+            PanelAction::Reset(target) => {
+                self.bindings.reset(target);
+                self.bindings.save();
+                self.capturing = None;
+                self.rebind_notice = None;
+            }
+            PanelAction::ResetAll => {
+                self.bindings.reset_all();
+                self.bindings.save();
+                self.capturing = None;
+                self.rebind_notice = None;
+            }
+            PanelAction::Close => {
+                self.rebind_open = false;
+                self.capturing = None;
+                self.rebind_notice = None;
+            }
         }
     }
 
