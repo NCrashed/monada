@@ -5,8 +5,15 @@ spirit of late-90s / early-00s strategy classics, with CPU voxel
 rendering via [`roxlap`](https://crates.io/crates/roxlap-core).
 
 Three design pillars: **determinism first**, **scripting is the
-gameplay layer**, **voxels all the way down**. See [`DESIGN.md`](DESIGN.md)
-for the full architectural reference.
+gameplay layer**, **voxels all the way down**.
+
+## Documentation
+
+- [**The Map-Maker's Book**](https://ncrashed.github.io/monada/) — the guide
+  to writing maps: the archive format, the scripting API, determinism,
+  input and bindings, and networking, each with a runnable example. Its
+  sources live in [`book/`](book/).
+- [`DESIGN.md`](DESIGN.md) — the full architectural reference.
 
 ## Status
 
