@@ -251,6 +251,10 @@ fn register_number_types(engine: &mut Engine) {
     // genre — but it is what lets a board game do its math in native
     // integers instead of fighting fixed-point for an L-move.
     engine.register_fn("to_int", |a: Fixed| -> i64 { i64::from(a.floor_to_int()) });
+    // Fixed-returning rounding; pipe through to_int() to get an integer.
+    engine.register_fn("floor", |a: Fixed| a.floor());
+    engine.register_fn("round", |a: Fixed| a.round());
+    engine.register_fn("ceil",  |a: Fixed| a.ceil());
 
     // Read `Vec3` components in scripts (e.g. a command's `arg.x`). The
     // setter side stays in `vec3(...)` reconstruction — vectors are
