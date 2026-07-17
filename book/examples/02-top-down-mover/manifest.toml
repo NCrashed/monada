@@ -1,0 +1,23 @@
+# A top-down mover (book chapter 7). WASD walks a cube around a floor, and a
+# click drops a marker at the ground point under the cursor — the whole
+# input path in one small map.
+name = "Top-down Mover"
+engine_version = "0.0.1"
+players = 1
+sim_hz = "30hz"
+script_runtime = "rhai"
+entry = "scripts/main.rhai"
+
+# Declared, rebindable inputs. The host resolves keys through its binding
+# table (and the F2 rebind panel); the map only ever names actions.
+[[action]]
+id = "move"
+kind = "axis2"
+default = { up = "KeyW", down = "KeyS", left = "KeyA", right = "KeyD" }
+label = { en = "Move" }
+
+[[action]]
+id = "mark"
+kind = "button"
+default = ["MouseLeft"]
+label = { en = "Place marker" }

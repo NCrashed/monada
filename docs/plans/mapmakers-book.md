@@ -10,7 +10,10 @@ CI (mdbook build on PR + master, deploy to Pages on master); mdbook
 in the flake devshell. Deferred: mdbook-linkcheck (multi-backend
 output-path friction — add once verifiable), the API-reference
 coverage check (ch. 11 / CI job 3), and fleshing out chapters
-4–11.
+4, 5, 6, 8–11. Chapter 7 (input) is written, with a second runnable
+example (`book/examples/02-top-down-mover`) demonstrating declared
+actions, the local layer (`local_tick` + `action` + `pick_ground`),
+and the command handler.
 
 A book for map authors: engine API reference, guides, and runnable
 examples — with CI that builds the book and compiles/runs every
