@@ -11,7 +11,9 @@ description = "monada map archive (tar.zst): manifest schema, asset bundling, in
 
 [dependencies]
 # Manifest (de)serialisation. serde comes from the workspace (derive on).
-serde = { workspace = true, features = ["derive"] }
+# `std` adds the internal value buffering `#[serde(untagged)]` needs
+# (the ActionDefault shapes).
+serde = { workspace = true, features = ["derive", "std"] }
 toml = "1"
 # tar.zst archive: streaming entries (tar) + the codec voxel data
 # compresses best with (zstd) — DESIGN.md §3.4.

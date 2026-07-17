@@ -89,6 +89,96 @@ impl<'de> Deserialize<'de> for SimHz {
     }
 }
 
+/// Kind of a map-declared input action (docs/plans/input-bindings.md §2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionKind {
+    /// A digital press/release input.
+    Button,
+    /// A 1D axis composed from a positive / negative input pair.
+    Axis,
+    /// A 2D axis composed from four directional inputs (WASD-style).
+    Axis2,
+}
+
+/// An action's default binding. The shape must match the action's
+/// [`ActionKind`]: `button` takes a list of input names, `axis` a
+/// `{ pos, neg }` pair, `axis2` an `{ up, down, left, right }` quad.
+/// Input names are winit `KeyCode` variants (`"KeyW"`, `"Space"`) or
+/// `"MouseLeft"` / `"MouseRight"` / `"MouseMiddle"`; the *host*
+/// validates them (the format crate stays renderer/window agnostic).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ActionDefault {
+    /// `default = ["KeyQ"]` — a `button`'s input list.
+    Inputs(Vec<String>),
+    /// `default = { pos = "KeyE", neg = "KeyQ" }` — an `axis` pair.
+    AxisPair { pos: String, neg: String },
+    /// `default = { up = "KeyW", ... }` — an `axis2` quad.
+    Axis2Quad {
+        up: String,
+        down: String,
+        left: String,
+        right: String,
+    },
+}
+
+/// One `[[action]]` declaration: a named input the map's local script
+/// layer consumes, with an optional default binding the host applies
+/// under the user's `bindings.toml` overrides.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionDecl {
+    /// Stable id (`"cast_fireball"`) — the rebind-config / script name.
+    pub id: String,
+    pub kind: ActionKind,
+    /// Default binding; `None` = bound only via user config.
+    #[serde(default)]
+    pub default: Option<ActionDefault>,
+    /// Binding context. v0 accepts only `"gameplay"` (the default); the
+    /// context stack (plan §3) will widen this.
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Human-readable labels by language code (`en`, `ru`, …) for the
+    /// host's rebind UI. Falls back to `id` when absent.
+    #[serde(default)]
+    pub label: BTreeMap<String, String>,
+}
+
+impl ActionDecl {
+    /// Check one declaration's internal consistency (id, context, and
+    /// the default's shape against `kind`).
+    fn validate(&self) -> Result<(), String> {
+        if self.id.is_empty() {
+            return Err("action with empty id".into());
+        }
+        match &self.context {
+            None => {}
+            Some(c) if c == "gameplay" => {}
+            Some(c) => {
+                return Err(format!(
+                    "action `{}`: unknown context {c:?} (v0 supports only \"gameplay\")",
+                    self.id
+                ));
+            }
+        }
+        let ok = matches!(
+            (self.kind, &self.default),
+            (_, None)
+                | (ActionKind::Button, Some(ActionDefault::Inputs(_)))
+                | (ActionKind::Axis, Some(ActionDefault::AxisPair { .. }))
+                | (ActionKind::Axis2, Some(ActionDefault::Axis2Quad { .. }))
+        );
+        if ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "action `{}`: default shape does not match kind {:?}",
+                self.id, self.kind
+            ))
+        }
+    }
+}
+
 /// `manifest.toml` — the map's declared identity and runtime needs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -104,6 +194,33 @@ pub struct Manifest {
     pub script_runtime: String,
     /// Archive-relative path to the entry script.
     pub entry: String,
+    /// Optional dedicated script for the local (unsynchronized) layer —
+    /// input gestures, camera, UI (docs/plans/input-bindings.md §1).
+    /// Absent = the local layer loads `entry` too (shared helper
+    /// functions, separate global scope).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_entry: Option<String>,
+    /// Map-declared input actions (`[[action]]` tables — plan §2).
+    /// Absent for maps that predate the binding system.
+    #[serde(default, rename = "action", skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionDecl>,
+}
+
+impl Manifest {
+    /// Validate the action declarations (unique ids, default shapes).
+    /// Called by [`Map::read`]; exposed for tools that build manifests.
+    ///
+    /// # Errors
+    /// A human-readable description of the first invalid declaration.
+    pub fn validate(&self) -> Result<(), String> {
+        for (i, action) in self.actions.iter().enumerate() {
+            action.validate()?;
+            if self.actions[..i].iter().any(|a| a.id == action.id) {
+                return Err(format!("duplicate action id `{}`", action.id));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A loaded map: the parsed manifest, its script sources, and the
@@ -129,6 +246,16 @@ impl Map {
         self.scripts.get(&self.manifest.entry).map(String::as_str)
     }
 
+    /// The local layer's script source: the manifest's `local_entry` if
+    /// declared, else the entry script (shared source, separate scope).
+    #[must_use]
+    pub fn local_script(&self) -> Option<&str> {
+        match &self.manifest.local_entry {
+            Some(path) => self.scripts.get(path).map(String::as_str),
+            None => self.entry_script(),
+        }
+    }
+
     /// Read a `.monada` archive from its bytes: decompress, untar, parse
     /// `manifest.toml`, collect `scripts/`, and hash the canonical tar.
     ///
@@ -144,6 +271,7 @@ impl Map {
             std::str::from_utf8(manifest_bytes).map_err(|_| FormatError::Utf8("manifest.toml"))?;
         let manifest: Manifest =
             toml::from_str(manifest_str).map_err(|e| FormatError::Manifest(e.to_string()))?;
+        manifest.validate().map_err(FormatError::Manifest)?;
 
         let mut scripts = BTreeMap::new();
         let mut assets = BTreeMap::new();
@@ -354,6 +482,98 @@ mod tests {
         assert_eq!(map.assets.get("assets/pieces/king.kv6"), Some(&kv6));
         // Assets stay out of `scripts`.
         assert!(!map.scripts.contains_key("assets/pieces/king.kv6"));
+    }
+
+    #[test]
+    fn action_declarations_parse() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            name = "t"
+            engine_version = "0.1.0"
+            players = 1
+            sim_hz = "25"
+            script_runtime = "rhai"
+            entry = "scripts/main.rhai"
+
+            [[action]]
+            id = "move"
+            kind = "axis2"
+            default = { up = "KeyW", down = "KeyS", left = "KeyA", right = "KeyD" }
+            label = { en = "Move", ru = "Движение" }
+
+            [[action]]
+            id = "cast"
+            kind = "button"
+            default = ["KeyQ", "MouseRight"]
+            context = "gameplay"
+
+            [[action]]
+            id = "lean"
+            kind = "axis"
+            default = { pos = "KeyE", neg = "KeyR" }
+        "#,
+        )
+        .unwrap();
+        manifest.validate().unwrap();
+        assert_eq!(manifest.actions.len(), 3);
+        assert_eq!(manifest.actions[0].kind, ActionKind::Axis2);
+        assert_eq!(manifest.actions[0].label["ru"], "Движение");
+        assert_eq!(
+            manifest.actions[1].default,
+            Some(ActionDefault::Inputs(vec![
+                "KeyQ".into(),
+                "MouseRight".into()
+            ]))
+        );
+        assert!(matches!(
+            manifest.actions[2].default,
+            Some(ActionDefault::AxisPair { .. })
+        ));
+    }
+
+    #[test]
+    fn manifests_without_actions_stay_valid() {
+        // Pre-binding maps (chess/rpg) must parse unchanged.
+        let map = Map::read(&pack(&sample()).unwrap()).unwrap();
+        assert!(map.manifest.actions.is_empty());
+        map.manifest.validate().unwrap();
+    }
+
+    #[test]
+    fn action_validation_rejects_bad_declarations() {
+        let base = r#"
+            name = "t"
+            engine_version = "0.1.0"
+            players = 1
+            sim_hz = "25"
+            script_runtime = "rhai"
+            entry = "scripts/main.rhai"
+        "#;
+        let check = |extra: &str| {
+            toml::from_str::<Manifest>(&format!("{base}{extra}"))
+                .map_err(|e| e.to_string())
+                .and_then(|m| m.validate())
+        };
+        // Default shape must match the kind.
+        assert!(check("[[action]]\nid = \"a\"\nkind = \"axis2\"\ndefault = [\"KeyW\"]\n").is_err());
+        // Duplicate ids.
+        assert!(check(
+            "[[action]]\nid = \"a\"\nkind = \"button\"\n[[action]]\nid = \"a\"\nkind = \"button\"\n"
+        )
+        .is_err());
+        // Unknown context (v0 = gameplay only).
+        assert!(check("[[action]]\nid = \"a\"\nkind = \"button\"\ncontext = \"menu\"\n").is_err());
+        // A bad manifest fails Map::read loudly, not silently.
+        let mut files = sample();
+        let bad = format!(
+            "{}\n[[action]]\nid = \"\"\nkind = \"button\"\n",
+            String::from_utf8(files["manifest.toml"].clone()).unwrap()
+        );
+        files.insert("manifest.toml".to_string(), bad.into_bytes());
+        assert!(matches!(
+            Map::read(&pack(&files).unwrap()),
+            Err(FormatError::Manifest(_))
+        ));
     }
 
     #[test]
