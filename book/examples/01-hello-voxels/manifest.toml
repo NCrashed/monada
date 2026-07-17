@@ -1,0 +1,9 @@
+# The smallest complete monada map (book chapter 3). A one-voxel floor and
+# a single box that walks across it — enough to exercise init + tick.
+name = "Hello Voxels"
+engine_version = "0.0.1"
+players = 1
+# Real-time: the sim advances on a fixed 30 Hz clock, so `tick(dt)` runs.
+sim_hz = "30hz"
+script_runtime = "rhai"
+entry = "scripts/main.rhai"

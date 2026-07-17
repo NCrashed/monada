@@ -73,6 +73,9 @@
               wasm-bindgen-cli
               nodejs
               trunk
+              # The map-maker's book (book/): `mdbook serve` to preview,
+              # `mdbook build book` to render. CI installs its own copy.
+              mdbook
             ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux linuxRuntimeLibs;
 
             # mkShell only sets PATH / PKG_CONFIG_PATH; the dlopen'd render

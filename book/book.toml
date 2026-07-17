@@ -1,0 +1,15 @@
+[book]
+title = "The monada Map-Maker's Book"
+authors = ["Anton Gushcha"]
+description = "Building maps for the monada voxel game engine."
+src = "src"
+language = "en"
+
+[output.html]
+default-theme = "navy"
+git-repository-url = "https://github.com/NCrashed/monada"
+edit-url-template = "https://github.com/NCrashed/monada/edit/master/book/{path}"
+
+[output.html.fold]
+enable = true
+level = 1

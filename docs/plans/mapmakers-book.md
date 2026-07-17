@@ -1,10 +1,21 @@
 # Plan: the Map-Maker's Book
 
-Status: planned (not started). A book for map authors: engine API
-reference, guides, and runnable examples — with CI that builds the
-book and compiles/runs every example. Companion plan:
-`docs/plans/input-bindings.md` (its chapters land here once the
-feature ships).
+Status: skeleton landed (build-order steps 1–2). Done: mdBook at
+`book/` (book.toml + SUMMARY + real chapters 1–3, stubs 4–11); the
+first example `book/examples/01-hello-voxels` (a real runnable map);
+the example harness `monada_oracle::run_example_map` + the
+`book_examples_run_headless` test that packs/loads/runs every
+`book/examples/*` under the normal `cargo test` matrix; `book.yml`
+CI (mdbook build on PR + master, deploy to Pages on master); mdbook
+in the flake devshell. Deferred: mdbook-linkcheck (multi-backend
+output-path friction — add once verifiable), the API-reference
+coverage check (ch. 11 / CI job 3), and fleshing out chapters
+4–11.
+
+A book for map authors: engine API reference, guides, and runnable
+examples — with CI that builds the book and compiles/runs every
+example. Companion plan: `docs/plans/input-bindings.md` (its chapters
+land here once the feature ships).
 
 ## 0. Shape
 

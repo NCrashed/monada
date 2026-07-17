@@ -27,11 +27,13 @@ use monada_fixed::{Fixed, FixedVec3};
 use monada_net::{LockstepSession, LoopbackTransport, MatchInfo, SessionConfig, SimDriver};
 use std::sync::{Arc, Mutex};
 
+use monada_format::{pack_dir, Map, SimHz};
 use monada_script::{
-    run_script, shared_world, NullBridge, RhaiBackend, RhaiDriver, ScriptBackend, SharedBridge,
-    SharedWorld, TerrainBridge, COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
+    run_script, shared_world, LocalBackend, NullBridge, RhaiBackend, RhaiDriver, ScriptBackend,
+    SharedBridge, SharedWorld, TerrainBridge, COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId, World};
+use std::path::Path;
 
 /// Tick counts at which each scenario is hashed. Ascending; `0` captures
 /// the seeded post-`init` state before any step.
@@ -434,6 +436,44 @@ pub fn parse_goldens(text: &str) -> Result<Vec<(String, u64)>, String> {
     Ok(out)
 }
 
+/// Pack, load, and smoke-run one book example map (`book/examples/*`).
+///
+/// The book's examples are real, runnable maps rather than inline
+/// snippets — this is what keeps them honest: a snippet the harness never
+/// executes rots into a lie (docs/plans/mapmakers-book.md §0). It packs
+/// the directory into a `.monada` archive, reads it back (which validates
+/// the manifest), compiles *both* script layers, and drives `ticks`
+/// simulation steps under a headless [`TerrainBridge`] — the same path
+/// the real oracle scenarios use. Returns the final [`World::state_hash`];
+/// any pack / load / compile / run failure surfaces as `Err`.
+///
+/// # Errors
+/// A human-readable description of the first failing stage.
+pub fn run_example_map(dir: &Path, ticks: u64) -> Result<u64, String> {
+    let bytes = pack_dir(dir).map_err(|e| format!("pack {}: {e}", dir.display()))?;
+    let map = Map::read(&bytes).map_err(|e| format!("read {}: {e}", dir.display()))?;
+    let script = map
+        .entry_script()
+        .ok_or("manifest `entry` names no packed script")?;
+    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let mut driver = RhaiDriver::with_bridge(shared_world(SEED), script, &bridge)
+        .map_err(|e| format!("sim script: {e:?}"))?;
+    if let SimHz::Fixed(hz) = map.manifest.sim_hz {
+        driver.set_tick_hz(hz);
+    }
+    // Compile the local layer too, so a broken local script fails loudly.
+    // It is not driven here — the sim layer is what a golden would cover;
+    // this only proves both halves load.
+    let local_src = map.local_script().ok_or("manifest names no local script")?;
+    LocalBackend::new(driver.world(), &bridge)
+        .load(local_src)
+        .map_err(|e| format!("local script: {e:?}"))?;
+    for _ in 0..ticks {
+        driver.step();
+    }
+    Ok(driver.state_hash())
+}
+
 /// A single checkpoint's verdict against the goldens.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -459,4 +499,29 @@ pub fn diff(checkpoints: &[Checkpoint], goldens: &[(String, u64)]) -> Vec<(Check
             (*c, verdict)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Every `book/examples/*` map packs, loads, and runs headless. This
+    /// is the book's "examples don't rot" gate — it runs under the normal
+    /// `cargo test` matrix, so a broken tutorial map fails CI on every
+    /// platform.
+    #[test]
+    fn book_examples_run_headless() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../book/examples");
+        let mut ran = 0;
+        for entry in std::fs::read_dir(&root).expect("book/examples exists") {
+            let dir = entry.expect("dir entry").path();
+            if !dir.join("manifest.toml").exists() {
+                continue; // not a map directory
+            }
+            run_example_map(&dir, 60).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+            ran += 1;
+        }
+        assert!(ran > 0, "no book examples under {}", root.display());
+    }
 }
