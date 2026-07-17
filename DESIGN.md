@@ -655,6 +655,12 @@ is in the wrong place.
 **M7+ — open.** RTS demo, voxel physics demo (§3.6), modder-UX
 polish. Scope decided after M6 lands.
 
+Detailed plans for upcoming features live in `docs/plans/`:
+- `docs/plans/input-bindings.md` — actions, key bindings, and the
+  local script layer (sim/local backend split, pick API, rebind UI).
+- `docs/plans/mapmakers-book.md` — the Map-Maker's Book (mdBook,
+  API reference, CI-compiled runnable examples).
+
 ## 8. Risks
 
 | Risk | Mitigation |
