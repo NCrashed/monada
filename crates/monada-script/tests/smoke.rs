@@ -47,6 +47,73 @@ fn script_drives_the_world_through_the_host_api() {
     }
 }
 
+/// Angle constants `pi()`, `pi_2()`, `tau()` match the trig module values.
+#[test]
+fn constants() {
+    use monada_fixed::trig;
+
+    const SCRIPT: &str = r#"
+        fn init() {
+            let a = archetype(["pi", "pi2", "tau"]);
+            let e = entity_create(a);
+            entity_set_field(e, "pi",  pi());
+            entity_set_field(e, "pi2", pi_2());
+            entity_set_field(e, "tau", tau());
+        }
+        fn tick() {}
+    "#;
+
+    let world = shared_world(1);
+    let mut backend = RhaiBackend::new(world.clone());
+    backend.load(SCRIPT).expect("compile");
+    backend.on_init().expect("init");
+
+    let w = world.lock().unwrap();
+    let e = w.entities(ArchetypeId(0))[0];
+    assert_eq!(w.field(e, "pi"), Some(trig::PI));
+    assert_eq!(w.field(e, "pi2"), Some(trig::FRAC_PI_2));
+    assert_eq!(w.field(e, "tau"), Some(trig::TAU));
+}
+
+/// floor/ceil/round for positive and negative values.
+/// floor goes toward -inf, ceil toward +inf, round half-away-from-zero.
+#[test]
+fn rounding() {
+    const SCRIPT: &str = r#"
+        fn init() {
+            let a = archetype(["floor_pos", "floor_neg",
+                               "ceil_pos",  "ceil_neg",
+                               "round_pos", "round_neg"]);
+            let e = entity_create(a);
+            let pos = fixed(1) + fixed(3) / fixed(4);  //  1.75
+            let neg = -(fixed(1) + fixed(3) / fixed(4)); // -1.75
+            entity_set_field(e, "floor_pos", floor(pos));
+            entity_set_field(e, "floor_neg", floor(neg));
+            entity_set_field(e, "ceil_pos",  ceil(pos));
+            entity_set_field(e, "ceil_neg",  ceil(neg));
+            entity_set_field(e, "round_pos", round(pos));
+            entity_set_field(e, "round_neg", round(neg));
+        }
+        fn tick() {}
+    "#;
+
+    let world = shared_world(1);
+    let mut backend = RhaiBackend::new(world.clone());
+    backend.load(SCRIPT).expect("compile");
+    backend.on_init().expect("init");
+
+    let w = world.lock().unwrap();
+    let e = w.entities(ArchetypeId(0))[0];
+    let field = |name| w.field(e, name).unwrap();
+
+    assert_eq!(field("floor_pos"), Fixed::from_int(1));
+    assert_eq!(field("floor_neg"), Fixed::from_int(-2));
+    assert_eq!(field("ceil_pos"), Fixed::from_int(2));
+    assert_eq!(field("ceil_neg"), Fixed::from_int(-1));
+    assert_eq!(field("round_pos"), Fixed::from_int(2));
+    assert_eq!(field("round_neg"), Fixed::from_int(-2));
+}
+
 /// A fixed-rate map's `tick(dt)` receives the correct duration and can use
 /// it for time-independent movement. Hz=4 gives dt=0.25 exactly (power-of-two
 /// denominator), so `speed(2) * dt(0.25) * ticks(4)` = 2.0 with no rounding.
