@@ -273,7 +273,9 @@ fn register_number_types(engine: &mut Engine) {
     // transcendentals).
     engine.register_fn("sin", trig::sin);
     engine.register_fn("cos", trig::cos);
-    engine.register_fn("tau", || trig::TAU);
+    engine.register_fn("tau",  || trig::TAU);
+    engine.register_fn("pi",   || trig::PI);
+    engine.register_fn("pi_2", || trig::FRAC_PI_2);
     engine.register_fn("to_debug", |a: Fixed| format!("{a:?}"));
 }
 
