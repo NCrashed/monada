@@ -524,4 +524,98 @@ mod tests {
         }
         assert!(ran > 0, "no book examples under {}", root.display());
     }
+
+    /// A script-facing name: lowercase / digits / underscore, leading
+    /// alpha or `_`. Excludes the operator overloads (`+`, `<`, …) that
+    /// are also registered via `register_fn` but aren't documented API.
+    fn is_api_ident(s: &str) -> bool {
+        let mut chars = s.chars();
+        matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_lowercase())
+            && s.chars()
+                .all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit())
+    }
+
+    /// The identifier-named functions monada-script registers, scraped
+    /// from `register_fn("name"` in the given source (whitespace/newlines
+    /// between `(` and the literal are tolerated — rustfmt wraps them).
+    fn registered_fn_names(src: &str) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        let marker = "register_fn(";
+        let mut rest = src;
+        while let Some(i) = rest.find(marker) {
+            let after = rest[i + marker.len()..].trim_start();
+            if let Some(quoted) = after.strip_prefix('"') {
+                if let Some(end) = quoted.find('"') {
+                    let name = &quoted[..end];
+                    if is_api_ident(name) {
+                        out.insert(name.to_owned());
+                    }
+                }
+            }
+            rest = &rest[i + marker.len()..];
+        }
+        out
+    }
+
+    /// The function names the reference chapter documents: the leading
+    /// backtick-quoted identifier of each table row's first cell.
+    fn documented_fn_names(md: &str) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for line in md.lines() {
+            let line = line.trim_start();
+            let Some(cell) = line.strip_prefix('|') else {
+                continue;
+            };
+            if let Some(code) = cell.trim_start().strip_prefix('`') {
+                let name: String = code
+                    .chars()
+                    .take_while(|&c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit())
+                    .collect();
+                if is_api_ident(&name) {
+                    out.insert(name);
+                }
+            }
+        }
+        out
+    }
+
+    /// The API reference (`book/src/reference.md`) documents exactly the
+    /// host functions monada-script registers — no more, no less. This is
+    /// the book's "reference can't drift" gate: adding or removing a host
+    /// function fails CI until the reference is updated to match.
+    #[test]
+    fn api_reference_matches_registered_functions() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |rel: &str| {
+            std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
+        };
+        let sources = format!(
+            "{}\n{}",
+            read("crates/monada-script/src/rhai_backend.rs"),
+            read("crates/monada-script/src/local_backend.rs"),
+        );
+        let registered = registered_fn_names(&sources);
+        let documented = documented_fn_names(&read("book/src/reference.md"));
+
+        // Guard against a parser regression silently emptying both sides
+        // (empty == empty would pass vacuously).
+        assert!(
+            registered.len() > 50 && registered.contains("voxel_fill"),
+            "scraper found too few registered functions ({})",
+            registered.len()
+        );
+        assert!(
+            documented.contains("voxel_fill"),
+            "reference parser found no known function"
+        );
+
+        let undocumented: Vec<_> = registered.difference(&documented).collect();
+        let phantom: Vec<_> = documented.difference(&registered).collect();
+        assert!(
+            undocumented.is_empty() && phantom.is_empty(),
+            "API reference out of sync with monada-script.\n  \
+             registered but undocumented: {undocumented:?}\n  \
+             documented but not registered: {phantom:?}"
+        );
+    }
 }

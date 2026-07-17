@@ -9,8 +9,13 @@ the example harness `monada_oracle::run_example_map` + the
 CI (mdbook build on PR + master, deploy to Pages on master); mdbook
 in the flake devshell. Deferred: mdbook-linkcheck (multi-backend
 output-path friction — add once verifiable), the API-reference
-coverage check (ch. 11 / CI job 3), and fleshing out chapters
-4, 6, 8–11. Chapter 7 (input) is written, with a second runnable
+fleshing out chapters 4, 6, 8–10. Chapter 11 (API reference) is
+written — every registered host function, grouped by layer — and the
+`api_reference_matches_registered_functions` test in monada-oracle
+diffs it against the `register_fn` names monada-script actually
+registers, so adding or removing a host function fails CI until the
+reference is updated to match (Phase 1 of §2's coverage strategy; the
+Phase-2 generator stays optional). Chapter 7 (input) is written, with a second runnable
 example (`book/examples/02-top-down-mover`) demonstrating declared
 actions, the local layer (`local_tick` + `action` + `pick_ground`),
 and the command handler. Chapter 5 (the determinism contract) is
