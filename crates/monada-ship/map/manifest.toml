@@ -1,0 +1,22 @@
+# A spaceship crew-sim demo map — the frame for monada's third-person view +
+# per-crew visibility seams (docs/plans/ship-visibility.md). Manifest schema:
+# monada_format::Manifest.
+name = "monada ship demo"
+engine_version = "0.0.1"
+# Co-op: crew members over LAN lockstep (--listen host = player 0, --connect
+# client = player 1). Runs solo too (no flag = hotseat player 0).
+players = 2
+# Real-time: the sim advances on a fixed 30 Hz clock; the map's local layer
+# (`local_tick`) assembles one per-tick input command per local player from
+# the declared actions below.
+sim_hz = "30hz"
+script_runtime = "rhai"
+entry = "scripts/main.rhai"
+
+# Rebindable input actions (docs/plans/input-bindings.md). S-A only needs
+# movement; later slices add interact / use / etc.
+[[action]]
+id = "move"
+kind = "axis2"
+default = { up = "KeyW", down = "KeyS", left = "KeyA", right = "KeyD" }
+label = { en = "Move" }
