@@ -61,7 +61,8 @@ use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::Camera;
 // egui itself comes through roxlap-render's re-export so the version
 // matches the one `paint_egui` rasterises with.
-use roxlap_render::{egui, FrameParams, RenderOptions, SceneRenderer};
+use roxlap_formats::Rgb;
+use roxlap_render::{egui, BackendPreference, FrameParams, RenderOptions, SceneRenderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -89,7 +90,7 @@ const VERB_INPUT: u32 = 0;
 const BTN_ATTACK: u64 = 1 << 0;
 const BTN_DODGE: u64 = 1 << 1;
 /// Packed `0x00RRGGBB` sky / clear colour.
-const SKY_COLOR: u32 = 0x0099_B3D9;
+const SKY_COLOR: Rgb = Rgb(0x0099_B3D9);
 
 /// Camera control rates (per second of held input).
 const YAW_RATE: f64 = 1.4;
@@ -1657,27 +1658,15 @@ impl App {
         let hud = self.run_hud(&window);
 
         let settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
-        let frame = FrameParams {
-            settings: &settings,
-            sky_color: SKY_COLOR,
-            sky: None,
-            fog_color: 0,
-            fog_max_scan_dist: 0,
-            treat_z_max_as_air: true,
-            gpu_mip_scan_dist: 64.0,
-            // Enough chunk steps for the GPU marcher to reach the ground
-            // grid; 0 renders nothing.
-            gpu_max_outer_steps: 64,
-            gpu_fov_y_rad: 1.2,
-            // Sprites are flat-lit on both backends in roxlap 0.19; just the
-            // on/off opt-in for the circle scene's movers.
-            draw_sprites: true,
-            // Per-face grid shading. Flat for the circle scene; the map
-            // paths override this from their declared sun.
-            side_shades: [0; 6],
-            // Dynamic lighting (GPU-only sun + point lights) — unused here.
-            lights: None,
-        };
+        // roxlap 0.30: `FrameParams` is `#[non_exhaustive]` — build from `new`
+        // and override. The GPU step budget + FOV are now derived from the scan
+        // distance + projection (backends can no longer disagree), and the mip
+        // scan distance moved to `RenderOptions`; the circle scene keeps the
+        // defaults. Sprites are flat-lit on both backends — `draw_sprites` is
+        // the on/off opt-in for the movers; `side_shades` stays flat here (the
+        // map paths override it from their declared sun).
+        let mut frame = FrameParams::new(&settings);
+        frame.sky_color = SKY_COLOR;
 
         let Some(renderer) = self.renderer.as_mut() else {
             return;
@@ -1724,9 +1713,16 @@ impl ApplicationHandler for App {
         // GPU (wgpu) backend by default; roxlap-render falls back to CPU
         // automatically if init fails. Set `ROXLAP_GPU=0` to force the CPU
         // backend (e.g. a headless box or a flaky driver).
+        // roxlap 0.30: `want_gpu: bool` became `backend: BackendPreference`
+        // (`PreferGpu` = try GPU, warn + fall back to CPU on init failure;
+        // `Cpu` = force software).
         let want_gpu = std::env::var_os("ROXLAP_GPU").map_or(true, |v| v != "0" && !v.is_empty());
         let opts = RenderOptions {
-            want_gpu,
+            backend: if want_gpu {
+                BackendPreference::PreferGpu
+            } else {
+                BackendPreference::Cpu
+            },
             ..RenderOptions::default()
         };
         // roxlap-render is now decoupled from winit: it takes any

@@ -12,6 +12,7 @@ use roxlap_core::draw_sprite_dda;
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_formats::kv6::Kv6;
 use roxlap_formats::sprite::Sprite;
+use roxlap_formats::VoxColor;
 
 /// Draw one cube sprite at world `pos` and return `(pixels_written,
 /// bbox_center)`.
@@ -21,7 +22,7 @@ fn draw_at(pos: [f32; 3]) -> (u32, (u32, u32)) {
     let cam = OrbitCamera::framing(DVec3::new(0.0, 0.0, 100.0)).to_roxlap();
     let cam_state = camera_math::derive(&cam, w, h, settings.hx, settings.hy, settings.hz);
 
-    let sprite = Sprite::axis_aligned(Kv6::solid_cube(10, 0x80FF_6B35), pos);
+    let sprite = Sprite::axis_aligned(Kv6::solid_cube(10, VoxColor(0x80FF_6B35)), pos);
 
     let mut fb = vec![0u32; (w * h) as usize];
     let mut zb = vec![f32::INFINITY; (w * h) as usize];

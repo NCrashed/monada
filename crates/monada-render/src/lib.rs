@@ -27,6 +27,7 @@ use monada_fixed::FixedVec3;
 use roxlap_core::Camera;
 use roxlap_formats::kv6::Kv6;
 use roxlap_formats::sprite::{Sprite, SPRITE_FLAG_NO_SHADING};
+use roxlap_formats::VoxColor;
 use roxlap_render::{SpriteInstanceDesc, SpriteSet};
 use roxlap_scene::{Grid, GridTransform, Scene};
 
@@ -98,7 +99,8 @@ impl CircleScene {
         // One flat-shaded cube model per palette colour, plus a bright
         // "selected" model (index HIGHLIGHT_MODEL) for picking.
         let cube_sprite = |col: u32, edge: u32| {
-            let mut sprite = Sprite::axis_aligned(Kv6::solid_cube(edge, col), [0.0, 0.0, 0.0]);
+            let mut sprite =
+                Sprite::axis_aligned(Kv6::solid_cube(edge, VoxColor(col)), [0.0, 0.0, 0.0]);
             // Show the raw bright palette colour rather than relying on a
             // lighting bake for this visibility-first slice.
             sprite.flags = SPRITE_FLAG_NO_SHADING;
@@ -300,7 +302,7 @@ fn checker_ground(grid: &mut Grid, center: DVec3) {
             let y0 = cy - GROUND_HALF + ty * TILE;
             let lo = glam::IVec3::new(x0, y0, cz);
             let hi = glam::IVec3::new(x0 + TILE - 1, y0 + TILE - 1, cz + 1);
-            grid.set_rect(lo, hi, Some(color));
+            grid.set_rect(lo, hi, Some(VoxColor(color)));
         }
     }
 }

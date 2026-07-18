@@ -33,6 +33,7 @@ use roxlap_core::Camera;
 use roxlap_formats::kv6::{self, Kv6};
 use roxlap_formats::sprite::{Sprite, SPRITE_FLAG_NO_SHADING};
 use roxlap_formats::voxel_clip::{DecodedClip, LoopMode};
+use roxlap_formats::{OverlayColor, Rgb, VoxColor};
 use roxlap_render::gif_import::{voxel_clip_from_gif, GifImportOpts};
 use roxlap_render::{
     ActorState, BillboardActorDef, BillboardActorId, BillboardMode, FrameParams, Line3,
@@ -177,7 +178,8 @@ enum ModelRef {
 /// once, on the first frame that has a [`SceneRenderer`].
 struct ActorModel {
     /// `(state name, 8 directional clips)`; the name is interned `'static`
-    /// because roxlap's [`ActorState`] holds `&'static str`.
+    /// here and cloned into the owned `String` roxlap's [`ActorState`] holds
+    /// (since roxlap 0.30 — `ActorState.name` was `&'static str` before).
     states: Vec<(&'static str, Vec<DecodedClip>)>,
     /// `(state name, 8 registered clip ids)`, filled once the renderer
     /// exists. A fresh [`BillboardActorDef`] is rebuilt from these per entity
@@ -195,7 +197,7 @@ fn actor_def(registered: &[(&'static str, Vec<VoxelClipId>)]) -> BillboardActorD
         states: registered
             .iter()
             .map(|(name, ids)| ActorState {
-                name,
+                name: (*name).to_string(),
                 dirs: ids.clone(),
             })
             .collect(),
@@ -289,7 +291,7 @@ struct ActorInst {
 /// shading on (pieces, lit by the map's sun); `false` flags it flat (UI
 /// markers that should read at constant brightness).
 fn sprite_box(w: u32, h: u32, d: u32, color: u32, shaded: bool) -> Sprite {
-    let mut s = Sprite::axis_aligned(Kv6::solid_box(w, h, d, color), [0.0, 0.0, 0.0]);
+    let mut s = Sprite::axis_aligned(Kv6::solid_box(w, h, d, VoxColor(color)), [0.0, 0.0, 0.0]);
     if !shaded {
         s.flags = SPRITE_FLAG_NO_SHADING;
     }
@@ -811,20 +813,23 @@ impl MapRender {
                         inst.applied_anim = inst.anim;
                     }
                     if inst.tint != inst.applied_tint {
-                        renderer.set_actor_tint(id, inst.tint);
+                        renderer.set_actor_tint(id, Rgb(inst.tint));
                         inst.applied_tint = inst.tint;
                     }
                 }
                 None => {
                     if let Some(reg) = self.actors.get(ai).and_then(|a| a.registered.as_ref()) {
-                        let id = renderer.add_billboard_actor(actor_def(reg), pos, yaw);
-                        renderer.set_actor_state(id, inst.anim);
-                        if inst.tint != WHITE_TINT {
-                            renderer.set_actor_tint(id, inst.tint);
+                        // roxlap 0.30: `add_billboard_actor` returns `None` for a
+                        // malformed def (no states / empty dirs); skip if so.
+                        if let Some(id) = renderer.add_billboard_actor(actor_def(reg), pos, yaw) {
+                            renderer.set_actor_state(id, inst.anim);
+                            if inst.tint != WHITE_TINT {
+                                renderer.set_actor_tint(id, Rgb(inst.tint));
+                            }
+                            inst.id = Some(id);
+                            inst.applied_anim = inst.anim;
+                            inst.applied_tint = inst.tint;
                         }
-                        inst.id = Some(id);
-                        inst.applied_anim = inst.anim;
-                        inst.applied_tint = inst.tint;
                     }
                 }
             }
@@ -861,7 +866,7 @@ impl MapRender {
         renderer: &mut SceneRenderer,
         camera: &Camera,
         settings: &OpticastSettings,
-        sky_color: u32,
+        sky_color: Rgb,
         dt: f64,
         debug: bool,
     ) {
@@ -884,24 +889,16 @@ impl MapRender {
             self.sprites_uploaded = true;
         }
         self.update_actors(renderer, camera, dt);
-        let frame = FrameParams {
-            settings,
-            sky_color,
-            sky: self.sky.as_ref(), // CPU backend sky panorama
-            fog_color: 0,
-            fog_max_scan_dist: 0,
-            treat_z_max_as_air: true,
-            gpu_mip_scan_dist: 64.0,
-            gpu_max_outer_steps: 64,
-            gpu_fov_y_rad: 1.2,
-            // Sprites are flat-lit on both backends in roxlap 0.19; this is
-            // just the on/off opt-in.
-            draw_sprites: true,
-            side_shades: self.side_shades,
-            // Dynamic lighting (GPU-only sun + point lights) — unused by the
-            // static-sprite maps; the map's sun is expressed via side_shades.
-            lights: None,
-        };
+        // roxlap 0.30: `FrameParams` is `#[non_exhaustive]` — build from
+        // `new` and override. The GPU mip/step/FOV knobs moved off the frame
+        // (mip-scan → `RenderOptions`; step budget + FOV are now derived from
+        // the scan distance + projection so the backends can't disagree).
+        let mut frame = FrameParams::new(settings);
+        frame.sky_color = sky_color;
+        frame.sky = self.sky.as_ref(); // CPU backend sky panorama
+                                       // Sprites are flat-lit on both backends; this is just the on/off opt-in.
+        frame.draw_sprites = true;
+        frame.side_shades = self.side_shades;
         renderer.render(&mut self.scene, camera, &frame);
 
         if debug {
@@ -918,8 +915,8 @@ impl MapRender {
         // map's `clear()` radius (`ratio(40, 100)` = 0.4 cell). Debug-only: the
         // engine can't know a map's collision shape, so this matches the demo.
         const R: f64 = 0.4 * SCALE;
-        let box_col = 0xFF00_FF00; // green footprint
-        let stalk_col = 0xFF00_FFFF; // cyan anchor stalk
+        let box_col = OverlayColor(0xFF00_FF00); // green footprint
+        let stalk_col = OverlayColor(0xFF00_FFFF); // cyan anchor stalk
         let mut lines = Vec::with_capacity(self.actor_targets.len() * 5);
         for &(_, ai, pos, _) in &self.actor_targets {
             // The target pos includes the model's `model_drop`; the collision
@@ -1219,7 +1216,7 @@ impl HostBridge for MapRender {
             (g - z0) as i32,
         );
         if let Some(grid) = self.scene.grid_mut(self.grid) {
-            grid.set_rect(lo, hi, Some(color as u32));
+            grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
         }
     }
 
@@ -1233,7 +1230,7 @@ impl HostBridge for MapRender {
             (GROUND_Z as i64 - z) as i32,
         );
         if let Some(grid) = self.scene.grid_mut(self.grid) {
-            grid.set_voxel(pos, Some(color as u32));
+            grid.set_voxel(pos, Some(VoxColor(color as u32)));
         }
     }
 
@@ -1293,7 +1290,10 @@ impl HostBridge for MapRender {
                         let wx = (-cx * s - 1 - lx) as i32;
                         let wy = (cy * s + ly) as i32;
                         for z in z0.min(z1)..=z0.max(z1) {
-                            grid.set_voxel(IVec3::new(wx, wy, (g - z) as i32), Some(color));
+                            grid.set_voxel(
+                                IVec3::new(wx, wy, (g - z) as i32),
+                                Some(VoxColor(color)),
+                            );
                         }
                     }
                 }
@@ -1348,7 +1348,7 @@ impl HostBridge for MapRender {
         autotiler.paint(x0, y0, x1, y1, base_type, |fx, fy, color| {
             grid.set_voxel(
                 IVec3::new((-fx - 1) as i32, fy as i32, g as i32),
-                Some(color),
+                Some(VoxColor(color)),
             );
         });
     }

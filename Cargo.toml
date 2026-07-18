@@ -53,20 +53,26 @@ monada-voxvideo = { path = "crates/monada-voxvideo", version = "0.0.1" }
 monada-physics = { path = "crates/monada-physics", version = "0.0.1" }
 monada-format = { path = "crates/monada-format", version = "0.0.1" }
 
-# roxlap voxel engine 0.20.0 (crates.io, CI-safe). Keeps the 0.19
-# billboard-actor API the RPG demo needs (GIF-imported 8-direction animated
-# cutouts: roxlap-formats `gif` → roxlap-render `add_billboard_actor` /
+# roxlap voxel engine 0.30.0 (crates.io, CI-safe). Keeps the billboard-actor
+# API the RPG demo needs (GIF-imported 8-direction animated cutouts:
+# roxlap-formats `gif` → roxlap-render `add_billboard_actor` /
 # `update_billboard_actors`, renderer auto-picking the facing sprite from
-# camera bearing vs the actor's yaw). 0.20 adds fixed render-resolution
-# (`SceneRenderer::set_render_resolution` — the marcher's cost stops tracking
-# window size, making the GPU backend viable as the default) and the clean
-# GPU teardown (`wait_idle`) monada now drives on exit. Still the unified
+# camera bearing vs the actor's yaw). The 0.21→0.30 bump (QE series) is
+# type-tightening, not behaviour: packed colours became the `VoxColor` /
+# `Rgb` / `OverlayColor` newtype family (`0xBB_RR_GG_BB` brightness vs plain
+# RGB vs real-alpha overlay — a mix-up is now a compile error, not an
+# over-bright voxel); `FrameParams` went `#[non_exhaustive]` (build via
+# `FrameParams::new` + field overrides) with the GPU step budget / FOV now
+# derived from scan distance + projection and the mip-scan distance moved to
+# `RenderOptions`; `RenderOptions.want_gpu: bool` became
+# `backend: BackendPreference`; and `add_billboard_actor` returns `Option`.
+# Oracle goldens are byte-identical across the bump. Still the unified
 # SceneRenderer facade over CPU/GPU. crates.io rather than the sibling path so
 # the author's in-progress roxlap working copy doesn't perturb monada's build.
-roxlap-core = "0.21.0"
-roxlap-render = "0.21.0"
-roxlap-scene = "0.21.0"
-roxlap-formats = "0.21.0"
+roxlap-core = "0.30.0"
+roxlap-render = "0.30.0"
+roxlap-scene = "0.30.0"
+roxlap-formats = "0.30.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

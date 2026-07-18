@@ -16,6 +16,7 @@
 use std::path::Path;
 
 use roxlap_formats::kv6::{serialize, Kv6};
+use roxlap_formats::VoxColor;
 
 /// `kind` order matches the script: pawn, knight, bishop, rook, queen,
 /// king. The height reads the piece's rank, exactly as `model_box` did.
@@ -37,7 +38,7 @@ fn main() -> std::io::Result<()> {
 
     for (kind, height) in KINDS {
         for (color, col) in COLORS {
-            let kv6 = Kv6::solid_box(10, 10, height, col);
+            let kv6 = Kv6::solid_box(10, 10, height, VoxColor(col));
             let path = out.join(format!("{kind}_{color}.kv6"));
             std::fs::write(&path, serialize(&kv6))?;
             println!("wrote {}", path.display());
