@@ -248,12 +248,20 @@ The slice-1 API is chosen so these are additive, not reshapes:
   z-down translation is the fiddly bit; get it wrong and the deck clip or
   vision deck-index is off by a band. Isolate it in one host helper with a
   unit test.
-- **Deck-relative collision (S-B).** S-A's `blocked()` in `main.rhai`
-  hardcodes the single deck's wall layer (`voxel_solid(cx, cy, 1)`). With
-  two decks, collision must query the *mover's* deck z-band, not a fixed z,
-  or upper-deck movement reads the lower deck's walls — the same
-  off-by-a-band trap as above, at the script layer. Thread the mover's deck
-  into `blocked`/`clear`/`try_move` in S-B (a `blocked(cx, cy, deck_z)`).
+- **Deck-relative collision (S-B, done) + a real engine gap.** S-A's
+  `blocked()` read a fixed wall layer (`voxel_solid(cx, cy, 1)`); S-B threads
+  the mover's deck through `blocked`/`clear`/`try_move` and seats on the
+  deck's floor. But the deeper finding: monada's collision store
+  (`VoxelStore` in monada-script) is a **single heightmap** — a column is
+  solid from its floor up to its top voxel — so it **cannot represent air
+  below a floor**. Painting the upper deck's plate makes `voxel_solid` true
+  across the whole lower deck. So S-B collides against a **script-side wall
+  predicate** instead of `voxel_solid`, kept in sync with what `build_hull`
+  paints. roxlap already models decks (`DeckBand`, `FowObserver.eye_z`); the
+  gap is on monada's side. **Engine TODO (pre-SS13):** a multi-deck / voxel-
+  set collision primitive — e.g. per-deck heightmaps, or a sparse solid-voxel
+  set — so `voxel_solid(x, y, z)` answers truthfully with stacked floors.
+  Doors (`voxel_clear`) and the FoW deck index will want the same model.
 - **GPU FoW residency.** `gpu.rs` warns if `FrameParams::fow` names a
   grid not resident on the GPU. Confirm the ship grid registers before the
   first FoW frame (it should — it is the scene's only grid); otherwise

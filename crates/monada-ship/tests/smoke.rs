@@ -1,9 +1,19 @@
-//! S-A canary for the ship demo: load the rules from the packed `map/`
-//! archive under a [`TerrainBridge`] (so `voxel_fill` paints collidable hull
-//! and `voxel_solid`/`ground_height` answer, while render calls — actor, anim,
-//! camera — are no-ops), then drive the real-time input + tick path and assert
-//! the crew member spawns, walks, and can't leave the hull. Mirrors
-//! monada-rpg's `gameplay.rs`; the seed of the future `ship@` oracle golden.
+//! S-B canary for the ship demo: load the rules from the packed `map/`
+//! archive under a [`TerrainBridge`] (render calls — actor, anim, camera, sky —
+//! are no-ops), then drive the real-time input + tick path and assert the crew
+//! member spawns, walks, is contained by the hull, crosses decks at the stair,
+//! and — the point of S-B — collides DECK-RELATIVELY. (Wall collision is a
+//! script-side predicate, not `voxel_solid`: monada's heightmap store can't
+//! represent stacked decks — see `main.rhai`'s `blocked`.) Mirrors monada-rpg's
+//! `gameplay.rs`; the seed of the future `ship@` oracle golden.
+//!
+//! The navigation tests assume the script's default `cam_yaw` (0.8): with it,
+//! `input(1, -1)` is very nearly pure +x (east) and `input(1, 1)` very nearly
+//! pure +y (north). If `cam_yaw` changes, revisit the input vectors here.
+
+// The `deck` field is a small integer stored as fixed-point; reading it back
+// as i64 through f64 is exact for the 0/1 values here.
+#![allow(clippy::cast_possible_truncation)]
 
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +43,7 @@ fn fresh() -> (SharedWorld, RhaiBackend) {
     let world = shared_world(SEED);
     let mut backend = RhaiBackend::new(world.clone());
     // TerrainBridge: `init`'s voxel paints fill a real collision store; the
-    // actor / anim / camera calls are no-ops headlessly.
+    // actor / anim / camera / sky calls are no-ops headlessly.
     let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
     backend.set_bridge(&bridge);
     backend.load(&script()).expect("compile main.rhai");
@@ -41,7 +51,7 @@ fn fresh() -> (SharedWorld, RhaiBackend) {
     (world, backend)
 }
 
-/// One real-time input command: a move axis (buttons unused in S-A).
+/// One real-time input command: a move axis (buttons unused in S-B).
 fn input(mx: i32, my: i32) -> Command {
     Command::on(
         VERB_INPUT,
@@ -55,6 +65,13 @@ fn step(b: &mut RhaiBackend, cmd: &Command) {
     b.on_tick().expect("tick");
 }
 
+/// Drive one held input for `n` ticks.
+fn hold(b: &mut RhaiBackend, mx: i32, my: i32, n: usize) {
+    for _ in 0..n {
+        step(b, &input(mx, my));
+    }
+}
+
 fn count(world: &SharedWorld, arch: ArchetypeId) -> usize {
     world.lock().unwrap().count(arch)
 }
@@ -65,59 +82,167 @@ fn crew_pos(world: &SharedWorld) -> FixedVec3 {
     w.position(e).expect("crew has a position")
 }
 
+fn crew_deck(world: &SharedWorld) -> i64 {
+    let w = world.lock().unwrap();
+    let e = w.entities(CREW)[0];
+    w.field(e, "deck").expect("crew has a deck field").to_f64() as i64
+}
+
 #[test]
 fn crew_spawns_on_first_input() {
     let (world, mut b) = fresh();
     assert_eq!(count(&world, CREW), 0, "no crew before any input");
     step(&mut b, &input(0, 0));
     assert_eq!(count(&world, CREW), 1, "first input spawns the local crew");
+    assert_eq!(crew_deck(&world), 0, "crew starts on the lower deck");
 }
 
 #[test]
 fn crew_walks() {
     let (world, mut b) = fresh();
-    step(&mut b, &input(0, 0)); // spawn at (8, 10)
+    step(&mut b, &input(0, 0)); // spawn at (5, 4)
     let start = crew_pos(&world);
-    // Hold a movement axis for a while; the crew member should travel.
-    for _ in 0..30 {
-        step(&mut b, &input(1, 0));
-    }
+    hold(&mut b, 1, 0, 30); // hold a movement axis; the crew should travel
     let end = crew_pos(&world);
     let moved = (end.x - start.x).to_f64().abs() + (end.y - start.y).to_f64().abs();
-    assert!(moved > 1.0, "crew moved under sustained input (was {moved})");
+    assert!(
+        moved > 1.0,
+        "crew moved under sustained input (was {moved})"
+    );
 }
 
 #[test]
 fn hull_walls_contain_the_crew() {
     let (world, mut b) = fresh();
     step(&mut b, &input(0, 0)); // spawn
-    // Shove toward the +x wall for far longer than it takes to reach it.
-    for _ in 0..400 {
-        step(&mut b, &input(1, 0));
-    }
+                                // Shove around for far longer than it takes to reach any wall.
+    hold(&mut b, 1, 0, 400);
     let p = crew_pos(&world);
-    // Walkable interior is cells [1, 18]; the footprint radius keeps the
-    // centre short of the rim wall. It must not have escaped the hull.
+    // Walkable interior is cells [1, 18]; the footprint radius keeps the centre
+    // short of the rim wall on every axis. It must not have escaped the hull.
+    let x = p.x.to_f64();
+    let y = p.y.to_f64();
     assert!(
-        p.x.to_f64() < 18.5,
-        "crew stayed inside the east hull wall (x = {})",
-        p.x.to_f64()
+        x > 0.5 && x < 18.5,
+        "crew stayed within the hull in x (x = {x})"
+    );
+    assert!(
+        y > 0.5 && y < 18.5,
+        "crew stayed within the hull in y (y = {y})"
     );
     assert_eq!(count(&world, CREW), 1, "no crew lost");
 }
 
 #[test]
+fn stair_run_changes_deck() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0)); // spawn on the lower deck (deck 0, z 0)
+    assert_eq!(crew_deck(&world), 0);
+    // Walk east (≈ +x) into the starboard stair run; the rising edge flips the
+    // deck and reseats onto the upper floor (z = 4).
+    hold(&mut b, 1, -1, 120);
+    assert_eq!(crew_deck(&world), 1, "reached the stair run → upper deck");
+    let z = crew_pos(&world).z.to_f64();
+    assert!(
+        (z - 4.0).abs() < 0.01,
+        "reseated on the upper deck floor (z=4, was {z})"
+    );
+}
+
+#[test]
+fn lower_divider_blocks_on_its_deck() {
+    // Control: on the lower deck, the y=10 divider blocks a northward walk
+    // (except through the doorway) — so the wall genuinely exists.
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0)); // spawn (5, 4), lower deck, away from the doorway
+    hold(&mut b, 1, 1, 120); // ≈ +y (north) into the divider
+    assert_eq!(crew_deck(&world), 0, "stayed on the lower deck");
+    let y = crew_pos(&world).y.to_f64();
+    assert!(
+        y < 10.0,
+        "lower-deck divider stopped the crew short of y=10 (y = {y})"
+    );
+}
+
+#[test]
+fn upper_deck_ignores_the_lower_wall() {
+    // The point of deck-relative collision: on the UPPER deck the crew crosses
+    // y=10 freely at x≥16, where the LOWER deck has divider walls. A deck-blind
+    // check would stop it there.
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0)); // spawn
+    hold(&mut b, 1, -1, 120); // east into the stair run → upper deck
+    assert_eq!(crew_deck(&world), 1, "on the upper deck");
+    hold(&mut b, 1, 1, 120); // ≈ +y (north), staying at x≈18 (still in the run)
+    assert_eq!(
+        crew_deck(&world),
+        1,
+        "still upper (latched in the stair run)"
+    );
+    let y = crew_pos(&world).y.to_f64();
+    assert!(
+        y > 11.0,
+        "upper deck crossed y=10 where the lower deck is walled (y = {y})"
+    );
+}
+
+#[test]
 fn deterministic_walk() {
-    // Same seed + same inputs → identical crew position (the lockstep contract;
+    // Same seed + same inputs → identical crew pose (the lockstep contract;
     // TerrainBridge is deterministic and render calls are no-ops).
     let run = || {
         let (world, mut b) = fresh();
         step(&mut b, &input(0, 0));
-        for i in 0..40 {
+        for i in 0..60 {
             step(&mut b, &input(1, i32::from(i % 2 == 0)));
         }
         let p = crew_pos(&world);
-        (p.x.to_bits(), p.y.to_bits())
+        (
+            p.x.to_bits(),
+            p.y.to_bits(),
+            p.z.to_bits(),
+            crew_deck(&world),
+        )
     };
     assert_eq!(run(), run(), "identical inputs reproduce the crew's path");
+}
+
+#[test]
+fn stair_flip_at_divider_row_is_not_a_soft_lock() {
+    // Regression: crossing the stair run on the UPPER deck at y≈10 flips to the
+    // LOWER deck, whose y=10 divider runs right there. The flip must land the
+    // crew on clear floor (open stair column + landing guard/retry), NOT inside
+    // the divider — else it seats in a wall and soft-locks (moved == 0). The
+    // deck-relative / stair tests above cross at y≈4 and miss this row.
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0));
+    hold(&mut b, 1, -1, 120); // E: into the run → onto the upper deck
+    assert_eq!(crew_deck(&world), 1, "reached the upper deck");
+    hold(&mut b, -1, 1, 70); // W: pin against the upper (x=10) divider, out of the run
+    hold(&mut b, 1, 1, 39); // N: climb to y≈10
+                            // Re-enter the run heading east; catch the down-flip on the divider row.
+    let mut flip_y = None;
+    for _ in 0..60 {
+        let before = crew_deck(&world);
+        step(&mut b, &input(1, -1));
+        if crew_deck(&world) != before {
+            flip_y = Some(crew_pos(&world).y.to_f64());
+        }
+    }
+    assert_eq!(crew_deck(&world), 0, "flipped back down to the lower deck");
+    let fy = flip_y.expect("crew flipped decks in the run");
+    assert!(
+        (9.0..=11.0).contains(&fy),
+        "flip exercised the lower divider row (y = {fy})"
+    );
+    // The crux: having landed on the lower deck at the divider row, the crew can
+    // still move — it did NOT seat inside the divider.
+    let before = crew_pos(&world);
+    hold(&mut b, 1, 1, 30);
+    let after = crew_pos(&world);
+    let moved = (after.x - before.x).to_f64().abs() + (after.y - before.y).to_f64().abs();
+    assert!(
+        moved > 0.5,
+        "crew is not soft-locked after the flip (moved = {moved})"
+    );
 }

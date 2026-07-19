@@ -1670,6 +1670,7 @@ dependencies = [
 name = "monada-ship"
 version = "0.0.1"
 dependencies = [
+ "image",
  "monada-fixed",
  "monada-format",
  "monada-host",

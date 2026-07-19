@@ -37,6 +37,8 @@ monada-format = { workspace = true }
 monada-script = { workspace = true }
 monada-sim = { workspace = true }
 monada-fixed = { workspace = true }
+# `examples/gen_sky.rs` writes the committed starfield panorama PNG.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true

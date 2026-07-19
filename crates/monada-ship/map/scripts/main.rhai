@@ -1,11 +1,18 @@
-//! The spaceship crew-sim demo — S-A skeleton, entirely in the map.
+//! The spaceship crew-sim demo — S-B two-deck hull, entirely in the map.
 //!
-//! The engine knows no genre: this script paints a voxel hull, defines an
-//! animated billboard "crew" actor (reusing the RPG hero GIFs), and walks it
-//! around on the deterministic fixed-point sim. The host injects one real-time
-//! input command per tick (verb 0): `arg = vec3(move_x, move_y, 0)`. Render
-//! calls (`entity_set_anim`, `entity_set_facing`, `camera_focus`) never touch
-//! the hashed world, so they can't desync a peer.
+//! The engine knows no genre: this script paints a two-deck voxel hull,
+//! defines an animated billboard "crew" actor (reusing the RPG hero GIFs), and
+//! walks it around each deck on the deterministic fixed-point sim, crossing
+//! decks at the starboard stair run. The host injects one real-time input
+//! command per tick (verb 0): `arg = vec3(move_x, move_y, 0)`. Render calls
+//! (`entity_set_anim`, `entity_set_facing`, `camera_focus`) never touch the
+//! hashed world, so they can't desync a peer.
+//!
+//! Collision is DECK-RELATIVE (see the `decks` section): the crew tracks which
+//! deck it stands on and tests only that deck's walls, so the stacked floor
+//! slabs don't confuse seating and the upper deck never hits lower walls. NB
+//! walls are a script-side predicate, not `voxel_solid` — monada's heightmap
+//! collision store can't represent air below a floor (see `blocked`).
 //!
 //! Later slices bolt the roxlap-0.30 view/visibility seams onto this frame:
 //! wall cutout, deck clip, fog of war (docs/plans/ship-visibility.md).
@@ -81,19 +88,52 @@ fn cam_relative(rx, fy) {
     vec3(rx * s - fy * c, fy * s + rx * c, fixed(0))
 }
 
-/// Is sim cell `(cx, cy)` a hull wall / out of bounds?
+// --- decks --------------------------------------------------------------
+// The hull stacks two decks as sim-z bands (height-up: `voxel_fill` maps
+// height z → world g − z). Because the two floor slabs are BOTH solid, a
+// naive `ground_height` (highest solid z) would always snap a crew member to
+// the UPPER floor — so the crew tracks its deck as sim state and collision /
+// seating is deck-relative. This is the off-by-a-band trap from the plan's
+// Open Questions, resolved by threading the deck through the whole path
+// rather than reading a fixed z.
+//
+//   deck 0 (lower): floor slab z=0, walls z 1..3 (collision layer z=1)
+//   deck 1 (upper): floor slab z=4, walls z 5..7 (collision layer z=5)
+
+/// The floor sim-z a crew member on `deck` stands on.
+fn deck_floor(deck) { if deck == 0 { 0 } else { 4 } }
+
+/// Is sim cell `(cx, cy)` a hull wall / out of bounds *on `deck`*?
 ///
-/// S-A is a single deck, so this reads the one wall layer at z = 1. **S-B
-/// TODO:** with two decks the query must use the *mover's* deck z-band (pass
-/// it in), else a crew member on the upper deck would collide against the
-/// lower deck's walls — the off-by-a-band risk flagged in the plan's Open
-/// Questions (docs/plans/ship-visibility.md).
-fn blocked(cx, cy) {
+/// NB collision here is a script-side predicate, NOT a `voxel_solid` query.
+/// monada's collision store (`VoxelStore`) is a single HEIGHTMAP — a column is
+/// solid from the floor up to its top voxel — so it cannot represent air below
+/// a floor: painting the upper deck's plate at z=4 makes `voxel_solid(x, y, 1)`
+/// true across the WHOLE lower deck (everything "below the top"). Stacked
+/// walkable decks need a voxel-set / per-deck collision primitive the engine
+/// doesn't have yet (see the plan's Open Questions — a real S-C+ engine gap;
+/// roxlap already models decks via `DeckBand`, monada's collision does not).
+/// Until then the map owns its wall layout as this predicate, kept in sync
+/// with what `build_hull` paints for the eye.
+fn blocked(cx, cy, deck) {
     if cx < 1 || cy < 1 || cx > 18 || cy > 18 {
-        return true;
+        return true; // rim / out of bounds, both decks
     }
-    voxel_solid(cx, cy, 1)
+    if deck == 0 {
+        // Lower deck: divider along y=10 — doorway gap at x 9..10, and open
+        // over the starboard stair run (x≥16) so a flip lands clear there.
+        cy == 10 && cx != 9 && cx != 10 && cx <= 15
+    } else {
+        // Upper deck: divider along x=10, doorway gap at y 9..10.
+        cx == 10 && cy != 9 && cy != 10
+    }
 }
+
+/// The starboard "stair run" (`cx ≥ 16`) linking the two decks: stepping into
+/// it flips the crew's deck (see `step_crew`). S-B places it as a zone for a
+/// robust, navigation-tolerant transition; a proper walled stairwell with a
+/// doorway lands in a later slice.
+fn is_stair(cx, cy) { cx >= 16 }
 
 /// Sim position → the cell index it falls in. Integer sim coords are cell
 /// CENTRES (`world_of` seats a sprite at `-(x+0.5)·SCALE`), so a position
@@ -102,46 +142,41 @@ fn blocked(cx, cy) {
 fn cell(v) { to_int(v + ratio(1, 2)) }
 
 /// Whether a mover's footprint — a small box of radius `r` around `(px, py)`
-/// — is clear of walls. Checking the four corners stops the body before it
-/// overlaps a wall, so a ~1-cell-wide crew member can't clip through it.
-fn clear(px, py) {
+/// — is clear of walls on `deck`. Checking the four corners stops the body
+/// before it overlaps a wall, so a ~1-cell-wide crew member can't clip through.
+fn clear(px, py, deck) {
     let r = ratio(40, 100);
-    !(blocked(cell(px - r), cell(py - r))
-        || blocked(cell(px + r), cell(py - r))
-        || blocked(cell(px - r), cell(py + r))
-        || blocked(cell(px + r), cell(py + r)))
+    !(blocked(cell(px - r), cell(py - r), deck)
+        || blocked(cell(px + r), cell(py - r), deck)
+        || blocked(cell(px - r), cell(py + r), deck)
+        || blocked(cell(px + r), cell(py + r), deck))
 }
 
-/// Move entity `e` by `(vx, vy)`, axis-separated so it slides along walls,
-/// and reseat it on the ground.
-fn try_move(e, vx, vy) {
+/// Move entity `e` by `(vx, vy)` on `deck`, axis-separated so it slides along
+/// walls, and reseat it on that deck's floor.
+fn try_move(e, vx, vy, deck) {
     let pos = entity_position(e);
     let nx = pos.x + vx;
-    let fx = if clear(nx, pos.y) { nx } else { pos.x };
+    let fx = if clear(nx, pos.y, deck) { nx } else { pos.x };
     let ny = pos.y + vy;
-    let fy = if clear(fx, ny) { ny } else { pos.y };
-    let gz = ground_height(cell(fx), cell(fy));
-    entity_set_position(e, vec3(fx, fy, fixed(gz)));
+    let fy = if clear(fx, ny, deck) { ny } else { pos.y };
+    entity_set_position(e, vec3(fx, fy, fixed(deck_floor(deck))));
 }
 
 // --- setup --------------------------------------------------------------
 // Archetype id by registration order: CREW = 0. Model id by `model_actor`
 // order: crew = 0.
 fn init() {
-    // Crew: movement intent (ix/iy), last facing yaw. Grows in later slices.
-    archetype(["ix", "iy", "face"]);
+    // Crew: movement intent (ix/iy), last facing yaw, current deck (0 lower /
+    // 1 upper), and `on_stair` (rising-edge latch for the deck transition).
+    archetype(["ix", "iy", "face", "deck", "on_stair"]);
 
     set_light(vec3(ratio(-4, 10), ratio(-3, 10), ratio(8, 10)), ratio(8, 10));
+    // Space outside the hull: a starfield panorama behind the scene. Unpainted
+    // cells (outside the hull) show it. Render-side (headless no-op).
+    set_sky("assets/starfield.png");
 
-    // The hull: a 20×20 metal floor slab at z=0, ringed by rim walls (z 1..3)
-    // so collision has something to bite. `voxel_fill` paints both the visible
-    // voxels AND the collision store (`voxel_solid`/`ground_height`). A single
-    // deck for S-A; the second deck + compartments land in S-B.
-    voxel_fill(0, 0, 0, 19, 19, 0, 0x8055_5f6b); // floor plating (steel grey)
-    voxel_fill(0, 0, 1, 19, 0, 3, 0x8079_8592); // south wall
-    voxel_fill(0, 19, 1, 19, 19, 3, 0x8079_8592); // north wall
-    voxel_fill(0, 0, 1, 0, 19, 3, 0x8079_8592); // west wall
-    voxel_fill(19, 0, 1, 19, 19, 3, 0x8079_8592); // east wall
+    build_hull();
 
     // The animated billboard crew actor (id 0 by call order). The 3rd arg is
     // the rendered height in cells; the host scales the art to it. Reuses the
@@ -155,8 +190,51 @@ fn init() {
     // re-aims it at the local player each tick.
     camera_angle(ratio(8, 10), ratio(10, 10));
     camera_dist(fixed(80));
-    camera_focus(vec3(fixed(10), fixed(10), fixed(0)));
-    status("ship demo (S-A) — WASD to walk the deck");
+    camera_focus(vec3(fixed(6), fixed(4), fixed(0)));
+    status("ship demo (S-B) — WASD to walk; starboard runs the deck stair");
+}
+
+/// Paint the two-deck hull, for the EYE. Collision is the `blocked` predicate
+/// above (the heightmap store can't do stacked decks); keep this layout and
+/// that predicate in sync. A deck is a floor slab + a 3-tall rim wall band; an
+/// interior divider (with a doorway gap) splits each deck into two compartments
+/// joined by the gap — the "corridor". The two decks get perpendicular dividers
+/// so they read distinct.
+fn build_hull() {
+    let plate = 0x8055_5f6b; // steel floor plating
+    let wall = 0x8079_8592; // hull wall
+    let stair = 0x804d_9a8f; // teal marker for the starboard stair run
+
+    // --- deck 0 (lower): floor z=0, walls z 1..3 ---
+    voxel_fill(0, 0, 0, 19, 19, 0, plate);
+    rim_walls(1, wall);
+    // Divider along y=10 splitting fore (y<10) / aft (y>10), doorway gap x 9..10.
+    // It also STOPS before the starboard stair run (ends at x=15, not 18), so the
+    // stair column (x≥16) is open on this deck — a deck flip that reseats a crew
+    // member there always lands on clear floor, not inside the divider.
+    voxel_fill(1, 10, 1, 8, 10, 3, wall);
+    voxel_fill(11, 10, 1, 15, 10, 3, wall);
+
+    // --- deck 1 (upper): floor slab z=4, walls z 5..7 ---
+    voxel_fill(0, 0, 4, 19, 19, 4, plate);
+    rim_walls(5, wall);
+    // Divider along x=10 splitting port (x<10) / starboard (x>10), gap y 9..10.
+    voxel_fill(10, 1, 5, 10, 8, 7, wall);
+    voxel_fill(10, 11, 5, 10, 18, 7, wall);
+
+    // Mark the starboard stair run (cx ≥ 16) on both deck floors so it reads as
+    // the deck link. Purely cosmetic — `is_stair` drives the transition.
+    voxel_fill(16, 1, 0, 18, 18, 0, stair);
+    voxel_fill(16, 1, 4, 18, 18, 4, stair);
+}
+
+/// A 3-tall rim wall band (z `base`..`base+2`) around the 20×20 hull edge.
+fn rim_walls(base, col) {
+    let top = base + 2;
+    voxel_fill(0, 0, base, 19, 0, top, col); // south
+    voxel_fill(0, 19, base, 19, 19, top, col); // north
+    voxel_fill(0, 0, base, 0, 19, top, col); // west
+    voxel_fill(19, 0, base, 19, 19, top, col); // east
 }
 
 /// Spawn crew members lazily as each player's input first arrives (co-op join),
@@ -165,7 +243,11 @@ fn ensure_crew(player) {
     while entities_of(0).len() < player + 1 {
         let idx = entities_of(0).len();
         let c = entity_create(0);
-        entity_set_position(c, vec3(fixed(8 + idx * 2), fixed(10), fixed(0)));
+        // Fore-port on the lower deck (clear of the y=10 divider and the
+        // x≥16 stair run), spread so co-op crew don't stack.
+        entity_set_position(c, vec3(fixed(5 + idx * 2), fixed(4), fixed(0)));
+        entity_set_field(c, "deck", fixed(0));
+        entity_set_field(c, "on_stair", fixed(0));
         entity_set_model(c, 0); // crew actor model
         entity_set_anim(c, "idle");
     }
@@ -200,20 +282,49 @@ fn tick() {
 }
 
 /// Advance one crew member: turn its stored input into a view-relative,
-/// collision-checked move, and pick the walk/idle animation + facing.
+/// collision-checked move on its current deck, handle the deck transition when
+/// it enters the stair run, and pick the walk/idle animation + facing.
 fn step_crew(c) {
+    let deck = to_int(entity_field(c, "deck"));
     let ix = entity_field(c, "ix");
     let iy = entity_field(c, "iy");
     if nonzero(ix) || nonzero(iy) {
         let dir = cam_relative(ix, iy);
         let v = nvel(dir.x, dir.y, crew_speed());
-        try_move(c, v.x, v.y);
+        try_move(c, v.x, v.y, deck);
         entity_set_field(c, "face", dir_yaw(dir.x, dir.y));
         entity_set_facing(c, entity_field(c, "face"));
         entity_set_anim(c, "run");
     } else {
         entity_set_anim(c, "idle");
     }
+
+    // Deck transition. Entering the stair run flips the deck and reseats onto
+    // the new floor. Two safeguards make this soft-lock-proof:
+    //  * LANDING GUARD — flip only if the crew's footprint is CLEAR on the
+    //    target deck, so a transition can never seat it inside a wall.
+    //  * RETRY — the `on_stair` latch (which stops it toggling every tick while
+    //    standing in the run) is set ONLY once a flip actually succeeds. A
+    //    refused attempt — e.g. at the very edge of the run, where the footprint
+    //    still overlaps the divider's end on the target deck — leaves the latch
+    //    off, so the next tick retries as the crew moves deeper into the run and
+    //    the landing clears. So the flip is guaranteed to happen (a tick or two
+    //    in) and can never strand the crew in a wall.
+    let pos = entity_position(c);
+    let was_on_stair = to_int(entity_field(c, "on_stair")) == 1;
+    let in_stair = is_stair(cell(pos.x), cell(pos.y));
+    let flipped = false;
+    if in_stair && !was_on_stair {
+        let nd = 1 - deck;
+        if clear(pos.x, pos.y, nd) {
+            deck = nd;
+            entity_set_field(c, "deck", fixed(deck));
+            entity_set_position(c, vec3(pos.x, pos.y, fixed(deck_floor(deck))));
+            flipped = true;
+        }
+    }
+    let latched = in_stair && (was_on_stair || flipped);
+    entity_set_field(c, "on_stair", fixed(if latched { 1 } else { 0 }));
 }
 
 /// Re-aim the camera at the local player's crew member (or crew 0 in a hotseat
