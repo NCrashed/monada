@@ -946,9 +946,14 @@ impl MapRender {
         // member) so front geometry between eye and focus dissolves. Project the
         // sim-cell radius to logical pixels at the focus distance
         // (`px ≈ world_radius / dist · hz`). `margin` is an xy shell round the
-        // body column (xy is SCALEd, so a half-cell = `SCALE/2`); `z_bias` is a
-        // vertical plane offset in the UNSCALED z (1 unit per sim-z), so a small
-        // few-unit nudge. Numeric feel wants a real-display pass to finalise.
+        // body column (xy is SCALEd, so a half-cell = `SCALE/2`). `z_bias`:
+        // roxlap cuts cells whose grid-z < `floor(focus_z + z_bias/vws)` (vws=1
+        // here). The focus is at the crew's feet, which sit at the floor voxel's
+        // grid-z EXACTLY (unscaled z: `world_of(z)=GROUND_Z-z`, floor voxel at
+        // the same grid-z), so `z_bias` must stay in `[0, 1)` to land the plane
+        // AT the floor — cutting the walls above while the floor + feet stay.
+        // `1.0` tipped `floor()` one voxel BELOW the floor and cut it out from
+        // under the character (front floor + boots gone); `0.5` keeps it.
         frame.view_cutout = self.cutout.map(|(r_cells, f_cells)| {
             let dist = self.camera.dist.max(1.0);
             let to_px = |cells: f64| (cells * SCALE / dist * f64::from(settings.hz)) as f32;
@@ -958,7 +963,7 @@ impl MapRender {
                 radius_px: to_px(r_cells),
                 feather_px: to_px(f_cells),
                 margin: (0.5 * SCALE) as f32, // half-cell xy shell round the body
-                z_bias: 1.0,                  // cut ~1 unit below the feet plane
+                z_bias: 0.5,                  // plane AT the floor (feet), walls above cut
             }
         });
         renderer.render(&mut self.scene, camera, &frame);

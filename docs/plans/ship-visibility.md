@@ -276,9 +276,14 @@ The slice-1 API is chosen so these are additive, not reshapes:
   needs a tall span to clear the ~22-unit crew sprite) — `DECK_STRIDE = 28`,
   walls ~24 tall, upper deck floor at sim-z 28 (`deck_floor`/`deck_top`
   helpers; the wall predicate is xy-only so heights never touch collision).
-  ViewCutout `z_bias` dropped to ~1 unit (unscaled). Still needs a real-display
-  pass for the visual feel (wall heights, cutout radius/z_bias, camera
-  pitch/dist), but the coordinate systems now agree.
+  ViewCutout `z_bias` must stay in `[0, 1)`: roxlap cuts cells with grid-z <
+  `floor(focus_z + z_bias/vws)` (vws=1 for the identity grid), and the focus
+  (crew feet) sits at the floor voxel's grid-z EXACTLY, so `1.0` tipped the
+  plane one voxel below the floor and cut the floor + boots out from under the
+  crew (first live-run bug); `0.5` lands the plane AT the floor (walls above cut,
+  floor kept). Still needs a real-display pass for the rest of the visual feel
+  (wall heights, cutout radius, camera pitch/dist), but the coordinate systems
+  now agree.
 - **Deck-relative collision (S-B, done) + a real engine gap.** S-A's
   `blocked()` read a fixed wall layer (`voxel_solid(cx, cy, 1)`); S-B threads
   the mover's deck through `blocked`/`clear`/`try_move` and seats on the

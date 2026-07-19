@@ -65,7 +65,7 @@ use roxlap_formats::Rgb;
 use roxlap_render::{egui, BackendPreference, FrameParams, RenderOptions, SceneRenderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
@@ -96,6 +96,10 @@ const SKY_COLOR: Rgb = Rgb(0x0099_B3D9);
 const YAW_RATE: f64 = 1.4;
 const PITCH_RATE: f64 = 1.0;
 const ZOOM_RATE: f64 = 240.0;
+/// World voxels of camera-distance change per mouse-wheel notch (zoom). Unlike
+/// the key orbit, wheel zoom applies even to real-time maps whose script owns
+/// the camera — they set the distance once, so the player can still zoom.
+const WHEEL_ZOOM_STEP: f64 = 40.0;
 
 /// Max networked ticks executed per rendered frame. After a stall clears,
 /// a backlog of ready ticks would otherwise drain all at once and hitch
@@ -1657,7 +1661,14 @@ impl App {
         // Build the HUD before borrowing the renderer / `self.lighting`.
         let hud = self.run_hud(&window);
 
-        let settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
+        let mut settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
+        // The ray march (and its derived GPU step budget) is bounded by
+        // `max_scan_dist` VOXELS around the camera — a sphere. The oracle
+        // default (1024) is fine for a scene hugging the camera, but zooming out
+        // (camera distance up to 2000) pushes far geometry past it, so the scan
+        // sphere cuts a circle out of the floor/ceiling around the camera's
+        // nadir. Cover the whole zoom range so nothing vanishes on zoom-out.
+        settings.max_scan_dist = settings.max_scan_dist.max(4096);
         // roxlap 0.30: `FrameParams` is `#[non_exhaustive]` — build from `new`
         // and override. The GPU step budget + FOV are now derived from the scan
         // distance + projection (backends can no longer disagree), and the mip
@@ -1723,6 +1734,15 @@ impl ApplicationHandler for App {
             } else {
                 BackendPreference::Cpu
             },
+            // Keep the whole scene at GPU mip-0. The default `gpu_mip_scan_dist`
+            // (64 world units) LODs distant chunks to coarser mips — and those
+            // coarse chunks do NOT apply a grid's `z_clip`, so a deck cutaway
+            // (`deck_clip`) only cuts within a ~64-unit circle around the camera
+            // and the cut-away ceiling reappears beyond it (a circle centred on
+            // the camera nadir, growing with zoom-out — the ship demo's GPU-only
+            // "hole in the ceiling"). monada's scenes are small, so mip-0
+            // everywhere costs nothing; revisit if a map ever needs LOD.
+            gpu_mip_scan_dist: 8192.0,
             ..RenderOptions::default()
         };
         // roxlap-render is now decoupled from winit: it takes any
@@ -1801,6 +1821,21 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+            }
+            // Mouse-wheel zoom: nudge the camera distance directly (not via the
+            // key path, which real-time maps suppress). Wheel up = zoom in.
+            WindowEvent::MouseWheel { delta, .. } if !consumed => {
+                let scroll = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                    // Trackpads report pixels; ~a notch per 40 px.
+                    MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
+                };
+                if scroll != 0.0 {
+                    self.scene.orbit(0.0, 0.0, -scroll * WHEEL_ZOOM_STEP);
+                    if let Some(window) = self.window.as_ref() {
+                        window.request_redraw();
+                    }
+                }
             }
             // A click on the panel is consumed by egui (so a "rebind"
             // button doesn't capture its own click); an off-panel click
@@ -1911,7 +1946,7 @@ fn build_hud(
                         None => ui.label("selected mover —"),
                     };
                     ui.separator();
-                    ui.label("arrows orbit · W/S zoom");
+                    ui.label("arrows orbit · W/S · wheel zoom");
                     ui.label("click a cube to pick · Esc quit");
                 }
                 HudState::Net(net) => {
@@ -1924,7 +1959,7 @@ fn build_hud(
                         ui.colored_label(egui::Color32::RED, "peer lost — no reconnect");
                     }
                     ui.separator();
-                    ui.label("arrows orbit · W/S zoom");
+                    ui.label("arrows orbit · W/S · wheel zoom");
                     ui.label("click to spawn · Esc quit");
                 }
                 // The host shows the map's status verbatim — it has no idea
@@ -1941,7 +1976,7 @@ fn build_hud(
                         }
                     }
                     ui.separator();
-                    ui.label("arrows orbit · W/S zoom · Esc quit");
+                    ui.label("arrows orbit · W/S · wheel zoom · Esc quit");
                 }
             }
             if !map_actions.is_empty() {

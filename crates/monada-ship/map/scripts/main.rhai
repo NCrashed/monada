@@ -192,22 +192,25 @@ fn init() {
     // the rendered height in cells; the host scales the art to it. Reuses the
     // RPG hero's idle/run GIFs under assets/char/crew.
     model_actor("assets/char/crew", ["idle", "run"], ratio(14, 10));
-    // Lower the sprite so its visible feet sit in the collision box (the pivot
-    // grounds on the trimmed opaque bottom, but the art leaves it a touch high).
-    model_drop(0, ratio(35, 100));
+    // No model_drop: the crew pivot already grounds on the deck's solid voxel
+    // floor (world_of seats sim-z N at grid-z GROUND_Z-N, the same z the floor
+    // voxel sits at). The RPG's `model_drop(0.35)` is `0.35·SCALE ≈ 5.6` WORLD
+    // units of sink — invisible over its render-only floor, but here it buried
+    // the crew knee-deep in the real floor slab. Raise a hair (e.g.
+    // `model_drop(0, ratio(5, 100))`) only if the art's feet float.
 
-    // Over-the-shoulder follow camera: `cam_yaw` must match this yaw (movement
-    // is view-relative). A lower pitch than the RPG's near-top-down sits the
-    // eye behind the crew member — inside the hull, so front walls would hide
-    // it, which the wall cutout below dissolves. `follow_camera` re-aims it (and
-    // sets the deck cutaway) at the local player each tick.
-    camera_angle(ratio(8, 10), ratio(6, 10));
+    // SS13-style steep top-down follow camera: look DOWN into the deck so the
+    // room's walls read as its outline and you see the interior over them
+    // (`pitch` is the downward tilt — larger = more top-down, max ~1.45 ≈
+    // straight down; `cam_yaw` must match this yaw, movement is view-relative).
+    // `follow_camera` re-aims it (and sets the deck cutaway) at the local player
+    // each tick. NO wall cutout in this mode: seeing INTO a deck is the deck
+    // cutaway's job (`deck_clip` hides the deck above), and from overhead the
+    // walls don't block the interior — so they stay put, unlike the
+    // over-the-shoulder keyhole (which erased them).
+    camera_angle(ratio(8, 10), ratio(12, 10));
     camera_dist(fixed(60));
     camera_focus(vec3(fixed(6), fixed(4), fixed(0)));
-
-    // Dissolve geometry between the eye and the crew member (a ~3-cell keyhole,
-    // 1-cell soft rim), so a corridor wall never blocks the third-person view.
-    camera_cutout(fixed(3), fixed(1));
 
     status("ship demo (S-C) — WASD to walk; starboard runs the deck stair");
 }
