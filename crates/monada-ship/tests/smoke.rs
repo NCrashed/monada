@@ -139,13 +139,13 @@ fn stair_run_changes_deck() {
     step(&mut b, &input(0, 0)); // spawn on the lower deck (deck 0, z 0)
     assert_eq!(crew_deck(&world), 0);
     // Walk east (≈ +x) into the starboard stair run; the rising edge flips the
-    // deck and reseats onto the upper floor (z = 4).
+    // deck and reseats onto the upper floor (sim-z 28 = DECK_STRIDE).
     hold(&mut b, 1, -1, 120);
     assert_eq!(crew_deck(&world), 1, "reached the stair run → upper deck");
     let z = crew_pos(&world).z.to_f64();
     assert!(
-        (z - 4.0).abs() < 0.01,
-        "reseated on the upper deck floor (z=4, was {z})"
+        (z - 28.0).abs() < 0.01,
+        "reseated on the upper deck floor (z=28, was {z})"
     );
 }
 

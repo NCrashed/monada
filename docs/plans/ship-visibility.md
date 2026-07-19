@@ -244,10 +244,41 @@ The slice-1 API is chosen so these are additive, not reshapes:
 
 ## Open questions / risks
 
-- **z-down band mapping.** The sim-z-up ↔ world-z-down ↔ `DeckBand`
-  z-down translation is the fiddly bit; get it wrong and the deck clip or
-  vision deck-index is off by a band. Isolate it in one host helper with a
-  unit test.
+- **z is UNSCALED in the grid but SCALED for sprites/camera — the core
+  verticality bug (BLOCKING, needs a coordinate decision).** `voxel_fill` /
+  `voxel_set` place voxels at grid-z `GROUND_Z - sim_z` (**unscaled** in z;
+  only x/y scale by `SCALE`), but `world_of` places sprites + the camera at
+  `GROUND_Z - sim_z·SCALE` (**scaled**). The two systems coincide ONLY at
+  `sim_z = 0` — which is why chess/RPG (everything on the flat floor) never hit
+  it. The ship's UPPER deck does: a crew member seated at `sim_z = 4` renders
+  (via `world_of`) at world-z 36, while its deck-floor voxels sit at grid-z 96
+  → the sprite floats ~60 units off its own deck. `deck_clip` is now correct in
+  the grid's OWN coords (`deck_clip_world_z(z_hi) = GROUND_Z - z_hi`, unscaled,
+  unit-tested end-to-end against a real grid + raycast), so the lower-deck
+  cutaway works — but the upper-deck render is broken until the coordinate
+  systems are reconciled. Options: **(A)** scale voxel z in `voxel_fill` too
+  (consistent-scaled; breaks RPG/chess z tuning — pillars 12→192 tall — and
+  needs their re-tune + a live pass); **(B)** leave both, and give the ship two
+  SEPARATE grids (one per deck) offset in world-z instead of stacking bands in
+  one grid; **(C)** UNSCALE `world_of`'s z to match the grid (`GROUND_Z -
+  sim_z`) — chess/RPG are all at `sim_z = 0` so unaffected, and the ship's crew
+  then sits on its deck; the ship geometry just needs taller sim-z gaps to read
+  (walls/decks are only ~1 unit/cell tall unscaled). Recommend **C** (smallest,
+  existing-demo-safe), but it's an engine-author call and every option needs a
+  real-display pass. Until resolved, the ship's vertical render + the ViewCutout
+  `z_bias`/`margin` (world units, currently assuming the SCALEd world) are
+  unverified. S-D's FoW deck path (`FowObserver.eye_z`, `DeckBand`) lives in the
+  same grid-z and must follow whichever choice lands.
+  **RESOLVED (2026-07-19): chose (C).** `world_of`'s z is now UNSCALED
+  (`GROUND_Z - sim_z`), matching the grid; chess/RPG (all at sim-z 0) are
+  byte-unaffected, and the ship's crew now seats on its deck. Consequence: the
+  ship geometry was re-tuned taller (unscaled z means 1 unit/layer, so a storey
+  needs a tall span to clear the ~22-unit crew sprite) — `DECK_STRIDE = 28`,
+  walls ~24 tall, upper deck floor at sim-z 28 (`deck_floor`/`deck_top`
+  helpers; the wall predicate is xy-only so heights never touch collision).
+  ViewCutout `z_bias` dropped to ~1 unit (unscaled). Still needs a real-display
+  pass for the visual feel (wall heights, cutout radius/z_bias, camera
+  pitch/dist), but the coordinate systems now agree.
 - **Deck-relative collision (S-B, done) + a real engine gap.** S-A's
   `blocked()` read a fixed wall layer (`voxel_solid(cx, cy, 1)`); S-B threads
   the mover's deck through `blocked`/`clear`/`try_move` and seats on the

@@ -37,7 +37,7 @@ use roxlap_formats::{OverlayColor, Rgb, VoxColor};
 use roxlap_render::gif_import::{voxel_clip_from_gif, GifImportOpts};
 use roxlap_render::{
     ActorState, BillboardActorDef, BillboardActorId, BillboardMode, FrameParams, Line3,
-    SceneRenderer, SpriteInstanceDesc, SpriteSet, VoxelClipId,
+    SceneRenderer, SpriteInstanceDesc, SpriteSet, ViewCutout, VoxelClipId,
 };
 use roxlap_scene::{GridId, GridTransform, Scene};
 
@@ -327,9 +327,30 @@ fn world_of(p: FixedVec3) -> DVec3 {
     DVec3::new(
         -(p.x.to_f64() + 0.5) * SCALE,
         (p.y.to_f64() + 0.5) * SCALE,
-        // Smaller z is up: sim z lifts above the board surface.
-        GROUND_Z - p.z.to_f64() * SCALE,
+        // Smaller z is up: sim z lifts above the board surface. z is UNSCALED
+        // (1 world unit per sim-z), matching where `voxel_fill`/`voxel_set` put
+        // grid voxels (`GROUND_Z - sim_z`) — so a sprite seated at sim-z N sits
+        // ON its grid voxels, not `SCALE·N` above them. (Only x/y scale by
+        // `SCALE`.) chess/RPG live at sim-z 0 where this was already a no-op;
+        // the ship's upper deck needs the two z systems to agree. A map that
+        // wants tall verticality stacks more sim-z layers (each 1 unit), the
+        // same convention `voxel_fill` already uses.
+        GROUND_Z - p.z.to_f64(),
     )
+}
+
+/// The `Grid::z_clip` value that cuts everything ABOVE sim band top `z_hi` (a
+/// deck cutaway). CRITICAL: `z_clip` is in **grid-local voxel z** — where
+/// `voxel_fill`/`voxel_set` actually place voxels, `GROUND_Z - sim_z`,
+/// **UNSCALED** in z (only x/y scale by `SCALE`; see `voxel_set`). It is NOT
+/// the `world_of` scaled z the camera/sprites use — the two coordinate systems
+/// only coincide at `sim_z = 0` (a known monada wart; see the plan). Grid z is
+/// z-DOWN (smaller = higher up), so voxels at sim-z > `z_hi` sit at grid-z below
+/// this threshold and roxlap clips them (`z < z_clip` reads as air). Band top
+/// sim-z `z_hi` maps to grid-z `GROUND_Z - z_hi`, kept; the layer above it
+/// (sim-z `z_hi+1`) is one lower and cut. Unit-tested against a REAL grid.
+fn deck_clip_world_z(z_hi: i64) -> i32 {
+    (GROUND_Z as i64 - z_hi) as i32
 }
 
 /// Intersect a world ray with the board plane `z = GROUND_Z`.
@@ -457,6 +478,14 @@ pub struct MapRender {
     /// The entity under the cursor (`pick_entity`), refreshed per frame
     /// by the host alongside the ray; `-1` = none.
     cursor_entity: i64,
+    /// Third-person wall cutout (`camera_cutout`): keyhole `(radius, feather)`
+    /// in sim cells, projected to pixels each frame around the camera focus.
+    /// `None` = no cutout. Render-side, never hashed.
+    cutout: Option<(f64, f64)>,
+    /// Deck cutaway (`deck_clip`): the grid-local z threshold for the grid's
+    /// `z_clip` (voxels above it — smaller grid-z — are cut). `None` = show the
+    /// whole grid. Render-side, never hashed.
+    deck_clip: Option<i32>,
 }
 
 /// A decoded animated HUD image (a portrait): its frames as `(RGBA, delay_ms)`
@@ -527,6 +556,17 @@ impl MapRender {
             cursor_ground: None,
             cursor_aim: 0.0,
             cursor_entity: -1,
+            cutout: None,
+            deck_clip: None,
+        }
+    }
+
+    /// Push the current deck cutaway onto the grid's `z_clip` (the render + the
+    /// unit test share this one apply path, so the test exercises exactly what
+    /// `render_into` does). `None` clears the clip (whole grid shown).
+    fn apply_deck_clip(&mut self) {
+        if let Some(grid) = self.scene.grid_mut(self.grid) {
+            grid.z_clip = self.deck_clip;
         }
     }
 
@@ -889,6 +929,9 @@ impl MapRender {
             self.sprites_uploaded = true;
         }
         self.update_actors(renderer, camera, dt);
+        // Deck cutaway: clip the grid above the local crew's deck so the camera
+        // sees inside (set before building `frame`, which doesn't touch scene).
+        self.apply_deck_clip();
         // roxlap 0.30: `FrameParams` is `#[non_exhaustive]` — build from
         // `new` and override. The GPU mip/step/FOV knobs moved off the frame
         // (mip-scan → `RenderOptions`; step budget + FOV are now derived from
@@ -899,6 +942,25 @@ impl MapRender {
                                        // Sprites are flat-lit on both backends; this is just the on/off opt-in.
         frame.draw_sprites = true;
         frame.side_shades = self.side_shades;
+        // Third-person wall cutout: a keyhole around the camera focus (the crew
+        // member) so front geometry between eye and focus dissolves. Project the
+        // sim-cell radius to logical pixels at the focus distance
+        // (`px ≈ world_radius / dist · hz`). `margin` is an xy shell round the
+        // body column (xy is SCALEd, so a half-cell = `SCALE/2`); `z_bias` is a
+        // vertical plane offset in the UNSCALED z (1 unit per sim-z), so a small
+        // few-unit nudge. Numeric feel wants a real-display pass to finalise.
+        frame.view_cutout = self.cutout.map(|(r_cells, f_cells)| {
+            let dist = self.camera.dist.max(1.0);
+            let to_px = |cells: f64| (cells * SCALE / dist * f64::from(settings.hz)) as f32;
+            let c = self.camera.center;
+            ViewCutout {
+                focus_world: [c.x as f32, c.y as f32, c.z as f32],
+                radius_px: to_px(r_cells),
+                feather_px: to_px(f_cells),
+                margin: (0.5 * SCALE) as f32, // half-cell xy shell round the body
+                z_bias: 1.0,                  // cut ~1 unit below the feet plane
+            }
+        });
         renderer.render(&mut self.scene, camera, &frame);
 
         if debug {
@@ -1525,6 +1587,21 @@ impl HostBridge for MapRender {
         self.camera.dist = dist.to_f64().clamp(60.0, 2000.0);
     }
 
+    fn camera_cutout(&mut self, radius: Fixed, feather: Fixed) {
+        let r = radius.to_f64();
+        self.cutout = (r > 0.0).then(|| (r, feather.to_f64().max(0.0)));
+    }
+
+    fn deck_clip(&mut self, _z_lo: i64, z_hi: i64) {
+        // roxlap's `Grid::z_clip` cuts one side: voxels with grid-z BELOW the
+        // threshold (smaller grid-z = higher up, z-down) become air. So clip at
+        // the band top (sim `z_hi`) to cut everything above it. The band floor
+        // (`z_lo`) is reserved — the engine can't cut the underside with a
+        // single threshold yet. A band whose top is the world's tallest voxel
+        // yields a threshold at/below all geometry, cutting nothing.
+        self.deck_clip = Some(deck_clip_world_z(z_hi));
+    }
+
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3) {
         self.pending
             .push(Command::on(verb as u32, EntityId(target as u64), arg));
@@ -1647,6 +1724,57 @@ mod tests {
     //! frame computes for `update_actors` to apply.
     use super::*;
     use monada_sim::World;
+
+    /// The deck cutaway, end-to-end against the REAL roxlap grid: paint two
+    /// stacked deck floors with the actual `voxel_set` the map uses, apply the
+    /// deck clip, and raycast straight down the column. The clip must turn the
+    /// upper floor to air so the ray reaches the lower one — proving the
+    /// threshold matches where `voxel_set` really places voxels (grid-z,
+    /// UNSCALED), not a hand model in the wrong coordinate system.
+    #[test]
+    fn deck_clip_cuts_the_deck_above_via_a_real_grid() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let (cx, cy) = (2_i64, 2_i64);
+        r.voxel_set(cx, cy, 0, 0x80AA_AAAA); // lower deck floor (sim-z 0)
+        r.voxel_set(cx, cy, 4, 0x8055_5555); // upper deck floor (sim-z 4)
+
+        // `voxel_set` places cell (x, y) at world (x·SCALE, y·SCALE, …); ray
+        // straight down the column (+z is "down", world z-down) from above both.
+        let col = DVec3::new(cx as f64 * SCALE + 0.5, cy as f64 * SCALE + 0.5, 0.0);
+        let down = DVec3::new(0.0, 0.0, 1.0);
+        let hit_z = |r: &MapRender| {
+            r.scene
+                .raycast_clipped(col, down, 4096.0)
+                .map(|h| h.voxel.z)
+        };
+
+        // No clip → the ray meets the upper floor first (higher = smaller grid-z).
+        r.apply_deck_clip(); // deck_clip is None here
+        let upper = hit_z(&r).expect("hits the upper floor");
+        assert_eq!(
+            upper,
+            GROUND_Z as i32 - 4,
+            "upper floor at grid-z GROUND_Z-4"
+        );
+
+        // Clip to the lower deck band (sim-z 0..3) → the upper floor is cut and
+        // the ray reaches the lower floor (a larger grid-z, deeper down).
+        r.deck_clip(0, 3);
+        r.apply_deck_clip();
+        let lower = hit_z(&r).expect("hits the lower floor after the cut");
+        assert_eq!(lower, GROUND_Z as i32, "lower floor at grid-z GROUND_Z");
+        assert!(lower > upper, "the clip exposed the lower deck");
+
+        // The upper deck's own band (top sim-z 7) is the tallest thing → cuts
+        // nothing: the ray still meets the upper floor.
+        r.deck_clip(4, 7);
+        r.apply_deck_clip();
+        assert_eq!(
+            hit_z(&r),
+            Some(GROUND_Z as i32 - 4),
+            "top band cuts nothing"
+        );
+    }
 
     /// A small solid-colour single-frame GIF the importer can voxelize.
     fn tiny_gif() -> Vec<u8> {

@@ -517,6 +517,18 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     });
 
     let b = bridge.clone();
+    engine.register_fn("camera_cutout", move |radius: Fixed, feather: Fixed| {
+        b.lock()
+            .expect("bridge mutex")
+            .camera_cutout(radius, feather);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("deck_clip", move |z_lo: i64, z_hi: i64| {
+        b.lock().expect("bridge mutex").deck_clip(z_lo, z_hi);
+    });
+
+    let b = bridge.clone();
     engine.register_fn(
         "submit_command",
         move |verb: i64, target: i64, arg: FixedVec3| {

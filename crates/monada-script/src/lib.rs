@@ -169,6 +169,23 @@ pub trait HostBridge: Send {
     /// how close the view sits. The host clamps it to a sane range. The
     /// default ignores it (a map that never calls it keeps the host default).
     fn camera_dist(&mut self, _dist: Fixed) {}
+
+    /// Dissolve geometry between the camera and its focus point inside a
+    /// screen-space "keyhole" (roxlap's `ViewCutout`) — so a third-person crew
+    /// member is never hidden behind the wall the camera looks through. `radius`
+    /// is the keyhole size in sim cells (the host projects it to pixels at the
+    /// focus distance), `feather` the soft-edge band (cells). `radius <= 0`
+    /// turns it off. Primary rays only — cut walls still cast shadows, still
+    /// block collision + vision. Render-side only; the default ignores it.
+    fn camera_cutout(&mut self, _radius: Fixed, _feather: Fixed) {}
+
+    /// Show only the deck band `z_lo..=z_hi` (sim z) of the world grid, cutting
+    /// away everything ABOVE it (a ceiling / upper-deck cutaway) so the camera
+    /// sees into the deck the crew stands on. Maps to roxlap's `Grid::z_clip`
+    /// (the engine clips one side — the top of the band). Call it with the
+    /// local crew's deck band; a band whose top is the tallest thing in the
+    /// world cuts nothing. Render-side only; the default ignores it.
+    fn deck_clip(&mut self, _z_lo: i64, _z_hi: i64) {}
     /// Queue a sim command for the host to route through the command path
     /// after the current trigger returns (never applied re-entrantly).
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3);

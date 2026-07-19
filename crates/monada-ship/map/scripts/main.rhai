@@ -97,18 +97,28 @@ fn cam_relative(rx, fy) {
 // Open Questions, resolved by threading the deck through the whole path
 // rather than reading a fixed z.
 //
-//   deck 0 (lower): floor slab z=0, walls z 1..3 (collision layer z=1)
-//   deck 1 (upper): floor slab z=4, walls z 5..7 (collision layer z=5)
+// z is UNSCALED (1 world unit per sim-z; only x/y scale by SCALE=16 — see
+// `world_of`), so a deck needs a tall sim-z span to read as a real storey and
+// clear the ~1.4-cell (~22-unit) crew sprite. Decks are `DECK_STRIDE = 28`
+// apart:
+//   deck 0 (lower): floor z=0,  walls z 1..24
+//   deck 1 (upper): floor z=28, walls z 29..52
+// (numbers are for the eye + the deck cutaway; the wall PREDICATE is xy-only,
+// so height changes never touch collision. All tunable on a real display.)
 
-/// The floor sim-z a crew member on `deck` stands on.
-fn deck_floor(deck) { if deck == 0 { 0 } else { 4 } }
+/// The floor sim-z a crew member on `deck` stands on (decks 28 apart).
+fn deck_floor(deck) { if deck == 0 { 0 } else { 28 } }
+
+/// The top of `deck`'s keep-band for the cutaway: everything above it (the
+/// deck above) is cut. One below the next deck's floor.
+fn deck_top(deck) { deck_floor(deck) + 27 }
 
 /// Is sim cell `(cx, cy)` a hull wall / out of bounds *on `deck`*?
 ///
 /// NB collision here is a script-side predicate, NOT a `voxel_solid` query.
 /// monada's collision store (`VoxelStore`) is a single HEIGHTMAP — a column is
 /// solid from the floor up to its top voxel — so it cannot represent air below
-/// a floor: painting the upper deck's plate at z=4 makes `voxel_solid(x, y, 1)`
+/// a floor: painting the upper deck's plate above makes `voxel_solid(x, y, 1)`
 /// true across the WHOLE lower deck (everything "below the top"). Stacked
 /// walkable decks need a voxel-set / per-deck collision primitive the engine
 /// doesn't have yet (see the plan's Open Questions — a real S-C+ engine gap;
@@ -186,55 +196,62 @@ fn init() {
     // grounds on the trimmed opaque bottom, but the art leaves it a touch high).
     model_drop(0, ratio(35, 100));
 
-    // A follow camera pulled in close on the crew member; `follow_camera`
-    // re-aims it at the local player each tick.
-    camera_angle(ratio(8, 10), ratio(10, 10));
-    camera_dist(fixed(80));
+    // Over-the-shoulder follow camera: `cam_yaw` must match this yaw (movement
+    // is view-relative). A lower pitch than the RPG's near-top-down sits the
+    // eye behind the crew member — inside the hull, so front walls would hide
+    // it, which the wall cutout below dissolves. `follow_camera` re-aims it (and
+    // sets the deck cutaway) at the local player each tick.
+    camera_angle(ratio(8, 10), ratio(6, 10));
+    camera_dist(fixed(60));
     camera_focus(vec3(fixed(6), fixed(4), fixed(0)));
-    status("ship demo (S-B) — WASD to walk; starboard runs the deck stair");
+
+    // Dissolve geometry between the eye and the crew member (a ~3-cell keyhole,
+    // 1-cell soft rim), so a corridor wall never blocks the third-person view.
+    camera_cutout(fixed(3), fixed(1));
+
+    status("ship demo (S-C) — WASD to walk; starboard runs the deck stair");
 }
 
 /// Paint the two-deck hull, for the EYE. Collision is the `blocked` predicate
 /// above (the heightmap store can't do stacked decks); keep this layout and
-/// that predicate in sync. A deck is a floor slab + a 3-tall rim wall band; an
+/// that predicate in sync. A deck is a floor slab + a tall rim wall band; an
 /// interior divider (with a doorway gap) splits each deck into two compartments
 /// joined by the gap — the "corridor". The two decks get perpendicular dividers
-/// so they read distinct.
+/// so they read distinct, and sit `DECK_STRIDE = 28` apart in (unscaled) z.
 fn build_hull() {
     let plate = 0x8055_5f6b; // steel floor plating
     let wall = 0x8079_8592; // hull wall
     let stair = 0x804d_9a8f; // teal marker for the starboard stair run
 
-    // --- deck 0 (lower): floor z=0, walls z 1..3 ---
+    // --- deck 0 (lower): floor z=0, walls z 1..24 ---
     voxel_fill(0, 0, 0, 19, 19, 0, plate);
-    rim_walls(1, wall);
+    rim_walls(1, 24, wall);
     // Divider along y=10 splitting fore (y<10) / aft (y>10), doorway gap x 9..10.
     // It also STOPS before the starboard stair run (ends at x=15, not 18), so the
     // stair column (x≥16) is open on this deck — a deck flip that reseats a crew
     // member there always lands on clear floor, not inside the divider.
-    voxel_fill(1, 10, 1, 8, 10, 3, wall);
-    voxel_fill(11, 10, 1, 15, 10, 3, wall);
+    voxel_fill(1, 10, 1, 8, 10, 24, wall);
+    voxel_fill(11, 10, 1, 15, 10, 24, wall);
 
-    // --- deck 1 (upper): floor slab z=4, walls z 5..7 ---
-    voxel_fill(0, 0, 4, 19, 19, 4, plate);
-    rim_walls(5, wall);
+    // --- deck 1 (upper): floor slab z=28, walls z 29..52 ---
+    voxel_fill(0, 0, 28, 19, 19, 28, plate);
+    rim_walls(29, 52, wall);
     // Divider along x=10 splitting port (x<10) / starboard (x>10), gap y 9..10.
-    voxel_fill(10, 1, 5, 10, 8, 7, wall);
-    voxel_fill(10, 11, 5, 10, 18, 7, wall);
+    voxel_fill(10, 1, 29, 10, 8, 52, wall);
+    voxel_fill(10, 11, 29, 10, 18, 52, wall);
 
     // Mark the starboard stair run (cx ≥ 16) on both deck floors so it reads as
     // the deck link. Purely cosmetic — `is_stair` drives the transition.
     voxel_fill(16, 1, 0, 18, 18, 0, stair);
-    voxel_fill(16, 1, 4, 18, 18, 4, stair);
+    voxel_fill(16, 1, 28, 18, 18, 28, stair);
 }
 
-/// A 3-tall rim wall band (z `base`..`base+2`) around the 20×20 hull edge.
-fn rim_walls(base, col) {
-    let top = base + 2;
-    voxel_fill(0, 0, base, 19, 0, top, col); // south
-    voxel_fill(0, 19, base, 19, 19, top, col); // north
-    voxel_fill(0, 0, base, 0, 19, top, col); // west
-    voxel_fill(19, 0, base, 19, 19, top, col); // east
+/// A rim wall band (z `lo`..`hi`) around the 20×20 hull edge.
+fn rim_walls(lo, hi, col) {
+    voxel_fill(0, 0, lo, 19, 0, hi, col); // south
+    voxel_fill(0, 19, lo, 19, 19, hi, col); // north
+    voxel_fill(0, 0, lo, 0, 19, hi, col); // west
+    voxel_fill(19, 0, lo, 19, 19, hi, col); // east
 }
 
 /// Spawn crew members lazily as each player's input first arrives (co-op join),
@@ -328,12 +345,19 @@ fn step_crew(c) {
 }
 
 /// Re-aim the camera at the local player's crew member (or crew 0 in a hotseat
-/// session with no single local player).
+/// session with no single local player), and cut the deck away above whichever
+/// deck that crew member stands on — so we see into their deck, not the hull
+/// roof. Both are render-side (per-client): each peer views its own crew.
 fn follow_camera() {
     let crew = entities_of(0);
     let lp = local_player();
     let idx = if lp < 0 { 0 } else { lp };
     if idx < crew.len() {
-        camera_focus(entity_position(crew[idx]));
+        let c = crew[idx];
+        camera_focus(entity_position(c));
+        // Show the crew's deck band (floor..deck_top): deck 0 cuts the upper
+        // deck away; deck 1 is the top band and cuts nothing.
+        let d = to_int(entity_field(c, "deck"));
+        deck_clip(deck_floor(d), deck_top(d));
     }
 }
