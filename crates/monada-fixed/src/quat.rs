@@ -1,7 +1,8 @@
 //! Fixed-point unit quaternion [`FixedQuat`].
 //!
-//! Stored as `(w, x, y, z)` where `w` is the scalar part. For a rotation
-//! by angle `θ` around unit axis `n`: `w = cos(θ/2)`, `(x,y,z) = n·sin(θ/2)`.
+//! Stored as `(x, y, z, w)` matching glam's field order. `w` is the scalar
+//! part; for a rotation by angle `θ` around unit axis `n`:
+//! `w = cos(θ/2)`, `(x,y,z) = n·sin(θ/2)`.
 //!
 //! **Invariant**: constructors always yield unit quaternions. Repeated [`Mul`]
 //! accumulates rounding error; call [`FixedQuat::normalize`] periodically to
@@ -17,17 +18,17 @@ use core::ops::{Mul, Neg};
 use crate::trig::{acos, cos, sin};
 use crate::{Fixed, FixedVec3};
 
-/// A unit quaternion representing a 3-D rotation, stored as `(w, x, y, z)`.
+/// A unit quaternion representing a 3-D rotation, stored as `(x, y, z, w)`.
 ///
-/// Note: field order is `(w, x, y, z)` — the inverse of glam's `(x, y, z, w)`.
-/// Serde layout reflects this order.
+/// Field order matches glam's `Quat`: `(x, y, z, w)` where `w` is the scalar
+/// part. Serde layout reflects this order.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FixedQuat {
-    pub w: Fixed,
     pub x: Fixed,
     pub y: Fixed,
     pub z: Fixed,
+    pub w: Fixed,
 }
 
 impl FixedQuat {
@@ -43,8 +44,8 @@ impl FixedQuat {
     /// unit length.
     #[inline]
     #[must_use]
-    pub const fn new(w: Fixed, x: Fixed, y: Fixed, z: Fixed) -> FixedQuat {
-        FixedQuat { w, x, y, z }
+    pub const fn new(x: Fixed, y: Fixed, z: Fixed, w: Fixed) -> FixedQuat {
+        FixedQuat { x, y, z, w }
     }
 
     /// Rotation by `angle` radians around `axis`. `axis` need not be unit

@@ -327,7 +327,7 @@ fn quat_rotation() {
     close(r_sa.z, r_aa.z, eps);
 
     // normalize brings a slightly drifted quaternion back to unit length.
-    let drifted = FixedQuat::new(q90z.w + Fixed::from_bits(1 << 20), q90z.x, q90z.y, q90z.z);
+    let drifted = FixedQuat::new(q90z.x, q90z.y, q90z.z, q90z.w + Fixed::from_bits(1 << 20));
     close(drifted.normalize().length(), Fixed::ONE, 1 << 16);
 
     // Zero axis and zero scaled-axis return identity.
