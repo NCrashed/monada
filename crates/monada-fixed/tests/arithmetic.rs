@@ -303,11 +303,11 @@ fn quat_rotation() {
 
     // Composition: (q1 * q2) * v == q1 * (q2 * v).
     let x = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
-    let q90x = FixedQuat::from_axis_angle(x, FRAC_PI_2);
-    let composed = q90z * q90x;
+    let quat_x90 = FixedQuat::from_axis_angle(x, FRAC_PI_2);
+    let composed = q90z * quat_x90;
     let diag = FixedVec3::new(Fixed::ONE, Fixed::ONE, Fixed::ONE);
     let via_composed = composed * diag;
-    let via_sequential = q90z * (q90x * diag);
+    let via_sequential = q90z * (quat_x90 * diag);
     close(via_composed.x, via_sequential.x, eps);
     close(via_composed.y, via_sequential.y, eps);
     close(via_composed.z, via_sequential.z, eps);
@@ -320,11 +320,11 @@ fn quat_rotation() {
 
     // from_scaled_axis matches from_axis_angle.
     let q_sa = FixedQuat::from_scaled_axis(z.scale(FRAC_PI_2));
-    let r_aa = q90z * x_axis;
-    let r_sa = q_sa * x_axis;
-    close(r_sa.x, r_aa.x, eps);
-    close(r_sa.y, r_aa.y, eps);
-    close(r_sa.z, r_aa.z, eps);
+    let expected = q90z * x_axis;
+    let got_sa = q_sa * x_axis;
+    close(got_sa.x, expected.x, eps);
+    close(got_sa.y, expected.y, eps);
+    close(got_sa.z, expected.z, eps);
 
     // normalize brings a slightly drifted quaternion back to unit length.
     let drifted = FixedQuat::new(q90z.x, q90z.y, q90z.z, q90z.w + Fixed::from_bits(1 << 20));
@@ -456,7 +456,7 @@ fn atan2_landmarks() {
     // Consistent with sin/cos: atan2(sin(a), cos(a)) == a for a ∈ (−π, π].
     let mut st = 1234u64;
     for _ in 0..500 {
-        let raw = (lcg(&mut st) % 6_283) as i64; // raw steps, range < 2π
+        let raw = i64::from(lcg(&mut st) % 6_283); // raw steps, range < 2π
         let a = Fixed::from_bits(raw * (1 << 16)) - PI; // a ∈ (−π, π]
         let recovered = atan2(sin(a), cos(a));
         close(recovered, a, 1 << 18);
