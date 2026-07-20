@@ -81,7 +81,12 @@ fn octile(ax: i64, ay: i64, bx: i64, by: i64) -> i64 {
 /// cliff edge or a blocker). `from` itself is exempt from the blocked
 /// check, so a unit standing where a footprint just landed can still walk
 /// out.
-pub fn astar(world: &impl NavWorld, from: (i64, i64), to: (i64, i64), limits: &NavLimits) -> Vec<(i64, i64)> {
+pub fn astar(
+    world: &impl NavWorld,
+    from: (i64, i64),
+    to: (i64, i64),
+    limits: &NavLimits,
+) -> Vec<(i64, i64)> {
     if from == to {
         return Vec::new();
     }
@@ -93,7 +98,9 @@ pub fn astar(world: &impl NavWorld, from: (i64, i64), to: (i64, i64), limits: &N
 
     // A step from height `hz` onto `(x, y)` under the walk rule.
     let passable = |hz: i64, x: i64, y: i64| {
-        in_bounds(x, y) && !world.blocked(x, y) && (world.height(x, y) - hz).abs() <= limits.max_step
+        in_bounds(x, y)
+            && !world.blocked(x, y)
+            && (world.height(x, y) - hz).abs() <= limits.max_step
     };
 
     // g-cost + parent per visited cell.
@@ -105,7 +112,12 @@ pub fn astar(world: &impl NavWorld, from: (i64, i64), to: (i64, i64), limits: &N
     let mut seq: u64 = 0;
 
     best_g.insert(from, 0);
-    open.push(std::cmp::Reverse((octile(from.0, from.1, to.0, to.1), seq, from.0, from.1)));
+    open.push(std::cmp::Reverse((
+        octile(from.0, from.1, to.0, to.1),
+        seq,
+        from.0,
+        from.1,
+    )));
 
     // The fallback target: closest to the goal (octile), then cheapest.
     let mut best_cell = from;
@@ -148,7 +160,12 @@ pub fn astar(world: &impl NavWorld, from: (i64, i64), to: (i64, i64), limits: &N
                 best_g.insert((nx, ny), ng);
                 parent.insert((nx, ny), cur);
                 seq += 1;
-                open.push(std::cmp::Reverse((ng + octile(nx, ny, to.0, to.1), seq, nx, ny)));
+                open.push(std::cmp::Reverse((
+                    ng + octile(nx, ny, to.0, to.1),
+                    seq,
+                    nx,
+                    ny,
+                )));
             }
         }
     }
@@ -157,7 +174,11 @@ pub fn astar(world: &impl NavWorld, from: (i64, i64), to: (i64, i64), limits: &N
 }
 
 /// Rebuild the waypoint list `from → goal` (exclusive of `from`).
-fn unwind(parent: &BTreeMap<(i64, i64), (i64, i64)>, from: (i64, i64), goal: (i64, i64)) -> Vec<(i64, i64)> {
+fn unwind(
+    parent: &BTreeMap<(i64, i64), (i64, i64)>,
+    from: (i64, i64),
+    goal: (i64, i64),
+) -> Vec<(i64, i64)> {
     let mut path = Vec::new();
     let mut cur = goal;
     while cur != from {
@@ -171,7 +192,11 @@ fn unwind(parent: &BTreeMap<(i64, i64), (i64, i64)>, from: (i64, i64), goal: (i6
 #[cfg(test)]
 mod tests {
     // Tiny ASCII fixtures: index/coordinate casts are exact here.
-    #![allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #![allow(
+        clippy::cast_possible_wrap,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
 
     use super::*;
 
@@ -188,7 +213,12 @@ mod tests {
             }
         }
         fn bounds(&self) -> (i64, i64, i64, i64) {
-            (0, 0, self.rows[0].len() as i64 - 1, self.rows.len() as i64 - 1)
+            (
+                0,
+                0,
+                self.rows[0].len() as i64 - 1,
+                self.rows.len() as i64 - 1,
+            )
         }
         fn limits(&self, max_step: i64) -> NavLimits {
             NavLimits {
@@ -214,11 +244,19 @@ mod tests {
         }
     }
 
-    fn steps_are_adjacent_and_legal(w: &Ascii, from: (i64, i64), path: &[(i64, i64)], max_step: i64) {
+    fn steps_are_adjacent_and_legal(
+        w: &Ascii,
+        from: (i64, i64),
+        path: &[(i64, i64)],
+        max_step: i64,
+    ) {
         let mut prev = from;
         for &wp in path {
             let (dx, dy) = ((wp.0 - prev.0).abs(), (wp.1 - prev.1).abs());
-            assert!(dx <= 1 && dy <= 1 && (dx, dy) != (0, 0), "adjacent step {prev:?}→{wp:?}");
+            assert!(
+                dx <= 1 && dy <= 1 && (dx, dy) != (0, 0),
+                "adjacent step {prev:?}→{wp:?}"
+            );
             assert!(
                 (w.height(wp.0, wp.1) - w.height(prev.0, prev.1)).abs() <= max_step,
                 "legal climb {prev:?}→{wp:?}"

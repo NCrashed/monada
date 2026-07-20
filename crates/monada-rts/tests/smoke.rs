@@ -63,11 +63,20 @@ fn units(world: &SharedWorld) -> Vec<EntityId> {
 }
 
 fn pos(world: &SharedWorld, e: EntityId) -> FixedVec3 {
-    world.lock().unwrap().position(e).expect("unit has a position")
+    world
+        .lock()
+        .unwrap()
+        .position(e)
+        .expect("unit has a position")
 }
 
 fn field(world: &SharedWorld, e: EntityId, name: &str) -> i64 {
-    world.lock().unwrap().field(e, name).expect("unit field").to_f64() as i64
+    world
+        .lock()
+        .unwrap()
+        .field(e, name)
+        .expect("unit field")
+        .to_f64() as i64
 }
 
 fn ticks(b: &mut RhaiBackend, n: usize) {
@@ -82,10 +91,17 @@ fn workers_spawn_on_their_plateaus() {
     let us = units(&world);
     assert_eq!(us.len(), 6, "three starting workers per player");
     let owners: Vec<i64> = us.iter().map(|&e| field(&world, e, "owner")).collect();
-    assert_eq!(owners, [0, 0, 0, 1, 1, 1], "corners are owned symmetrically");
+    assert_eq!(
+        owners,
+        [0, 0, 0, 1, 1, 1],
+        "corners are owned symmetrically"
+    );
     for &u in &us {
         let z = pos(&world, u).z.to_f64();
-        assert!((z - 12.0).abs() < 0.01, "worker starts on plateau (z = {z})");
+        assert!(
+            (z - 12.0).abs() < 0.01,
+            "worker starts on plateau (z = {z})"
+        );
     }
     assert_eq!(
         world.lock().unwrap().count(TREE),
@@ -142,7 +158,11 @@ fn tree_column_parks_the_walker_adjacent() {
     assert_ne!((cx, cy), (24, 14), "never stands in the tree");
     let d = (cx - 24).abs().max((cy - 14).abs());
     assert!(d <= 2, "parked beside the tree (at cell {cx}, {cy})");
-    assert_eq!(field(&world, u, "has_dest"), 0, "order settled, not spinning");
+    assert_eq!(
+        field(&world, u, "has_dest"),
+        0,
+        "order settled, not spinning"
+    );
 }
 
 #[test]
@@ -152,7 +172,8 @@ fn ownership_gates_orders() {
     let (world, mut b) = fresh();
     let u = units(&world)[0]; // owner 0
     let before = pos(&world, u);
-    b.on_command(P1, &move_cmd(u, 24, 24)).expect("foreign order");
+    b.on_command(P1, &move_cmd(u, 24, 24))
+        .expect("foreign order");
     ticks(&mut b, 60);
     let after = pos(&world, u);
     assert_eq!(
@@ -169,7 +190,8 @@ fn destination_clamps_to_the_field() {
     // completes (no forever-marching unit against the rim band).
     let (world, mut b) = fresh();
     let u = units(&world)[3]; // player 1's worker, at (42, 42)
-    b.on_command(P1, &move_cmd(u, 100, 100)).expect("wild order");
+    b.on_command(P1, &move_cmd(u, 100, 100))
+        .expect("wild order");
     ticks(&mut b, 500);
     let end = pos(&world, u);
     let (ex, ey) = (end.x.to_f64(), end.y.to_f64());
@@ -192,7 +214,14 @@ fn deterministic_march() {
         ticks(&mut b, 400);
         let a = pos(&world, us[0]);
         let c = pos(&world, us[3]);
-        (a.x.to_bits(), a.y.to_bits(), a.z.to_bits(), c.x.to_bits(), c.y.to_bits(), c.z.to_bits())
+        (
+            a.x.to_bits(),
+            a.y.to_bits(),
+            a.z.to_bits(),
+            c.x.to_bits(),
+            c.y.to_bits(),
+            c.z.to_bits(),
+        )
     };
     assert_eq!(run(), run(), "identical orders reproduce the march");
 }

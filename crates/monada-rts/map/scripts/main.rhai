@@ -295,27 +295,62 @@ fn local_tick(dt) {
     }
 }
 
-/// Click edges from the map-declared actions. `select` (LMB) picks an own
-/// unit under the cursor (or clears); `order` (RMB) sends the selected
-/// unit to the picked ground point as a MOVE command.
+/// Click edges from the map-declared actions. `select` (LMB) is a drag
+/// gesture — press anchors a ground rectangle on the host (`drag_begin`,
+/// drawn there: the gesture state can't live in this stateless layer),
+/// release takes it (`drag_end`) and selects. `order` (RMB) sends EVERY
+/// selected unit to the picked point — one explicit command per unit
+/// (lockstep carries a Vec per player per tick).
 fn action(id, down) {
-    if !down {
-        return;
-    }
     if id == "select" {
+        if down {
+            drag_begin();
+        } else {
+            let r = drag_end();
+            if r.len() == 2 {
+                box_select(r[0], r[1]);
+            }
+        }
+    } else if id == "order" && down {
+        let g = pick_ground();
+        if g != () {
+            for e in highlighted_all() {
+                if mine(e) {
+                    submit_command(1, e, vec3(g.x, g.y, fixed(0)));
+                }
+            }
+        }
+    }
+}
+
+fn minf(a, b) { if a < b { a } else { b } }
+fn maxf(a, b) { if a < b { b } else { a } }
+
+/// Resolve a finished select gesture. A tiny rectangle is a CLICK —
+/// single-select whatever unit is under the cursor (or clear); a real
+/// drag selects every own unit inside the ground rectangle.
+fn box_select(a, b) {
+    if approx_dist(b.x - a.x, b.y - a.y) < ratio(35, 100) {
         let e = pick_entity();
         if e >= 0 && mine(e) {
             highlight(e);
         } else {
             highlight_clear();
         }
-    } else if id == "order" {
-        let sel = highlighted();
-        if sel >= 0 && mine(sel) {
-            let g = pick_ground();
-            if g != () {
-                submit_command(1, sel, vec3(g.x, g.y, fixed(0)));
-            }
+        return;
+    }
+    let x0 = minf(a.x, b.x);
+    let x1 = maxf(a.x, b.x);
+    let y0 = minf(a.y, b.y);
+    let y1 = maxf(a.y, b.y);
+    highlight_clear();
+    for u in entities_of(0) {
+        if !mine(u) {
+            continue;
+        }
+        let p = entity_position(u);
+        if p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 {
+            highlight_add(u);
         }
     }
 }

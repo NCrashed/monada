@@ -37,6 +37,8 @@ monada-format = { workspace = true }
 monada-script = { workspace = true }
 monada-sim = { workspace = true }
 monada-fixed = { workspace = true }
+# tests/lockstep.rs: two loopback peers exchanging group-order bursts.
+monada-net = { workspace = true }
 
 [lints]
 workspace = true

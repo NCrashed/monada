@@ -1667,6 +1667,7 @@ dependencies = [
  "monada-fixed",
  "monada-format",
  "monada-host",
+ "monada-net",
  "monada-script",
  "monada-sim",
 ]
