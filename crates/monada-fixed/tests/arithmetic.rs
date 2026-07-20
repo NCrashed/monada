@@ -3,7 +3,7 @@
 //! integer-only trig (DESIGN.md §3.1).
 
 use monada_fixed::trig::{atan2, cos, sin, FRAC_PI_2, PI, TAU};
-use monada_fixed::{Fixed, FixedVec2, FixedVec3};
+use monada_fixed::{Fixed, FixedQuat, FixedVec2, FixedVec3};
 
 /// Assert two `Fixed` are within `eps` raw steps of each other.
 fn close(a: Fixed, b: Fixed, eps_bits: i64) {
@@ -274,6 +274,71 @@ fn vec3_geometry() {
     assert_eq!(x.dot(y), Fixed::ZERO);
     let v = FixedVec3::new(Fixed::from_int(2), Fixed::from_int(3), Fixed::from_int(6));
     assert_eq!(v.length(), Fixed::from_int(7)); // 2-3-6-7 Pythagorean quadruple
+}
+
+#[test]
+fn quat_rotation() {
+    let eps = 1 << 18; // LUT-driven; two trig calls per quat construction
+
+    // Identity leaves every vector unchanged — bit-exact (no trig involved).
+    let v = FixedVec3::new(Fixed::from_int(3), Fixed::from_int(4), Fixed::from_int(5));
+    assert_eq!(FixedQuat::IDENTITY * v, v);
+    assert_eq!(FixedQuat::default() * v, v);
+
+    // Rotate x-axis 90° around z-axis → y-axis.
+    let z = FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ONE);
+    let q90z = FixedQuat::from_axis_angle(z, FRAC_PI_2);
+    let x_axis = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
+    let y_axis = FixedVec3::new(Fixed::ZERO, Fixed::ONE, Fixed::ZERO);
+    let rotated = q90z * x_axis;
+    close(rotated.x, y_axis.x, eps);
+    close(rotated.y, y_axis.y, eps);
+    close(rotated.z, y_axis.z, eps);
+
+    // Isometry: rotation preserves vector length.
+    close(rotated.length(), x_axis.length(), eps);
+    let w = FixedVec3::new(Fixed::from_int(3), Fixed::from_int(4), Fixed::ZERO);
+    let rotated_w = q90z * w;
+    close(rotated_w.length(), w.length(), 1 << 20);
+
+    // Composition: (q1 * q2) * v == q1 * (q2 * v).
+    let x = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
+    let q90x = FixedQuat::from_axis_angle(x, FRAC_PI_2);
+    let composed = q90z * q90x;
+    let diag = FixedVec3::new(Fixed::ONE, Fixed::ONE, Fixed::ONE);
+    let via_composed = composed * diag;
+    let via_sequential = q90z * (q90x * diag);
+    close(via_composed.x, via_sequential.x, eps);
+    close(via_composed.y, via_sequential.y, eps);
+    close(via_composed.z, via_sequential.z, eps);
+
+    // Round-trip: q.inverse() * (q * v) ≈ v.
+    let rt = q90z.inverse() * (q90z * v);
+    close(rt.x, v.x, eps);
+    close(rt.y, v.y, eps);
+    close(rt.z, v.z, eps);
+
+    // from_scaled_axis matches from_axis_angle.
+    let q_sa = FixedQuat::from_scaled_axis(z.scale(FRAC_PI_2));
+    let r_aa = q90z * x_axis;
+    let r_sa = q_sa * x_axis;
+    close(r_sa.x, r_aa.x, eps);
+    close(r_sa.y, r_aa.y, eps);
+    close(r_sa.z, r_aa.z, eps);
+
+    // normalize brings a slightly drifted quaternion back to unit length.
+    let drifted = FixedQuat::new(q90z.w + Fixed::from_bits(1 << 20), q90z.x, q90z.y, q90z.z);
+    close(drifted.normalize().length(), Fixed::ONE, 1 << 16);
+
+    // Zero axis and zero scaled-axis return identity.
+    assert_eq!(
+        FixedQuat::from_axis_angle(FixedVec3::ZERO, FRAC_PI_2),
+        FixedQuat::IDENTITY
+    );
+    assert_eq!(
+        FixedQuat::from_scaled_axis(FixedVec3::ZERO),
+        FixedQuat::IDENTITY
+    );
 }
 
 #[test]

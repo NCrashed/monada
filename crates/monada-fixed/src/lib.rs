@@ -43,9 +43,11 @@
     clippy::inline_always
 )]
 
+mod quat;
 mod scalar;
 pub mod trig;
 mod vec;
 
+pub use quat::FixedQuat;
 pub use scalar::Fixed;
 pub use vec::{FixedVec2, FixedVec3};
