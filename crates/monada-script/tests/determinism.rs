@@ -12,7 +12,7 @@ const TICKS: u64 = 600;
 /// Golden `World::state_hash` of the scripted walk-circle after 600
 /// ticks. Bump only alongside a deliberate change to the scenario or the
 /// world layout.
-const GOLDEN: u64 = 7_227_763_778_376_693_000;
+const GOLDEN: u64 = 14_146_042_425_085_905_153;
 
 fn run() -> u64 {
     let world = run_script(SEED, WALK_CIRCLE_SCRIPT, TICKS).expect("script runs");

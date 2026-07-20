@@ -53,18 +53,7 @@ impl FixedQuat {
     /// if `axis` is the zero vector.
     #[must_use]
     pub fn from_axis_angle(axis: FixedVec3, angle: Fixed) -> FixedQuat {
-        let n = axis.normalize();
-        if n == FixedVec3::ZERO {
-            return FixedQuat::IDENTITY;
-        }
-        let half = angle / Fixed::from_int(2);
-        let s = sin(half);
-        FixedQuat {
-            w: cos(half),
-            x: n.x * s,
-            y: n.y * s,
-            z: n.z * s,
-        }
+        FixedQuat::from_scaled_axis(axis.normalize().scale(angle))
     }
 
     /// Rotation from a scaled-axis vector: direction = rotation axis,
@@ -76,14 +65,13 @@ impl FixedQuat {
         if angle == Fixed::ZERO {
             return FixedQuat::IDENTITY;
         }
-        let inv_len = Fixed::ONE / angle;
         let half = angle / Fixed::from_int(2);
-        let s = sin(half);
+        let scale = (Fixed::ONE / angle) * sin(half);
         FixedQuat {
             w: cos(half),
-            x: v.x * inv_len * s,
-            y: v.y * inv_len * s,
-            z: v.z * inv_len * s,
+            x: v.x * scale,
+            y: v.y * scale,
+            z: v.z * scale,
         }
     }
 
@@ -180,13 +168,7 @@ impl FixedQuat {
         // Threshold 1 − 2⁻²⁰ ≈ 1 − 9.5e-7, same ballpark as glam.
         let threshold = Fixed::ONE - Fixed::from_bits(1 << 12);
         if d >= threshold {
-            return FixedQuat {
-                w: self.w + (rhs.w - self.w) * t,
-                x: self.x + (rhs.x - self.x) * t,
-                y: self.y + (rhs.y - self.y) * t,
-                z: self.z + (rhs.z - self.z) * t,
-            }
-            .normalize();
+            return self.nlerp(rhs, t);
         }
 
         let omega = acos(d);
@@ -290,6 +272,10 @@ impl Mul<FixedQuat> for FixedQuat {
 ///
 /// Uses `v' = v + 2w(q_xyz × v) + 2(q_xyz × (q_xyz × v))`, which needs two
 /// cross products and avoids a full quaternion multiply + division.
+///
+/// **Overflow**: intermediates grow up to `8×` the input magnitude, so
+/// components of `v` should stay below roughly `5_000` to avoid Q32.32
+/// overflow in the nested cross products.
 impl Mul<FixedVec3> for FixedQuat {
     type Output = FixedVec3;
     #[inline]

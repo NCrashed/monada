@@ -127,8 +127,28 @@ impl FixedVec3 {
 
     /// Unit vector in the same direction, or [`FixedVec3::ZERO`] for the
     /// zero vector.
+    ///
+    /// Handles components up to `i64::MAX / 2^32` by scaling the vector
+    /// down a power of two before squaring, preserving direction.
     #[must_use]
     pub fn normalize(self) -> FixedVec3 {
+        // In Q32.32 the safe squaring threshold is ≈ 46340 (sqrt of
+        // i64::MAX in Q32.32 units). Shift down until all components fit.
+        const MAX_SAFE: i64 = 46340_i64 << 32;
+        let max_abs = self
+            .x
+            .to_bits()
+            .abs()
+            .max(self.y.to_bits().abs())
+            .max(self.z.to_bits().abs());
+        if max_abs > MAX_SAFE {
+            return FixedVec3::new(
+                Fixed::from_bits(self.x.to_bits() >> 16),
+                Fixed::from_bits(self.y.to_bits() >> 16),
+                Fixed::from_bits(self.z.to_bits() >> 16),
+            )
+            .normalize();
+        }
         let len = self.length();
         if len == Fixed::ZERO {
             return FixedVec3::ZERO;
@@ -141,7 +161,9 @@ impl FixedVec3 {
     #[must_use]
     pub fn clamp_length_max(self, max: Fixed) -> FixedVec3 {
         let len_sq = self.length_squared();
-        let max_sq = max * max;
+        // `max * max` overflows Q32.32 for max > ~46340; use checked_mul
+        // and treat overflow as "definitely larger than any real length".
+        let max_sq = max.checked_mul(max).unwrap_or(Fixed::MAX);
         if len_sq <= max_sq {
             self
         } else {
@@ -150,10 +172,14 @@ impl FixedVec3 {
     }
 
     /// Vector rejection of `self` from `rhs`: the component of `self`
-    /// perpendicular to `rhs`. `rhs` must be non-zero.
+    /// perpendicular to `rhs`. Returns `self` unchanged when `rhs` is zero.
     #[must_use]
     pub fn reject(self, rhs: FixedVec3) -> FixedVec3 {
-        self - rhs.scale(self.dot(rhs) / rhs.length_squared())
+        let len_sq = rhs.length_squared();
+        if len_sq == Fixed::ZERO {
+            return self;
+        }
+        self - rhs.scale(self.dot(rhs) / len_sq)
     }
 }
 

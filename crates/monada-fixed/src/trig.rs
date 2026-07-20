@@ -39,43 +39,44 @@ pub const TAU: Fixed = Fixed::from_bits(TAU_BITS);
 /// π/2 as a [`Fixed`].
 pub const FRAC_PI_2: Fixed = Fixed::from_bits(FRAC_PI_2_BITS);
 
+/// Linear interpolation between two LUT entries, all in i128 to avoid overflow.
+#[inline]
+fn lut_lerp(a: i128, b: i128, rem: i128, denom: i128) -> i64 {
+    (a + (b - a) * rem / denom) as i64
+}
+
+/// Look up `SIN_LUT` for a reduced angle `r ∈ [0, TAU_BITS)` with an
+/// optional LUT index offset. `offset = 0` gives sin; `offset = LUT_LEN/4`
+/// gives cos (equivalent to a π/2 phase shift in index space).
+fn sin_lookup(r: i64, offset: usize) -> Fixed {
+    // Sample position split into integer index + lerp remainder.
+    // `num` peaks near TAU_BITS * LUT_LEN ≈ 2^45, safe in i128.
+    let tau = i128::from(TAU_BITS);
+    let num = i128::from(r) * LUT_LEN as i128;
+    let idx0 = ((num / tau) as usize + offset) % LUT_LEN;
+    let rem = num % tau;
+    let idx1 = if idx0 + 1 == LUT_LEN { 0 } else { idx0 + 1 };
+    Fixed::from_bits(lut_lerp(
+        i128::from(SIN_LUT[idx0]),
+        i128::from(SIN_LUT[idx1]),
+        rem,
+        tau,
+    ))
+}
+
 /// Sine of `angle` (radians).
 #[must_use]
 pub fn sin(angle: Fixed) -> Fixed {
-    // Reduce into one full turn `[0, TAU_BITS)`. `rem_euclid` keeps the
-    // result non-negative regardless of the sign of `angle`.
-    let r = angle.to_bits().rem_euclid(TAU_BITS);
-
-    // Sample position `s = r / TAU * LUT_LEN`, split into an integer
-    // index and a Q-of-TAU remainder used as the lerp weight. `num`
-    // peaks near `TAU_BITS * LUT_LEN ≈ 2^45`, comfortably inside i128.
-    let tau = i128::from(TAU_BITS);
-    let num = i128::from(r) * LUT_LEN as i128;
-    let idx0 = (num / tau) as usize;
-    let rem = num % tau;
-
-    let idx1 = if idx0 + 1 == LUT_LEN { 0 } else { idx0 + 1 };
-    let a = i128::from(SIN_LUT[idx0]);
-    let b = i128::from(SIN_LUT[idx1]);
-
-    // a + (b - a) * rem / TAU_BITS, all in i128 to avoid overflow.
-    let interpolated = a + (b - a) * rem / tau;
-    Fixed::from_bits(interpolated as i64)
+    sin_lookup(angle.to_bits().rem_euclid(TAU_BITS), 0)
 }
 
 /// Cosine of `angle` (radians).
+///
+/// Uses `SIN_LUT` shifted by `LUT_LEN/4` (≡ π/2 phase) to avoid a
+/// separate `Fixed` addition and the rounding it would introduce.
 #[must_use]
 pub fn cos(angle: Fixed) -> Fixed {
-    let r = angle.to_bits().rem_euclid(TAU_BITS);
-    let tau = i128::from(TAU_BITS);
-    let num = i128::from(r) * LUT_LEN as i128;
-    let rem = num % tau;
-    // cos(x) = sin(x + π/2): shift index by LUT_LEN/4 with wraparound.
-    let idx0 = ((num / tau) as usize + LUT_LEN / 4) % LUT_LEN;
-    let idx1 = if idx0 + 1 == LUT_LEN { 0 } else { idx0 + 1 };
-    let a = i128::from(SIN_LUT[idx0]);
-    let b = i128::from(SIN_LUT[idx1]);
-    Fixed::from_bits((a + (b - a) * rem / tau) as i64)
+    sin_lookup(angle.to_bits().rem_euclid(TAU_BITS), LUT_LEN / 4)
 }
 
 /// Angle of the vector `(x, y)` in radians, in `(-π, π]`.
@@ -136,9 +137,12 @@ pub fn acos(x: Fixed) -> Fixed {
     let rem = num % denom;
     let idx1 = (idx0 + 1).min(ACOS_LUT_LEN);
 
-    let a = i128::from(ACOS_LUT[idx0]);
-    let b = i128::from(ACOS_LUT[idx1]);
-    let angle = Fixed::from_bits((a + (b - a) * rem / denom) as i64);
+    let angle = Fixed::from_bits(lut_lerp(
+        i128::from(ACOS_LUT[idx0]),
+        i128::from(ACOS_LUT[idx1]),
+        rem,
+        denom,
+    ));
 
     if negate {
         PI - angle
@@ -160,7 +164,10 @@ fn atan_first_octant(a_bits: i64, b_bits: i64) -> Fixed {
     // idx0 ≤ ATAN_LUT_LEN because a_bits ≤ b_bits; clamp idx1 to stay in bounds.
     let idx1 = (idx0 + 1).min(ATAN_LUT_LEN);
 
-    let a = i128::from(ATAN_LUT[idx0]);
-    let b = i128::from(ATAN_LUT[idx1]);
-    Fixed::from_bits((a + (b - a) * rem / denom) as i64)
+    Fixed::from_bits(lut_lerp(
+        i128::from(ATAN_LUT[idx0]),
+        i128::from(ATAN_LUT[idx1]),
+        rem,
+        denom,
+    ))
 }
