@@ -134,14 +134,14 @@ fn hull_walls_contain_the_crew() {
 }
 
 #[test]
-fn stair_run_changes_deck() {
+fn hatch_changes_deck() {
     let (world, mut b) = fresh();
     step(&mut b, &input(0, 0)); // spawn on the lower deck (deck 0, z 0)
     assert_eq!(crew_deck(&world), 0);
-    // Walk east (≈ +x) into the starboard stair run; the rising edge flips the
+    // Walk east (≈ +x) onto the fore-starboard hatch; the rising edge flips the
     // deck and reseats onto the upper floor (sim-z 28 = DECK_STRIDE).
     hold(&mut b, 1, -1, 120);
-    assert_eq!(crew_deck(&world), 1, "reached the stair run → upper deck");
+    assert_eq!(crew_deck(&world), 1, "reached the hatch → upper deck");
     let z = crew_pos(&world).z.to_f64();
     assert!(
         (z - 28.0).abs() < 0.01,
@@ -171,13 +171,13 @@ fn upper_deck_ignores_the_lower_wall() {
     // check would stop it there.
     let (world, mut b) = fresh();
     step(&mut b, &input(0, 0)); // spawn
-    hold(&mut b, 1, -1, 120); // east into the stair run → upper deck
+    hold(&mut b, 1, -1, 120); // east onto the hatch → upper deck
     assert_eq!(crew_deck(&world), 1, "on the upper deck");
-    hold(&mut b, 1, 1, 120); // ≈ +y (north), staying at x≈18 (still in the run)
+    hold(&mut b, 1, 1, 120); // ≈ +y (north), off the hatch and up the starboard side
     assert_eq!(
         crew_deck(&world),
         1,
-        "still upper (latched in the stair run)"
+        "still upper (left the hatch, no re-flip)"
     );
     let y = crew_pos(&world).y.to_f64();
     assert!(
@@ -208,41 +208,47 @@ fn deterministic_walk() {
 }
 
 #[test]
-fn stair_flip_at_divider_row_is_not_a_soft_lock() {
-    // Regression: crossing the stair run on the UPPER deck at y≈10 flips to the
-    // LOWER deck, whose y=10 divider runs right there. The flip must land the
-    // crew on clear floor (open stair column + landing guard/retry), NOT inside
-    // the divider — else it seats in a wall and soft-locks (moved == 0). The
-    // deck-relative / stair tests above cross at y≈4 and miss this row.
+fn hatch_round_trips_both_ways() {
+    // The discrete fore-starboard hatch flips the crew UP and, on a second
+    // visit, back DOWN — always landing on clear floor (it sits clear of both
+    // dividers, so the landing guard never has to refuse). Exercises the
+    // transition round-trip + reseating on each deck's floor.
     let (world, mut b) = fresh();
-    step(&mut b, &input(0, 0));
-    hold(&mut b, 1, -1, 120); // E: into the run → onto the upper deck
-    assert_eq!(crew_deck(&world), 1, "reached the upper deck");
-    hold(&mut b, -1, 1, 70); // W: pin against the upper (x=10) divider, out of the run
-    hold(&mut b, 1, 1, 39); // N: climb to y≈10
-                            // Re-enter the run heading east; catch the down-flip on the divider row.
-    let mut flip_y = None;
-    for _ in 0..60 {
-        let before = crew_deck(&world);
-        step(&mut b, &input(1, -1));
-        if crew_deck(&world) != before {
-            flip_y = Some(crew_pos(&world).y.to_f64());
-        }
-    }
-    assert_eq!(crew_deck(&world), 0, "flipped back down to the lower deck");
-    let fy = flip_y.expect("crew flipped decks in the run");
-    assert!(
-        (9.0..=11.0).contains(&fy),
-        "flip exercised the lower divider row (y = {fy})"
+    step(&mut b, &input(0, 0)); // deck 0 (lower)
+    hold(&mut b, 1, -1, 120); // E onto the hatch → up
+    assert_eq!(
+        crew_deck(&world),
+        1,
+        "hatch took the crew up to the upper deck"
     );
-    // The crux: having landed on the lower deck at the divider row, the crew can
-    // still move — it did NOT seat inside the divider.
+    let z_up = crew_pos(&world).z.to_f64();
+    assert!(
+        (z_up - 28.0).abs() < 0.01,
+        "reseated on the upper floor (z=28, was {z_up})"
+    );
+
+    // Off the hatch (west to the x=10 divider), then back onto it → down.
+    hold(&mut b, -1, 1, 70); // W off the hatch (cx < 16)
+    assert_eq!(crew_deck(&world), 1, "still upper after leaving the hatch");
+    hold(&mut b, 1, -1, 90); // E back onto the hatch
+    assert_eq!(
+        crew_deck(&world),
+        0,
+        "hatch took the crew back down to the lower deck"
+    );
+    let z_dn = crew_pos(&world).z.to_f64();
+    assert!(
+        z_dn.abs() < 0.01,
+        "reseated on the lower floor (z=0, was {z_dn})"
+    );
+
+    // Not soft-locked: it still walks on the lower deck after the down-flip.
     let before = crew_pos(&world);
-    hold(&mut b, 1, 1, 30);
+    hold(&mut b, -1, 1, 20);
     let after = crew_pos(&world);
     let moved = (after.x - before.x).to_f64().abs() + (after.y - before.y).to_f64().abs();
     assert!(
         moved > 0.5,
-        "crew is not soft-locked after the flip (moved = {moved})"
+        "crew walks after the down-flip (moved = {moved})"
     );
 }

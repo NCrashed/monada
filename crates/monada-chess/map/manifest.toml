@@ -2,6 +2,9 @@
 # monada_format::Manifest.
 name = "Chess 2.0"
 engine_version = "0.0.1"
+# Script-API version required (monada-script HOST_API_VERSION); a host
+# outside its supported range refuses the map instead of desyncing.
+host_api = 1
 players = 2
 # Turn-based: the sim advances only when a command arrives (DESIGN.md §6).
 sim_hz = "on_command"

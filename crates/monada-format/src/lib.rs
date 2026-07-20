@@ -179,6 +179,12 @@ impl ActionDecl {
     }
 }
 
+/// Serde default for [`Manifest::host_api`]: maps that predate the
+/// declaration require v1.
+fn default_host_api() -> u32 {
+    1
+}
+
 /// `manifest.toml` — the map's declared identity and runtime needs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -186,6 +192,13 @@ pub struct Manifest {
     pub name: String,
     /// Engine version the map was authored against.
     pub engine_version: String,
+    /// Host script-API version the map's scripts require — the version
+    /// of the registered function surface (`monada-script`'s
+    /// `HOST_API_VERSION`), not the engine build. The host refuses to
+    /// run a map whose requirement falls outside its supported range.
+    /// Absent = 1, the surface as of the first declaration.
+    #[serde(default = "default_host_api")]
+    pub host_api: u32,
     /// Player count (chess = 2).
     pub players: u32,
     /// Tick model (`"on_command"` or a Hz number).
@@ -207,12 +220,17 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Validate the action declarations (unique ids, default shapes).
-    /// Called by [`Map::read`]; exposed for tools that build manifests.
+    /// Validate the manifest's own consistency: `host_api` is a real
+    /// version and the action declarations hold (unique ids, default
+    /// shapes). Called by [`Map::read`]; exposed for tools that build
+    /// manifests.
     ///
     /// # Errors
     /// A human-readable description of the first invalid declaration.
     pub fn validate(&self) -> Result<(), String> {
+        if self.host_api == 0 {
+            return Err("host_api 0 is invalid (versions start at 1)".into());
+        }
         for (i, action) in self.actions.iter().enumerate() {
             action.validate()?;
             if self.actions[..i].iter().any(|a| a.id == action.id) {
@@ -462,6 +480,25 @@ mod tests {
         other.insert("scripts/main.rhai".to_string(), b"fn init() { 1 }".to_vec());
         let map_b = Map::read(&pack(&other).unwrap()).unwrap();
         assert_ne!(map_a.hash, map_b.hash);
+    }
+
+    #[test]
+    fn host_api_defaults_to_v1_and_rejects_zero() {
+        // A pre-declaration manifest (the `sample()` one) requires v1.
+        let map = Map::read(&pack(&sample()).unwrap()).unwrap();
+        assert_eq!(map.manifest.host_api, 1);
+        // An explicit requirement is carried through.
+        let mut files = sample();
+        let declared =
+            String::from_utf8(files["manifest.toml"].clone()).unwrap() + "\nhost_api = 3\n";
+        files.insert("manifest.toml".to_string(), declared.into_bytes());
+        let map = Map::read(&pack(&files).unwrap()).unwrap();
+        assert_eq!(map.manifest.host_api, 3);
+        // v0 never existed; a manifest claiming it is malformed.
+        let mut files = sample();
+        let zero = String::from_utf8(files["manifest.toml"].clone()).unwrap() + "\nhost_api = 0\n";
+        files.insert("manifest.toml".to_string(), zero.into_bytes());
+        assert!(Map::read(&pack(&files).unwrap()).is_err());
     }
 
     #[test]

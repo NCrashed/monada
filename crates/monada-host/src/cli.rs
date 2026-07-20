@@ -13,10 +13,15 @@ use crate::{MapRun, NetRole, RunConfig};
 /// Build a [`RunConfig`] for an already-loaded `map` from this process's
 /// argv: `--listen` / `--connect <addr>` is a two-process LAN match,
 /// `--replay <file>` watches a recorded game, and no flag is a local
-/// hotseat. Exits with a usage message on a malformed flag or a bad /
-/// mismatched replay.
+/// hotseat. Exits with a usage message on a malformed flag, a bad /
+/// mismatched replay, or a map whose `host_api` requirement this build
+/// does not support.
 #[must_use]
 pub fn config_for_map(map: Map) -> RunConfig {
+    if let Err(e) = monada_script::check_host_api(map.manifest.host_api) {
+        eprintln!("monada: {}: {e}", map.manifest.name);
+        exit(2);
+    }
     let mut role = None;
     let mut replay_path = None;
     let mut args = std::env::args().skip(1);

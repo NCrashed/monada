@@ -452,6 +452,10 @@ pub fn parse_goldens(text: &str) -> Result<Vec<(String, u64)>, String> {
 pub fn run_example_map(dir: &Path, ticks: u64) -> Result<u64, String> {
     let bytes = pack_dir(dir).map_err(|e| format!("pack {}: {e}", dir.display()))?;
     let map = Map::read(&bytes).map_err(|e| format!("read {}: {e}", dir.display()))?;
+    // The same gate the interactive host applies in `config_for_map` —
+    // an example must not claim an API the shipped host would refuse.
+    monada_script::check_host_api(map.manifest.host_api)
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
     let script = map
         .entry_script()
         .ok_or("manifest `entry` names no packed script")?;

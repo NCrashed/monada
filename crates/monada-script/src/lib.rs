@@ -28,6 +28,42 @@ pub use driver::RhaiDriver;
 pub use local_backend::LocalBackend;
 pub use rhai_backend::RhaiBackend;
 
+/// The host script-API version this crate registers: the set of
+/// functions, their names, and their semantics that map scripts see
+/// (both the sim layer, [`RhaiBackend`], and the local layer,
+/// [`LocalBackend`]). A map's manifest declares the version it requires
+/// (`host_api`); a host runs it only when that requirement falls inside
+/// [`HOST_API_OLDEST`]`..=`[`HOST_API_VERSION`] — see [`check_host_api`].
+///
+/// Bump discipline: *adding* functions bumps `HOST_API_VERSION` only —
+/// maps requiring older versions keep working. Renaming, removing, or
+/// changing the observable semantics of a registered function is a
+/// breaking change: bump **both** constants to the same new value, so
+/// maps written against the old surface are refused loudly instead of
+/// desyncing or dying mid-game.
+pub const HOST_API_VERSION: u32 = 1;
+
+/// The oldest declared `host_api` requirement this build still fully
+/// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
+/// breaking change catches it up.
+pub const HOST_API_OLDEST: u32 = 1;
+
+/// Check a map's declared `host_api` requirement against this build's
+/// supported range. The one gate every map-loading path shares.
+///
+/// # Errors
+/// A human-readable refusal naming both sides' versions.
+pub fn check_host_api(required: u32) -> Result<(), String> {
+    if (HOST_API_OLDEST..=HOST_API_VERSION).contains(&required) {
+        Ok(())
+    } else {
+        Err(format!(
+            "map requires host API v{required}; this host supports \
+             v{HOST_API_OLDEST}..v{HOST_API_VERSION}"
+        ))
+    }
+}
+
 /// The shared, lockable world a [`ScriptBackend`] mutates.
 ///
 /// `sync`-feature Rhai needs `Send + Sync` host functions, so the world

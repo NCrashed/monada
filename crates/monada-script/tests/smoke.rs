@@ -151,3 +151,14 @@ fn tick_with_dt_receives_correct_duration() {
     // 2 cells/sec * 0.25 sec/tick * 4 ticks = 2.0 cells
     assert_eq!(w.field(e, "x"), Some(Fixed::from_int(2)));
 }
+
+#[test]
+fn host_api_gate_accepts_only_the_supported_range() {
+    use monada_script::{check_host_api, HOST_API_OLDEST, HOST_API_VERSION};
+    assert!(check_host_api(HOST_API_OLDEST).is_ok());
+    assert!(check_host_api(HOST_API_VERSION).is_ok());
+    // v0 never existed, and the future is by definition unsupported.
+    assert!(check_host_api(0).is_err());
+    let too_new = check_host_api(HOST_API_VERSION + 1).unwrap_err();
+    assert!(too_new.contains("requires host API"), "{too_new}");
+}

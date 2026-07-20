@@ -3,6 +3,7 @@
 # input path in one small map.
 name = "Top-down Mover"
 engine_version = "0.0.1"
+host_api = 1
 players = 1
 sim_hz = "30hz"
 script_runtime = "rhai"

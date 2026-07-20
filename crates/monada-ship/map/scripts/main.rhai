@@ -3,7 +3,7 @@
 //! The engine knows no genre: this script paints a two-deck voxel hull,
 //! defines an animated billboard "crew" actor (reusing the RPG hero GIFs), and
 //! walks it around each deck on the deterministic fixed-point sim, crossing
-//! decks at the starboard stair run. The host injects one real-time input
+//! decks at a fore-starboard hatch. The host injects one real-time input
 //! command per tick (verb 0): `arg = vec3(move_x, move_y, 0)`. Render calls
 //! (`entity_set_anim`, `entity_set_facing`, `camera_focus`) never touch the
 //! hashed world, so they can't desync a peer.
@@ -130,20 +130,22 @@ fn blocked(cx, cy, deck) {
         return true; // rim / out of bounds, both decks
     }
     if deck == 0 {
-        // Lower deck: divider along y=10 — doorway gap at x 9..10, and open
-        // over the starboard stair run (x≥16) so a flip lands clear there.
-        cy == 10 && cx != 9 && cx != 10 && cx <= 15
+        // Lower deck: full divider along y=10, doorway gap at x 9..10. (The
+        // hatch is fore-starboard, off this row, so no opening is needed here.)
+        cy == 10 && cx != 9 && cx != 10
     } else {
         // Upper deck: divider along x=10, doorway gap at y 9..10.
         cx == 10 && cy != 9 && cy != 10
     }
 }
 
-/// The starboard "stair run" (`cx ≥ 16`) linking the two decks: stepping into
-/// it flips the crew's deck (see `step_crew`). S-B places it as a zone for a
-/// robust, navigation-tolerant transition; a proper walled stairwell with a
-/// doorway lands in a later slice.
-fn is_stair(cx, cy) { cx >= 16 }
+/// The deck **hatch**: a discrete fore-starboard corner cell (`cx ≥ 16`,
+/// `cy ≤ 4`) that links the two decks — stepping onto it flips the crew's deck
+/// (see `step_crew`). Painted as a bright marker in `build_hull` so it reads as
+/// a ladder/hatch, not just floor. (S-B used the whole starboard strip; a
+/// discrete hatch reads far better in the top-down view.) It sits clear of both
+/// dividers (lower y=10 / upper x=10), so a flip always lands on open floor.
+fn is_stair(cx, cy) { cx >= 16 && cy <= 4 }
 
 /// Sim position → the cell index it falls in. Integer sim coords are cell
 /// CENTRES (`world_of` seats a sprite at `-(x+0.5)·SCALE`), so a position
@@ -212,7 +214,7 @@ fn init() {
     camera_dist(fixed(60));
     camera_focus(vec3(fixed(6), fixed(4), fixed(0)));
 
-    status("ship demo (S-C) — WASD to walk; starboard runs the deck stair");
+    status("ship demo — WASD to walk; the amber fore-starboard hatch changes deck");
 }
 
 /// Paint the two-deck hull, for the EYE. Collision is the `blocked` predicate
@@ -224,17 +226,15 @@ fn init() {
 fn build_hull() {
     let plate = 0x8055_5f6b; // steel floor plating
     let wall = 0x8079_8592; // hull wall
-    let stair = 0x804d_9a8f; // teal marker for the starboard stair run
+    let hatch = 0x80e0_a828; // amber deck-hatch marker (reads as "caution/ladder")
 
     // --- deck 0 (lower): floor z=0, walls z 1..24 ---
     voxel_fill(0, 0, 0, 19, 19, 0, plate);
     rim_walls(1, 24, wall);
-    // Divider along y=10 splitting fore (y<10) / aft (y>10), doorway gap x 9..10.
-    // It also STOPS before the starboard stair run (ends at x=15, not 18), so the
-    // stair column (x≥16) is open on this deck — a deck flip that reseats a crew
-    // member there always lands on clear floor, not inside the divider.
+    // Full divider along y=10 splitting fore (y<10) / aft (y>10), doorway gap
+    // x 9..10 (the hatch is off this row, so no other opening is needed).
     voxel_fill(1, 10, 1, 8, 10, 24, wall);
-    voxel_fill(11, 10, 1, 15, 10, 24, wall);
+    voxel_fill(11, 10, 1, 18, 10, 24, wall);
 
     // --- deck 1 (upper): floor slab z=28, walls z 29..52 ---
     voxel_fill(0, 0, 28, 19, 19, 28, plate);
@@ -243,10 +243,11 @@ fn build_hull() {
     voxel_fill(10, 1, 29, 10, 8, 52, wall);
     voxel_fill(10, 11, 29, 10, 18, 52, wall);
 
-    // Mark the starboard stair run (cx ≥ 16) on both deck floors so it reads as
-    // the deck link. Purely cosmetic — `is_stair` drives the transition.
-    voxel_fill(16, 1, 0, 18, 18, 0, stair);
-    voxel_fill(16, 1, 28, 18, 18, 28, stair);
+    // The deck hatch (fore-starboard corner, cx 16..18 × cy 1..4 — matches
+    // `is_stair`): an amber marker on BOTH deck floors so it reads as the ladder
+    // that links them. Cosmetic — `is_stair`/`step_crew` drive the transition.
+    voxel_fill(16, 1, 0, 18, 4, 0, hatch);
+    voxel_fill(16, 1, 28, 18, 4, 28, hatch);
 }
 
 /// A rim wall band (z `lo`..`hi`) around the 20×20 hull edge.
@@ -264,7 +265,7 @@ fn ensure_crew(player) {
         let idx = entities_of(0).len();
         let c = entity_create(0);
         // Fore-port on the lower deck (clear of the y=10 divider and the
-        // x≥16 stair run), spread so co-op crew don't stack.
+        // hatch, cx≥16 & cy≤4), spread so co-op crew don't stack.
         entity_set_position(c, vec3(fixed(5 + idx * 2), fixed(4), fixed(0)));
         entity_set_field(c, "deck", fixed(0));
         entity_set_field(c, "on_stair", fixed(0));
@@ -299,11 +300,30 @@ fn tick() {
         step_crew(c);
     }
     follow_camera();
+    build_deck_hud();
+}
+
+/// Always-on HUD readout of the LOCAL crew's current deck, so a deck change at
+/// the hatch is unmistakable (the map HUD paints every frame, unlike the F1
+/// status line). Render-side: headless/oracle no-op every `ui_*` call.
+fn build_deck_hud() {
+    let crew = entities_of(0);
+    let lp = local_player();
+    let idx = if lp < 0 { 0 } else { lp };
+    if idx >= crew.len() {
+        return;
+    }
+    let d = to_int(entity_field(crew[idx], "deck"));
+    ui_clear();
+    ui_scale(fixed(2));
+    let label = if d == 0 { "DECK 1 / 2  (lower)" } else { "DECK 2 / 2  (upper)" };
+    ui_text(8, 8, label, 12);
+    ui_text(8, 26, "amber hatch (fore-starboard) changes deck", 8);
 }
 
 /// Advance one crew member: turn its stored input into a view-relative,
 /// collision-checked move on its current deck, handle the deck transition when
-/// it enters the stair run, and pick the walk/idle animation + facing.
+/// it steps onto the hatch, and pick the walk/idle animation + facing.
 fn step_crew(c) {
     let deck = to_int(entity_field(c, "deck"));
     let ix = entity_field(c, "ix");
@@ -319,17 +339,14 @@ fn step_crew(c) {
         entity_set_anim(c, "idle");
     }
 
-    // Deck transition. Entering the stair run flips the deck and reseats onto
-    // the new floor. Two safeguards make this soft-lock-proof:
+    // Deck transition. Stepping onto the hatch flips the deck and reseats onto
+    // the new floor. Two safeguards keep it soft-lock-proof (belt-and-braces —
+    // the hatch is clear of both dividers, so the guard never actually fires):
     //  * LANDING GUARD — flip only if the crew's footprint is CLEAR on the
     //    target deck, so a transition can never seat it inside a wall.
     //  * RETRY — the `on_stair` latch (which stops it toggling every tick while
-    //    standing in the run) is set ONLY once a flip actually succeeds. A
-    //    refused attempt — e.g. at the very edge of the run, where the footprint
-    //    still overlaps the divider's end on the target deck — leaves the latch
-    //    off, so the next tick retries as the crew moves deeper into the run and
-    //    the landing clears. So the flip is guaranteed to happen (a tick or two
-    //    in) and can never strand the crew in a wall.
+    //    standing on the hatch) is set ONLY once a flip actually succeeds, so a
+    //    refused attempt retries next tick instead of stranding the crew.
     let pos = entity_position(c);
     let was_on_stair = to_int(entity_field(c, "on_stair")) == 1;
     let in_stair = is_stair(cell(pos.x), cell(pos.y));

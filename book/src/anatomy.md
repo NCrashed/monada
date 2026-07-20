@@ -27,6 +27,7 @@ opaque data the script refers to by its archive-relative path.
 ```toml
 name = "Hello Voxels"
 engine_version = "0.0.1"
+host_api = 1
 players = 1
 sim_hz = "30hz"
 script_runtime = "rhai"
@@ -37,6 +38,7 @@ entry = "scripts/main.rhai"
 |---|---|
 | `name` | Human-readable title, shown in the host and used as the key for saved key bindings. |
 | `engine_version` | The engine version the map was authored against. |
+| `host_api` | The script-API version the map requires — the version of the function set your scripts call (`entity_create`, `voxel_set`, …). A host that does not carry that version refuses the map up front instead of failing mid-game. Omitted = `1`. |
 | `players` | Player count (a two-player map is `2`). |
 | `sim_hz` | The tick model — see below. |
 | `script_runtime` | The scripting backend; `"rhai"` in v0. |

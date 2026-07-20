@@ -2,7 +2,7 @@
 //! CPU renderer (no window) and dump PNGs, so we can SEE what `deck_clip`
 //! (`Grid::z_clip`) actually does from the SS13 top-down camera — the "circle
 //! that cuts the ceiling" the live GPU run showed. Renders the lower-deck view
-//! (z_clip set), the upper-deck view, and a no-clip reference.
+//! (`z_clip` set), the upper-deck view, and a no-clip reference.
 //!
 //! ```text
 //! cargo run -p monada-host --example ship_clip_probe
@@ -55,20 +55,20 @@ fn world_of(x: f64, y: f64, z: f64) -> DVec3 {
 fn build_hull(scene: &mut Scene, grid: GridId) {
     let plate = 0x8055_5f6b;
     let wall = 0x8079_8592;
-    let stair = 0x804d_9a8f;
-    // deck 0 (lower): floor z=0, walls z 1..24
+    let hatch = 0x80e0_a828;
+    // deck 0 (lower): floor z=0, walls z 1..24, full y=10 divider (doorway x 9..10)
     fill(scene, grid, 0, 0, 0, 19, 19, 0, plate);
     rim(scene, grid, 1, 24, wall);
     fill(scene, grid, 1, 10, 1, 8, 10, 24, wall);
-    fill(scene, grid, 11, 10, 1, 15, 10, 24, wall);
-    // deck 1 (upper): floor z=28, walls z 29..52
+    fill(scene, grid, 11, 10, 1, 18, 10, 24, wall);
+    // deck 1 (upper): floor z=28, walls z 29..52, x=10 divider (doorway y 9..10)
     fill(scene, grid, 0, 0, 28, 19, 19, 28, plate);
     rim(scene, grid, 29, 52, wall);
     fill(scene, grid, 10, 1, 29, 10, 8, 52, wall);
     fill(scene, grid, 10, 11, 29, 10, 18, 52, wall);
-    // stair markers
-    fill(scene, grid, 16, 1, 0, 18, 18, 0, stair);
-    fill(scene, grid, 16, 1, 28, 18, 18, 28, stair);
+    // fore-starboard deck hatch (cx 16..18 × cy 1..4)
+    fill(scene, grid, 16, 1, 0, 18, 4, 0, hatch);
+    fill(scene, grid, 16, 1, 28, 18, 4, 28, hatch);
 }
 
 fn rim(scene: &mut Scene, grid: GridId, lo: i32, hi: i32, col: u32) {
@@ -132,4 +132,7 @@ fn main() {
     // Upper deck: focus at sim z=28, clip = G - deck_top(1)=55 → 45.
     let upper_focus = world_of(10.0, 10.0, 28.0);
     render_png("probe_upper_clip45", Some(45), upper_focus);
+    // Camera on the crew standing at the hatch (sim ~16,3) — does the amber
+    // marker read as a distinct hatch?
+    render_png("probe_hatch", Some(73), world_of(15.0, 3.0, 0.0));
 }

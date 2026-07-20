@@ -2,6 +2,9 @@
 # a single box that walks across it — enough to exercise init + tick.
 name = "Hello Voxels"
 engine_version = "0.0.1"
+# Script-API version this map requires; the host refuses a map asking
+# for an API it does not carry (chapter 3 explains the contract).
+host_api = 1
 players = 1
 # Real-time: the sim advances on a fixed 30 Hz clock, so `tick(dt)` runs.
 sim_hz = "30hz"
