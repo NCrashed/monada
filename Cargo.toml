@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/monada-fixed",
+    "crates/monada-nav",
     "crates/monada-sim",
     "crates/monada-script",
     "crates/monada-net",
@@ -47,6 +48,7 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 # is what a future `cargo publish` records for downstream resolution
 # (mirrors roxlap's convention).
 monada-fixed = { path = "crates/monada-fixed", version = "0.0.1" }
+monada-nav = { path = "crates/monada-nav", version = "0.0.1" }
 monada-sim = { path = "crates/monada-sim", version = "0.0.1" }
 monada-script = { path = "crates/monada-script", version = "0.0.1" }
 monada-net = { path = "crates/monada-net", version = "0.0.1" }

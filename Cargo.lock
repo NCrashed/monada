@@ -1600,6 +1600,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "monada-nav"
+version = "0.0.1"
+
+[[package]]
 name = "monada-net"
 version = "0.0.1"
 dependencies = [
@@ -1672,6 +1676,7 @@ name = "monada-script"
 version = "0.0.1"
 dependencies = [
  "monada-fixed",
+ "monada-nav",
  "monada-net",
  "monada-sim",
  "rhai",

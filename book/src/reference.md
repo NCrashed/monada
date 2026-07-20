@@ -87,6 +87,8 @@ them too.
 |---|---|
 | `voxel_solid(x, y, z)` | whether a cell is solid |
 | `ground_height(x, y)` | the highest solid `z` in a column, or `0` |
+| `nav_block(x, y, on)` | mark / clear a cell as impassable for navigation (building footprints, props) |
+| `nav_path(x0, y0, x1, y1, max_step)` | a deterministic A\* path as an array of waypoint `vec3`s (`z` = ground height); steps climb at most `max_step`, an unreachable goal yields the closest approach |
 
 ## Command routing
 

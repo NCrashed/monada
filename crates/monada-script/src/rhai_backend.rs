@@ -577,6 +577,27 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").ground_height(x, y)
     });
 
+    // Deterministic navigation (docs/plans/rts-demo.md §1a): a budgeted
+    // integer A* over the same store the collision queries read, plus an
+    // explicit blocker overlay. Same determinism contract as above.
+    let b = bridge.clone();
+    engine.register_fn("nav_block", move |x: i64, y: i64, on: bool| {
+        b.lock().expect("bridge mutex").nav_block(x, y, on);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn(
+        "nav_path",
+        move |x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64| -> Array {
+            b.lock()
+                .expect("bridge mutex")
+                .nav_path(x0, y0, x1, y1, max_step)
+                .into_iter()
+                .map(Dynamic::from)
+                .collect()
+        },
+    );
+
     // Per-cell PNG tiles: `tile(path)` loads, `tile_fill` paints a cell region.
     let b = bridge.clone();
     engine.register_fn("tile", move |path: ImmutableString| -> i64 {

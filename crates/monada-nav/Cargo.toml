@@ -1,0 +1,18 @@
+[package]
+name = "monada-nav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+description = "Deterministic grid pathfinding for monada: integer octile A* over a heightfield + blocker overlay, budgeted with best-effort partial paths."
+documentation = "https://docs.rs/monada-nav"
+keywords = ["pathfinding", "astar", "deterministic", "lockstep", "gamedev"]
+categories = ["game-development", "algorithms"]
+
+[dependencies]
+
+[lints]
+workspace = true

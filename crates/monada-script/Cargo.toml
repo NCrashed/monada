@@ -12,6 +12,9 @@ description = "monada scripting runtime (Rhai v0, WASM post-v0) + the host API w
 [dependencies]
 monada-sim = { workspace = true }
 monada-fixed = { workspace = true }
+# The deterministic grid pathfinder behind `nav_path`/`nav_block`
+# (docs/plans/rts-demo.md §1a); VoxelStore implements its NavWorld.
+monada-nav = { workspace = true }
 # The lockstep session's SimDriver seam. monada-script is the only crate
 # that links both rhai and net: RhaiDriver adapts the Rhai backend to the
 # transport-agnostic session (DESIGN.md §3.1, M3). net never links rhai.

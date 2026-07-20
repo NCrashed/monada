@@ -13,7 +13,7 @@
 //! position and fields through the host API.
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -41,8 +41,9 @@ pub use rhai_backend::RhaiBackend;
 /// breaking change: bump **both** constants to the same new value, so
 /// maps written against the old surface are refused loudly instead of
 /// desyncing or dying mid-game.
-/// History: 2 = `camera_pan` (RTS demo, docs/plans/rts-demo.md).
-pub const HOST_API_VERSION: u32 = 2;
+/// History: 2 = `camera_pan`; 3 = `nav_path`/`nav_block` (RTS demo,
+/// docs/plans/rts-demo.md).
+pub const HOST_API_VERSION: u32 = 3;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -383,6 +384,28 @@ pub trait HostBridge: Send {
         0
     }
 
+    /// Mark / clear cell `(x, y)` as explicitly impassable for navigation
+    /// (a building footprint, a prop) regardless of its height — the
+    /// overlay [`nav_path`](Self::nav_path) ANDs with the heightfield walk
+    /// rule. Same determinism contract as [`voxel_fill`](Self::voxel_fill):
+    /// fed only by command-driven script calls, so every peer holds the
+    /// same set. The default ignores it.
+    fn nav_block(&mut self, _x: i64, _y: i64, _on: bool) {}
+
+    /// A deterministic path from cell `(x0, y0)` to `(x1, y1)`: budgeted
+    /// integer A* (`monada-nav`) under the shared walk rule — a step
+    /// between neighbouring cells passes when |Δ[`ground_height`](Self::ground_height)|
+    /// ≤ `max_step` and the target isn't [`nav_block`](Self::nav_block)ed;
+    /// diagonals may not cut corners. Waypoints are cell coordinates with
+    /// `z` = ground height; empty when already there. An unreachable goal
+    /// yields the best-effort path toward the closest reachable cell —
+    /// never an error. Same determinism contract as
+    /// [`voxel_solid`](Self::voxel_solid), so results may steer hashed
+    /// `tick()` movement. The default (no terrain) finds nothing.
+    fn nav_path(&self, _x0: i64, _y0: i64, _x1: i64, _y1: i64, _max_step: i64) -> Vec<FixedVec3> {
+        Vec::new()
+    }
+
     /// Load a per-cell tile texture from an `assets/` PNG, resampled to the
     /// host's cell resolution. Returns a tile id for [`tile_fill`](Self::tile_fill),
     /// or `-1` if the asset is missing. Render-side only; the default ignores it.
@@ -503,6 +526,11 @@ pub trait HostBridge: Send {
 #[derive(Default, Clone)]
 pub struct VoxelStore {
     tops: BTreeMap<(i64, i64), i64>,
+    /// Explicit nav blockers (building footprints, props) — an overlay the
+    /// pathfinder ANDs with the heightfield walk rule. Deterministic sim
+    /// state by the same argument as `tops`: fed only by command-driven
+    /// script calls, so every peer holds the same set.
+    nav_blocked: BTreeSet<(i64, i64)>,
 }
 
 impl VoxelStore {
@@ -542,6 +570,60 @@ impl VoxelStore {
     #[must_use]
     pub fn ground_height(&self, x: i64, y: i64) -> i64 {
         self.tops.get(&(x, y)).map_or(0, |&top| top)
+    }
+
+    /// Mark / clear cell `(x, y)` as explicitly impassable for navigation
+    /// (building footprint, prop) regardless of its height.
+    pub fn nav_block(&mut self, x: i64, y: i64, on: bool) {
+        if on {
+            self.nav_blocked.insert((x, y));
+        } else {
+            self.nav_blocked.remove(&(x, y));
+        }
+    }
+
+    /// A deterministic path from cell `(x0, y0)` to `(x1, y1)` under the
+    /// shared walk rule (|Δ`ground_height`| ≤ `max_step` per step, nav
+    /// blockers impassable, no corner cutting) — `monada-nav`'s budgeted
+    /// A*. Waypoints are cell coordinates with `z` = the cell's ground
+    /// height; empty when already there. An unreachable goal yields the
+    /// best-effort path toward the closest reachable cell (never an
+    /// error). Searches inside the painted world's bounding box.
+    #[must_use]
+    pub fn nav_path(&self, x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64) -> Vec<FixedVec3> {
+        let mut keys = self.tops.keys().chain(self.nav_blocked.iter());
+        let Some(&first) = keys.next() else {
+            return Vec::new(); // nothing painted, nowhere to walk
+        };
+        let bounds = keys.fold((first.0, first.1, first.0, first.1), |b, &(x, y)| {
+            (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y))
+        });
+        let limits = monada_nav::NavLimits {
+            max_step,
+            bounds,
+            // Generous for RTS-scale maps (a 96×96 field is ~9k cells) yet
+            // a hard ceiling on a sim tick's worst case.
+            budget: 20_000,
+        };
+        monada_nav::astar(self, (x0, y0), (x1, y1), &limits)
+            .into_iter()
+            .map(|(x, y)| {
+                FixedVec3::new(
+                    Fixed::from_int(i32::try_from(x).unwrap_or(0)),
+                    Fixed::from_int(i32::try_from(y).unwrap_or(0)),
+                    Fixed::from_int(i32::try_from(self.ground_height(x, y)).unwrap_or(0)),
+                )
+            })
+            .collect()
+    }
+}
+
+impl monada_nav::NavWorld for VoxelStore {
+    fn height(&self, x: i64, y: i64) -> i64 {
+        self.ground_height(x, y)
+    }
+    fn blocked(&self, x: i64, y: i64) -> bool {
+        self.nav_blocked.contains(&(x, y))
     }
 }
 
@@ -633,6 +715,12 @@ impl HostBridge for TerrainBridge {
     }
     fn ground_height(&self, x: i64, y: i64) -> i64 {
         self.terrain.ground_height(x, y)
+    }
+    fn nav_block(&mut self, x: i64, y: i64, on: bool) {
+        self.terrain.nav_block(x, y, on);
+    }
+    fn nav_path(&self, x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64) -> Vec<FixedVec3> {
+        self.terrain.nav_path(x0, y0, x1, y1, max_step)
     }
     // Tiles are render-only, but `tile_fill` still feeds collision like
     // `voxel_fill`, so headless terrain matches the textured live map.

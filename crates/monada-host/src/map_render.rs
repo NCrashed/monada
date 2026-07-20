@@ -740,10 +740,43 @@ impl MapRender {
     /// same un-mirrored convention as [`pick`](Self::pick). `None` if the ray
     /// misses the ground plane.
     #[must_use]
-    #[allow(clippy::unused_self)] // a coordinate transform of this map's space
     pub fn ground_sim(&self, origin: DVec3, dir: DVec3) -> Option<(f64, f64)> {
-        let hit = ground_hit(origin, dir)?;
-        Some((-hit.x / SCALE, hit.y / SCALE))
+        // Heightfield-aware pick: march the ray against the sim collision
+        // store, so a click on a plateau / ramp lands on the cell actually
+        // under the cursor instead of its z=0 shadow (docs/plans/rts-demo.md
+        // §1b). Maps whose terrain is all at z 0 (chess, RPG floor) hit at
+        // exactly the old plane intersection; the plane stays the fallback
+        // for rays that never meet painted terrain. Render-side only.
+        let plane = ground_hit(origin, dir)?;
+        let t_plane = (plane - origin).length();
+        let below = |t: f64| {
+            let p = origin + dir * t;
+            let (sx, sy) = (-p.x / SCALE, p.y / SCALE);
+            // The same nearest-cell rule the scripts' `cell()` uses.
+            let (cx, cy) = ((sx + 0.5).floor() as i64, (sy + 0.5).floor() as i64);
+            let surface = self.terrain.ground_height(cx, cy) as f64;
+            GROUND_Z - p.z <= surface
+        };
+        // Coarse march (1/8 cell), then bisect the crossing step.
+        let step = SCALE / 8.0;
+        let mut t = 0.0;
+        while t < t_plane && !below(t) {
+            t += step;
+        }
+        if t >= t_plane {
+            return Some((-plane.x / SCALE, plane.y / SCALE));
+        }
+        let (mut lo, mut hi) = ((t - step).max(0.0), t);
+        for _ in 0..12 {
+            let mid = (lo + hi) * 0.5;
+            if below(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        let p = origin + dir * hi;
+        Some((-p.x / SCALE, p.y / SCALE))
     }
 
     /// The camera's focus point in the same sim convention as
@@ -1727,6 +1760,14 @@ impl HostBridge for MapRender {
 
     fn ground_height(&self, x: i64, y: i64) -> i64 {
         self.terrain.ground_height(x, y)
+    }
+
+    fn nav_block(&mut self, x: i64, y: i64, on: bool) {
+        self.terrain.nav_block(x, y, on);
+    }
+
+    fn nav_path(&self, x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64) -> Vec<FixedVec3> {
+        self.terrain.nav_path(x0, y0, x1, y1, max_step)
     }
 }
 
