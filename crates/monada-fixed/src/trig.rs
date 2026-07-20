@@ -69,10 +69,9 @@ pub fn cos(angle: Fixed) -> Fixed {
     let r = angle.to_bits().rem_euclid(TAU_BITS);
     let tau = i128::from(TAU_BITS);
     let num = i128::from(r) * LUT_LEN as i128;
-    let idx0 = (num / tau) as usize;
     let rem = num % tau;
     // cos(x) = sin(x + π/2): shift index by LUT_LEN/4 with wraparound.
-    let idx0 = (idx0 + LUT_LEN / 4) % LUT_LEN;
+    let idx0 = ((num / tau) as usize + LUT_LEN / 4) % LUT_LEN;
     let idx1 = if idx0 + 1 == LUT_LEN { 0 } else { idx0 + 1 };
     let a = i128::from(SIN_LUT[idx0]);
     let b = i128::from(SIN_LUT[idx1]);
