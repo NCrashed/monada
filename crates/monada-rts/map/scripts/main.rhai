@@ -22,9 +22,19 @@
 //! reached. A* on this map is microseconds in Rust, and a felled tree /
 //! new footprint re-routes automatically.
 //!
-//! Archetypes register in order: UNIT = 0, TREE = 1.
+//! R-D adds the economy: a town hall + a gold mine per side (painted
+//! voxel blocks — their columns block walking/nav by the SAME height rule
+//! as cliffs and trees, no extra bookkeeping), a worker harvest loop
+//! (walk to mine → mine → carry to hall → +gold → repeat), and worker
+//! training at the hall for gold, capped by supply.
+//!
+//! Archetypes register in order: UNIT = 0, TREE = 1, BUILDING = 2,
+//! MINE = 3, GAME = 4.
 //! Model ids by call order: worker actor = 0.
-//! Command verbs: 1 = MOVE(unit, dest).
+//! Command verbs: 1 = MOVE(unit, dest), 2 = HARVEST(unit, arg.z = mine),
+//! 3 = TRAIN (the sender's hall).
+//! Worker task field: 0 = idle/move, 1 = to-mine, 2 = mining,
+//! 3 = to-hall.
 
 // --- tuning (all fixed-point; no_float Rhai forbids IEEE) ---------------
 // NB: Rhai functions are pure — they do NOT see top-level `const`s — so the
@@ -34,6 +44,15 @@
 
 fn unit_speed() { ratio(14, 100) } // sim cells / tick (30 Hz)
 fn pan_speed() { ratio(50, 100) } // camera scroll, cells / tick
+
+// Economy tuning.
+fn start_gold() { 100 }
+fn worker_cost() { 50 }
+fn train_ticks() { 90 } // 3 s at 30 Hz
+fn mine_ticks() { 45 } // 1.5 s inside the mine per trip
+fn gold_per_trip() { 10 }
+fn mine_reserve() { 500 } // per mine
+fn supply_cap() { 12 } // max units per player
 
 /// Team colours: a render-side tint multiply (0x00RRGGBB) over the shared
 /// worker sprite — player 0 cool blue, player 1 warm red.
@@ -153,11 +172,20 @@ fn try_move(e, vx, vy) {
 // `model_actor` order: worker = 0.
 fn init() {
     // Unit: owner (player 0/1), hit points (combat lands in R-E), the move
-    // order (final dest + next nav waypoint + active flag), facing yaw.
-    archetype(["owner", "hp", "dest_x", "dest_y", "wp_x", "wp_y", "has_dest", "face"]);
+    // order (final dest + next nav waypoint + active flag), facing yaw,
+    // and the harvest loop (task FSM, mine-visit timer, carried gold flag,
+    // the mine entity it works).
+    archetype(["owner", "hp", "dest_x", "dest_y", "wp_x", "wp_y", "has_dest", "face", "task", "timer", "carry", "mine"]);
     // Tree: a destructible prop (hp; felling lands in R-E). Its painted
     // voxel column is what blocks walking — the entity is the hittable half.
     archetype(["hp"]);
+    // Building: hall (kind 0; trains workers) — barracks (kind 1) lands in
+    // R-E. Painted as a voxel block; the entity carries hp + the queue.
+    archetype(["owner", "kind", "hp", "queue", "progress"]);
+    // Gold mine: neutral, finite.
+    archetype(["gold"]);
+    // Game singleton: per-player gold.
+    archetype(["gold0", "gold1"]);
 
     set_light(vec3(ratio(-6, 10), ratio(-3, 10), ratio(7, 10)), ratio(8, 10));
 
@@ -168,14 +196,26 @@ fn init() {
     model_actor("assets/char/worker", ["idle", "run"], ratio(14, 10));
     model_drop(0, ratio(35, 100)); // seat the visible feet on the floor
 
-    // Starting workers — three per player, up on their plateaus. The map is
-    // 180°-rotation symmetric (cell → (47−x, 47−y)).
-    spawn_worker(0, 5, 5);
+    // Starting bases — a town hall + a gold mine per plateau, painted as
+    // voxel blocks whose columns block walking/nav by the same height rule
+    // as everything else. 180°-rotation symmetric (cell → (47−x, 47−y)).
+    spawn_hall(0, 5, 5);
+    spawn_hall(1, 42, 42);
+    spawn_mine(10, 10);
+    spawn_mine(37, 37);
+
+    // Starting workers — three per player, beside their halls.
     spawn_worker(0, 8, 4);
     spawn_worker(0, 4, 8);
-    spawn_worker(1, 42, 42);
+    spawn_worker(0, 8, 8);
     spawn_worker(1, 39, 43);
     spawn_worker(1, 43, 39);
+    spawn_worker(1, 39, 39);
+
+    // The game singleton: both purses.
+    let g = entity_create(4);
+    entity_set_field(g, "gold0", fixed(start_gold()));
+    entity_set_field(g, "gold1", fixed(start_gold()));
 
     // WC3-style fixed-angle camera: a steep-ish tilt, free pan (local
     // layer) + host mouse-wheel zoom. `local_init` aims it at the base.
@@ -255,6 +295,33 @@ fn plant_tree(x, y) {
     entity_set_field(t, "hp", fixed(30));
 }
 
+/// A town hall: a 3×3 painted block (center `(x, y)`, 8 tall above its
+/// plateau — the column height walls it off for movement AND nav, exactly
+/// like a cliff) + the building entity (owner, kind 0, train queue).
+fn spawn_hall(owner, x, y) {
+    let base = ground_height(x, y);
+    let wall = if owner == 0 { 0x808a_5a33 } else { 0x8070_4a63 };
+    let roof = 0x80b8_3c2a;
+    voxel_fill(x - 1, y - 1, base, x + 1, y + 1, base + 7, wall);
+    voxel_fill(x - 1, y - 1, base + 8, x + 1, y + 1, base + 8, roof);
+    let b = entity_create(2);
+    entity_set_position(b, vec3(fixed(x), fixed(y), fixed(base)));
+    entity_set_field(b, "owner", fixed(owner));
+    entity_set_field(b, "kind", fixed(0));
+    entity_set_field(b, "hp", fixed(300));
+}
+
+/// A neutral gold mine: a 3×3 painted rock block with a gold-flecked top
+/// + the mine entity holding its reserve.
+fn spawn_mine(x, y) {
+    let base = ground_height(x, y);
+    voxel_fill(x - 1, y - 1, base, x + 1, y + 1, base + 5, 0x806b_6b70);
+    voxel_fill(x - 1, y - 1, base + 6, x + 1, y + 1, base + 6, 0x80c9_a227);
+    let m = entity_create(3);
+    entity_set_position(m, vec3(fixed(x), fixed(y), fixed(base)));
+    entity_set_field(m, "gold", fixed(mine_reserve()));
+}
+
 fn spawn_worker(owner, x, y) {
     let u = entity_create(0);
     entity_set_position(u, vec3(fixed(x), fixed(y), fixed(ground_height(x, y))));
@@ -314,13 +381,41 @@ fn action(id, down) {
     } else if id == "order" && down {
         let g = pick_ground();
         if g != () {
+            // Context order: a click on a gold mine sends HARVEST (the
+            // mine entity id rides arg.z), open ground sends MOVE — one
+            // command per selected unit either way.
+            let m = mine_at(g);
             for e in highlighted_all() {
                 if mine(e) {
-                    submit_command(1, e, vec3(g.x, g.y, fixed(0)));
+                    if m >= 0 {
+                        submit_command(2, e, vec3(g.x, g.y, fixed(m)));
+                    } else {
+                        submit_command(1, e, vec3(g.x, g.y, fixed(0)));
+                    }
                 }
             }
         }
+    } else if id == "train1" && down {
+        // Queue a worker at this player's hall (the sim locates it).
+        submit_command(3, -1, vec3(fixed(0), fixed(0), fixed(0)));
     }
+}
+
+/// The gold mine whose 3×3 block contains ground point `g`, or `-1`.
+/// (Buildings are painted voxels, not model-bound sprites, so
+/// `pick_entity` can't see them — the cell lookup is the context test.)
+fn mine_at(g) {
+    let cx = cell(g.x);
+    let cy = cell(g.y);
+    for m in entities_of(3) {
+        let p = entity_position(m);
+        let mx = cell(p.x);
+        let my = cell(p.y);
+        if cx >= mx - 1 && cx <= mx + 1 && cy >= my - 1 && cy <= my + 1 {
+            return m;
+        }
+    }
+    -1
 }
 
 fn minf(a, b) { if a < b { a } else { b } }
@@ -356,19 +451,57 @@ fn box_select(a, b) {
 }
 
 // --- commands: the only thing that crosses the wire ----------------------
-// verb 1 = MOVE(unit = target, dest = arg.xy). The sim validates ownership
-// — a peer cannot order units it doesn't own, whatever its local layer
-// says — then plans the first nav waypoint.
+// The sim validates ownership on every verb — a peer cannot order units
+// (or spend gold) it doesn't own, whatever its local layer says.
+// verb 1 = MOVE(unit, dest): explicit move, interrupts any harvest task.
+// verb 2 = HARVEST(unit, arg.z = mine): start the harvest loop.
+// verb 3 = TRAIN: queue a worker at the sender's hall (gold + supply
+// checked here, so the deduction is deterministic on every peer).
 fn command(player, verb, target, arg) {
     if verb == 1 {
         if !is_unit(target) || to_int(entity_field(target, "owner")) != player {
             return;
         }
-        entity_set_field(target, "dest_x", clampf(arg.x, fixed(1), fixed(46)));
-        entity_set_field(target, "dest_y", clampf(arg.y, fixed(1), fixed(46)));
-        entity_set_field(target, "has_dest", fixed(1));
-        replan(target);
+        entity_set_field(target, "task", fixed(0));
+        walk_to(target, arg.x, arg.y);
+    } else if verb == 2 {
+        if !is_unit(target) || to_int(entity_field(target, "owner")) != player {
+            return;
+        }
+        let m = to_int(arg.z);
+        if !is_mine(m) {
+            return;
+        }
+        entity_set_field(target, "task", fixed(1));
+        entity_set_field(target, "mine", fixed(m));
+        let p = entity_position(m);
+        walk_to(target, p.x, p.y);
+    } else if verb == 3 {
+        let h = hall_of(player);
+        if h < 0 {
+            return;
+        }
+        let g = entities_of(4)[0];
+        let purse = "gold" + player;
+        let queued = to_int(entity_field(h, "queue"));
+        if to_int(entity_field(g, purse)) < worker_cost() {
+            return;
+        }
+        if count_units(player) + queued >= supply_cap() {
+            return;
+        }
+        entity_set_field(g, purse, entity_field(g, purse) - fixed(worker_cost()));
+        entity_set_field(h, "queue", fixed(queued + 1));
     }
+}
+
+/// Point unit `u` at `(x, y)`: clamp into the field, arm the order, plan
+/// the first nav waypoint.
+fn walk_to(u, x, y) {
+    entity_set_field(u, "dest_x", clampf(x, fixed(1), fixed(46)));
+    entity_set_field(u, "dest_y", clampf(y, fixed(1), fixed(46)));
+    entity_set_field(u, "has_dest", fixed(1));
+    replan(u);
 }
 
 fn clampf(v, lo, hi) { if v < lo { lo } else if v > hi { hi } else { v } }
@@ -381,6 +514,45 @@ fn is_unit(e) {
         }
     }
     false
+}
+
+fn is_mine(e) {
+    for m in entities_of(3) {
+        if m == e {
+            return true;
+        }
+    }
+    false
+}
+
+/// `player`'s town hall (kind 0), or `-1` if it no longer stands.
+fn hall_of(player) {
+    for b in entities_of(2) {
+        if to_int(entity_field(b, "kind")) == 0 && to_int(entity_field(b, "owner")) == player {
+            return b;
+        }
+    }
+    -1
+}
+
+fn count_units(player) {
+    let n = 0;
+    for u in entities_of(0) {
+        if to_int(entity_field(u, "owner")) == player {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Is unit `u` within Chebyshev `r` cells of entity `e`'s cell? (`r` = 2
+/// reaches the ring around a 3×3 building block.)
+fn near(u, e, r) {
+    let a = entity_position(u);
+    let b = entity_position(e);
+    let dx = cell(a.x) - cell(b.x);
+    let dy = cell(a.y) - cell(b.y);
+    dx <= r && dx >= -r && dy <= r && dy >= -r
 }
 
 /// (Re)plan unit `u`'s next waypoint toward its stored dest: ask
@@ -415,17 +587,118 @@ fn tick() {
     for u in entities_of(0) {
         step_unit(u);
     }
+    for b in entities_of(2) {
+        step_building(b);
+    }
+    build_ui();
 }
 
-/// Advance one unit along its nav waypoints: walk toward the stored
-/// waypoint under the walk rule; on reaching it, either finish (it was the
-/// dest) or replan the next one.
+/// Advance a hall's train queue: progress ticks while anything is queued;
+/// a finished worker pops out onto a free ring cell (if the whole ring is
+/// jammed, delivery retries next tick — the gold is already spent, the
+/// queue must not be lost).
+fn step_building(b) {
+    let q = to_int(entity_field(b, "queue"));
+    if q == 0 {
+        return;
+    }
+    let p = to_int(entity_field(b, "progress")) + 1;
+    if p < train_ticks() {
+        entity_set_field(b, "progress", fixed(p));
+        return;
+    }
+    let pos = entity_position(b);
+    let owner = to_int(entity_field(b, "owner"));
+    let out = free_ring_cell(cell(pos.x), cell(pos.y), to_int(pos.z));
+    if out.x < fixed(0) {
+        return; // ring jammed: hold at full progress, retry next tick
+    }
+    spawn_worker(owner, to_int(out.x), to_int(out.y));
+    entity_set_field(b, "queue", fixed(q - 1));
+    entity_set_field(b, "progress", fixed(0));
+}
+
+/// The first walkable cell on the Chebyshev-2 ring around `(cx, cy)` (the
+/// ring hugging a 3×3 block), from height `hz` — or `(-1, -1)` if jammed.
+/// Fixed scan order keeps delivery deterministic.
+fn free_ring_cell(cx, cy, hz) {
+    for dx in -2..=2 {
+        for dy in -2..=2 {
+            let onring = dx == -2 || dx == 2 || dy == -2 || dy == 2;
+            if onring && passable(hz, cx + dx, cy + dy) {
+                return vec3(fixed(cx + dx), fixed(cy + dy), fixed(0));
+            }
+        }
+    }
+    vec3(fixed(-1), fixed(-1), fixed(0))
+}
+
+/// The always-on HUD: the LOCAL player's purse + supply and the train
+/// hotkey. Render-side (`ui_*` no-op headlessly, `local_player` is a
+/// per-client read that never touches the hashed world).
+fn build_ui() {
+    ui_clear();
+    let w = ui_width();
+    if w <= 0 {
+        return; // no viewport yet (pre-first-frame, or headless)
+    }
+    let lp = local_player();
+    let p = if lp < 0 { 0 } else { lp };
+    let g = entities_of(4)[0];
+    ui_scale(fixed(2));
+    ui_text(8, 8, "Gold " + to_int(entity_field(g, "gold" + p)) + "    Supply " + count_units(p) + "/" + supply_cap(), 12);
+    ui_text(8, 38, "LMB select · drag box · RMB move/harvest · Q train worker", 8);
+}
+
+/// Advance one unit: run the harvest FSM at its stations (mining inside
+/// the mine, deciding at arrivals), then walk it along its nav waypoints
+/// under the walk rule.
 fn step_unit(u) {
     let owner = to_int(entity_field(u, "owner"));
     entity_set_tint(u, team_tint(owner));
+
+    // Station: inside the mine (task 2) — count the visit down, then
+    // shoulder the gold and head home.
+    if to_int(entity_field(u, "task")) == 2 {
+        let t = to_int(entity_field(u, "timer")) - 1;
+        if t > 0 {
+            entity_set_field(u, "timer", fixed(t));
+            entity_set_anim(u, "idle");
+            return;
+        }
+        let m = to_int(entity_field(u, "mine"));
+        let left = if is_mine(m) { to_int(entity_field(m, "gold")) } else { 0 };
+        let take = if left < gold_per_trip() { left } else { gold_per_trip() };
+        if take == 0 {
+            entity_set_field(u, "task", fixed(0)); // mine ran dry under us
+            entity_set_anim(u, "idle");
+            return;
+        }
+        entity_set_field(m, "gold", fixed(left - take));
+        entity_set_field(u, "carry", fixed(take));
+        let h = hall_of(owner);
+        if h < 0 {
+            entity_set_field(u, "task", fixed(0));
+            entity_set_anim(u, "idle");
+            return;
+        }
+        entity_set_field(u, "task", fixed(3));
+        let hp = entity_position(h);
+        walk_to(u, hp.x, hp.y);
+    }
+
     if to_int(entity_field(u, "has_dest")) == 0 {
-        entity_set_anim(u, "idle");
-        return;
+        // Arrived (or parked as close as reachable): harvest stations act.
+        let task = to_int(entity_field(u, "task"));
+        if task == 1 {
+            arrive_at_mine(u);
+        } else if task == 3 {
+            arrive_at_hall(u, owner);
+        }
+        if to_int(entity_field(u, "has_dest")) == 0 {
+            entity_set_anim(u, "idle");
+            return;
+        }
     }
     let pos = entity_position(u);
     let tx = entity_field(u, "wp_x");
@@ -454,4 +727,37 @@ fn step_unit(u) {
     entity_set_field(u, "face", dir_yaw(dx, dy));
     entity_set_facing(u, entity_field(u, "face"));
     entity_set_anim(u, "run");
+}
+
+/// A task-1 worker has stopped walking: beside its mine (the nav closest-
+/// approach parks on the ring — the block itself is unreachable), with ore
+/// left → start the visit; otherwise give up.
+fn arrive_at_mine(u) {
+    let m = to_int(entity_field(u, "mine"));
+    if is_mine(m) && to_int(entity_field(m, "gold")) > 0 && near(u, m, 2) {
+        entity_set_field(u, "task", fixed(2));
+        entity_set_field(u, "timer", fixed(mine_ticks()));
+    } else {
+        entity_set_field(u, "task", fixed(0));
+    }
+}
+
+/// A task-3 worker has stopped walking: beside the hall → bank the load
+/// and turn back for more (while the mine holds out).
+fn arrive_at_hall(u, owner) {
+    let h = hall_of(owner);
+    if h >= 0 && near(u, h, 2) {
+        let g = entities_of(4)[0];
+        let purse = "gold" + owner;
+        entity_set_field(g, purse, entity_field(g, purse) + entity_field(u, "carry"));
+        entity_set_field(u, "carry", fixed(0));
+        let m = to_int(entity_field(u, "mine"));
+        if is_mine(m) && to_int(entity_field(m, "gold")) > 0 {
+            entity_set_field(u, "task", fixed(1));
+            let mp = entity_position(m);
+            walk_to(u, mp.x, mp.y);
+            return;
+        }
+    }
+    entity_set_field(u, "task", fixed(0));
 }

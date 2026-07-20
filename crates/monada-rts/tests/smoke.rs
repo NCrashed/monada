@@ -21,7 +21,12 @@ use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 const SEED: u64 = 0x4D4F_4E41_4441_5F30;
 const UNIT: ArchetypeId = ArchetypeId(0);
 const TREE: ArchetypeId = ArchetypeId(1);
+const BUILDING: ArchetypeId = ArchetypeId(2);
+const MINE: ArchetypeId = ArchetypeId(3);
+const GAME: ArchetypeId = ArchetypeId(4);
 const VERB_MOVE: u32 = 1;
+const VERB_HARVEST: u32 = 2;
+const VERB_TRAIN: u32 = 3;
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 
@@ -200,6 +205,120 @@ fn destination_clamps_to_the_field() {
         "unit stayed inside the rim (at {ex:.2}, {ey:.2})"
     );
     assert_eq!(field(&world, u, "has_dest"), 0, "clamped order completes");
+}
+
+/// A HARVEST order: send `unit` to work `mine` (id rides `arg.z`).
+fn harvest_cmd(world: &SharedWorld, unit: EntityId, mine_idx: usize) -> Command {
+    let w = world.lock().unwrap();
+    let m = w.entities(MINE)[mine_idx];
+    let p = w.position(m).expect("mine has a position");
+    #[allow(clippy::cast_possible_wrap)]
+    Command::on(
+        VERB_HARVEST,
+        unit,
+        FixedVec3::new(p.x, p.y, Fixed::from_int(m.0 as i32)),
+    )
+}
+
+fn train_cmd() -> Command {
+    Command::on(VERB_TRAIN, EntityId(0), FixedVec3::ZERO)
+}
+
+fn gold(world: &SharedWorld, player: usize) -> i64 {
+    let w = world.lock().unwrap();
+    let g = w.entities(GAME)[0];
+    w.field(g, if player == 0 { "gold0" } else { "gold1" })
+        .expect("purse")
+        .to_f64() as i64
+}
+
+#[test]
+fn economy_spawns_at_init() {
+    let (world, _b) = fresh();
+    let w = world.lock().unwrap();
+    assert_eq!(w.count(BUILDING), 2, "a town hall per player");
+    assert_eq!(w.count(MINE), 2, "a gold mine per plateau");
+    assert_eq!(w.count(GAME), 1, "the game singleton");
+    drop(w);
+    assert_eq!(gold(&world, 0), 100, "starting purse");
+    assert_eq!(gold(&world, 1), 100, "starting purse");
+}
+
+#[test]
+fn harvest_loop_banks_gold_and_conserves_it() {
+    // One worker on the harvest loop: walk to the mine block (nav parks it
+    // on the ring), mine for the visit time, carry home, bank, repeat.
+    let (world, mut b) = fresh();
+    let u = units(&world)[0];
+    b.on_command(P0, &harvest_cmd(&world, u, 0)).expect("harvest order");
+    ticks(&mut b, 1500);
+
+    let banked = gold(&world, 0) - 100;
+    assert!(
+        banked >= 30,
+        "several round trips banked gold (banked {banked})"
+    );
+    assert_eq!(banked % 10, 0, "gold moves in whole trips");
+
+    // Conservation: banked + still-carried + left-in-mine = the reserve.
+    let w = world.lock().unwrap();
+    let m = w.entities(MINE)[0];
+    let left = w.field(m, "gold").expect("mine reserve").to_f64() as i64;
+    let carried = w.field(u, "carry").expect("carry").to_f64() as i64;
+    assert_eq!(banked + carried + left, 500, "no gold minted or lost");
+}
+
+#[test]
+fn move_order_interrupts_the_harvest() {
+    let (world, mut b) = fresh();
+    let u = units(&world)[0];
+    b.on_command(P0, &harvest_cmd(&world, u, 0)).expect("harvest");
+    ticks(&mut b, 400); // deep in the loop by now
+    b.on_command(P0, &move_cmd(u, 20, 24)).expect("countermand");
+    ticks(&mut b, 400);
+    let before = gold(&world, 0);
+    ticks(&mut b, 300);
+    assert_eq!(
+        gold(&world, 0),
+        before,
+        "harvesting stopped after the explicit MOVE"
+    );
+    let p = pos(&world, u);
+    assert!(
+        (p.x.to_f64() - 20.0).abs() < 0.4 && (p.y.to_f64() - 24.0).abs() < 0.4,
+        "worker obeyed the countermand (at {:.2}, {:.2})",
+        p.x.to_f64(),
+        p.y.to_f64()
+    );
+}
+
+#[test]
+fn training_costs_gold_and_stops_at_an_empty_purse() {
+    let (world, mut b) = fresh();
+    assert_eq!(units(&world).len(), 6);
+
+    // 1st TRAIN: 100 → 50 gold, a 4th worker pops out at the hall ring.
+    b.on_command(P0, &train_cmd()).expect("train 1");
+    assert_eq!(gold(&world, 0), 50, "cost deducted at command time");
+    ticks(&mut b, 150);
+    let p0_units = |w: &SharedWorld| {
+        let guard = w.lock().unwrap();
+        guard
+            .entities(UNIT)
+            .iter()
+            .filter(|&&e| {
+                guard.field(e, "owner").expect("owner").to_f64() as i64 == 0
+            })
+            .count()
+    };
+    assert_eq!(p0_units(&world), 4, "trained worker delivered");
+
+    // 2nd empties the purse; a 3rd in the same tick must be refused.
+    b.on_command(P0, &train_cmd()).expect("train 2");
+    b.on_command(P0, &train_cmd()).expect("train 3 (refused)");
+    assert_eq!(gold(&world, 0), 0, "second cost deducted, third refused");
+    ticks(&mut b, 200);
+    assert_eq!(p0_units(&world), 5, "exactly one more worker delivered");
 }
 
 #[test]

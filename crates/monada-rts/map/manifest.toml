@@ -39,3 +39,9 @@ id = "pan"
 kind = "axis2"
 default = { up = "KeyW", down = "KeyS", left = "KeyA", right = "KeyD" }
 label = { en = "Pan camera" }
+
+[[action]]
+id = "train1"
+kind = "button"
+default = ["KeyQ"]
+label = { en = "Train worker" }
