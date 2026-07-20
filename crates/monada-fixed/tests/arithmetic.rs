@@ -2,7 +2,7 @@
 //! determinism contract: defined overflow, fixed rounding, and
 //! integer-only trig (DESIGN.md §3.1).
 
-use monada_fixed::trig::{cos, sin, FRAC_PI_2, PI, TAU};
+use monada_fixed::trig::{atan2, cos, sin, FRAC_PI_2, PI, TAU};
 use monada_fixed::{Fixed, FixedVec2, FixedVec3};
 
 /// Assert two `Fixed` are within `eps` raw steps of each other.
@@ -238,4 +238,31 @@ fn vec3_geometry() {
     assert_eq!(x.dot(y), Fixed::ZERO);
     let v = FixedVec3::new(Fixed::from_int(2), Fixed::from_int(3), Fixed::from_int(6));
     assert_eq!(v.length(), Fixed::from_int(7)); // 2-3-6-7 Pythagorean quadruple
+}
+
+#[test]
+fn atan2_landmarks() {
+    let eps = 1 << 16; // ~1.5e-5, two lerp steps
+
+    // Cardinal directions.
+    close(atan2(Fixed::ZERO, Fixed::ONE), Fixed::ZERO, eps); // +x axis → 0
+    close(atan2(Fixed::ONE, Fixed::ZERO), FRAC_PI_2, eps); // +y axis → π/2
+    close(atan2(Fixed::ZERO, Fixed::NEG_ONE), PI, eps); // −x axis → π
+    close(atan2(Fixed::NEG_ONE, Fixed::ZERO), -FRAC_PI_2, eps); // −y axis → −π/2
+
+    // 45° diagonals.
+    let frac_pi_4 = FRAC_PI_2 / Fixed::from_int(2);
+    close(atan2(Fixed::ONE, Fixed::ONE), frac_pi_4, eps); // Q1 diagonal
+    close(atan2(Fixed::ONE, Fixed::NEG_ONE), PI - frac_pi_4, eps); // Q2
+    close(atan2(Fixed::NEG_ONE, Fixed::NEG_ONE), frac_pi_4 - PI, eps); // Q3
+    close(atan2(Fixed::NEG_ONE, Fixed::ONE), -frac_pi_4, eps); // Q4
+
+    // Consistent with sin/cos: atan2(sin(a), cos(a)) == a for a ∈ (−π, π].
+    let mut st = 1234u64;
+    for _ in 0..500 {
+        let raw = (lcg(&mut st) % 6_283) as i64; // raw steps, range < 2π
+        let a = Fixed::from_bits(raw * (1 << 16)) - PI; // a ∈ (−π, π]
+        let recovered = atan2(sin(a), cos(a));
+        close(recovered, a, 1 << 18);
+    }
 }

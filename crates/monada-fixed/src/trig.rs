@@ -8,12 +8,12 @@
 //! (DESIGN.md §3.1). The build-time table itself is reproducible; see
 //! the argument in `build.rs`.
 //!
-//! Scope: `sin`/`cos` only, which is all M0's circle scenario needs.
-//! `tan`/`atan2` are deliberately deferred — they arrive with unit
-//! facing and pathing, and `atan2` in particular is its own
-//! deterministic-LUT (or fixed-point CORDIC) design question, with the
-//! same "integer-only at runtime, reproducible table at build time"
-//! contract this module establishes.
+//! Functions: `sin`, `cos`, `atan2`. `tan` is deferred.
+//! `atan2` uses a first-octant `atan` LUT over `t ∈ [0, 1]` (4 097
+//! entries, both endpoints exact), exploiting `atan(|y|/|x|)` symmetry
+//! and quadrant mirroring to cover all of `(-π, π]`; the same
+//! "integer-only at runtime, reproducible table at build time" contract
+//! applies.
 
 use crate::Fixed;
 
@@ -24,7 +24,7 @@ use crate::Fixed;
 mod tables {
     include!(concat!(env!("OUT_DIR"), "/trig_tables.rs"));
 }
-use tables::{FRAC_PI_2_BITS, LUT_LEN, PI_BITS, SIN_LUT, TAU_BITS};
+use tables::{ATAN_LUT, ATAN_LUT_LEN, FRAC_PI_2_BITS, LUT_LEN, PI_BITS, SIN_LUT, TAU_BITS};
 
 /// π as a [`Fixed`].
 pub const PI: Fixed = Fixed::from_bits(PI_BITS);
@@ -61,4 +61,56 @@ pub fn sin(angle: Fixed) -> Fixed {
 #[must_use]
 pub fn cos(angle: Fixed) -> Fixed {
     sin(angle + FRAC_PI_2)
+}
+
+/// Angle of the vector `(x, y)` in radians, in `(-π, π]`.
+///
+/// Follows the standard `atan2(y, x)` convention: positive x-axis is 0,
+/// angles increase counter-clockwise. Returns `Fixed::ZERO` when both
+/// arguments are zero.
+#[must_use]
+pub fn atan2(y: Fixed, x: Fixed) -> Fixed {
+    let x_bits = x.to_bits();
+    let y_bits = y.to_bits();
+
+    if x_bits == 0 && y_bits == 0 {
+        return Fixed::ZERO;
+    }
+
+    let abs_x = x_bits.abs();
+    let abs_y = y_bits.abs();
+
+    // Compute atan(min/max) ∈ [0, π/4], then adjust to [0, π/2] via
+    // the identity atan(a/b) = π/2 − atan(b/a) when a > b.
+    let angle = if abs_y <= abs_x {
+        atan_first_octant(abs_y, abs_x)
+    } else {
+        FRAC_PI_2 - atan_first_octant(abs_x, abs_y)
+    };
+
+    // Mirror into the correct quadrant.
+    match (x_bits >= 0, y_bits >= 0) {
+        (true, true) => angle,
+        (false, true) => PI - angle,
+        (false, false) => angle - PI,
+        (true, false) => -angle,
+    }
+}
+
+/// `atan(a / b)` for `0 ≤ a ≤ b`, `b > 0` — result in `[0, π/4]`.
+///
+/// Looks up `atan(t)` with `t = a/b ∈ [0, 1]` in the first-octant table
+/// and linearly interpolates. All arithmetic is integer-only.
+fn atan_first_octant(a_bits: i64, b_bits: i64) -> Fixed {
+    let n = ATAN_LUT_LEN as i128;
+    let num = a_bits as i128 * n;
+    let denom = b_bits as i128;
+    let idx0 = (num / denom) as usize;
+    let rem = num % denom;
+    // idx0 ≤ ATAN_LUT_LEN because a_bits ≤ b_bits; clamp idx1 to stay in bounds.
+    let idx1 = (idx0 + 1).min(ATAN_LUT_LEN);
+
+    let a = i128::from(ATAN_LUT[idx0]);
+    let b = i128::from(ATAN_LUT[idx1]);
+    Fixed::from_bits((a + (b - a) * rem / denom) as i64)
 }
