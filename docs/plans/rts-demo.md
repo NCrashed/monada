@@ -1,6 +1,18 @@
 # Plan: the RTS demo — terrain levels, unit orders, shared pathfinding
 
-Status: **design**. A new demo map (`crates/monada-rts`) — a Warcraft-III-class
+Status: **implemented** (R-A..R-F all landed, 2026-07-20; `rts@` golden
+gates the sim). As-built deviations from the design below: the drag
+gesture became host-side `drag_begin`/`drag_end` (a stateless local layer
+cannot carry the anchor — `select_rect(a, b)` as a script-pushed visual
+was unimplementable), `nav_block` shipped but has zero consumers (halls,
+mines, barracks and trees all block via their painted column heights —
+the walk rule needed no overlay), the map shipped at 48×48 (plenty for
+the prototype; 96×96 remains a tune), and unit paths live as
+`dest + next-waypoint` fields with replan-per-cell (script functions are
+pure — the "script-local array" plan in §3 was wrong; chess re-derives
+its board per call, it does not persist it).
+
+A Warcraft-III-class
 RTS prototype two players can actually play over the existing QUIC lockstep.
 Genre lives entirely in the map (the chess / RPG / ship rule); the core gains
 one substantial *sim-side* system — a generic deterministic navigation service

@@ -440,6 +440,140 @@ pub fn ship_checkpoints() -> Vec<Checkpoint> {
     out
 }
 
+/// The RTS demo map, embedded for the golden (read straight from the
+/// map's script file). Runs headless under a [`TerrainBridge`]: the
+/// heightfield paints fill the shared collision store `nav_path` also
+/// reads, while render/selection calls no-op — leaving the hashed sim:
+/// nav-routed movement over cliffs/ramps, the worker harvest economy,
+/// training, combat, and a tree felled by `voxel_clear`.
+const RTS_SCRIPT: &str = include_str!("../../monada-rts/map/scripts/main.rhai");
+/// Hash the RTS run at these tick counts (`rts@0` = post-init: terrain
+/// painted, bases + starting squads spawned).
+const RTS_CHECKPOINTS: &[usize] = &[0, 1, 30, 150, 600];
+
+/// An RTS order (event-driven — unlike the RPG/ship goldens most ticks
+/// carry no command at all): `verb` per the map's contract (1 MOVE,
+/// 2 HARVEST, 3 TRAIN worker, 4 TRAIN soldier, 5 ATTACK), the acting
+/// unit in `target`, a point in `arg.xy`, an entity id in `arg.z`.
+// `-1 as u64` round-trips back to the script's `-1` sentinel by design.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn rts_cmd(verb: u32, unit: i64, x: i64, y: i64, z: i64) -> Command {
+    Command::on(
+        verb,
+        EntityId(unit as u64),
+        FixedVec3::new(
+            Fixed::from_int(x as i32),
+            Fixed::from_int(y as i32),
+            Fixed::from_int(z as i32),
+        ),
+    )
+}
+
+/// The RTS golden: a fixed 1v1 order schedule driven through the map's
+/// own script — both sides put a worker on the gold loop, P0 group-moves
+/// two more (a two-command burst in one tick), P1 trains a worker, P0
+/// trains a soldier and sends it to fell a lowland tree (`voxel_clear`
+/// reshapes collision + nav mid-run). Gates cross-platform determinism
+/// of the whole strategic sim half; selection/camera/HUD are render-side
+/// and unhashed by design.
+///
+/// # Panics
+/// Panics on a script compile/run failure (a bug, not a data condition).
+#[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+pub fn rts_checkpoints() -> Vec<Checkpoint> {
+    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let mut driver =
+        RhaiDriver::with_bridge(shared_world(SEED), RTS_SCRIPT, &bridge).expect("compile rts");
+
+    // Init is deterministic, so ids and positions read back identically on
+    // every platform; deriving them here keeps the schedule robust to map
+    // spawn-order tweaks (no hardcoded entity ids).
+    let world = driver.world().clone();
+    let (units, mines, tree) = {
+        let w = world.lock().expect("world mutex");
+        let units: Vec<i64> = w.entities(ArchetypeId(0)).iter().map(|e| e.0 as i64).collect();
+        let mines: Vec<(i64, i64, i64)> = w
+            .entities(ArchetypeId(3))
+            .iter()
+            .map(|&m| {
+                let p = w.position(m).expect("mine pos");
+                (m.0 as i64, p.x.to_f64() as i64, p.y.to_f64() as i64)
+            })
+            .collect();
+        // The lowland tree at cell (24, 22) — the soldier's chopping target.
+        let tree = w
+            .entities(ArchetypeId(1))
+            .iter()
+            .find(|&&t| {
+                let p = w.position(t).expect("tree pos");
+                (p.x.to_f64() - 24.0).abs() < 0.1 && (p.y.to_f64() - 22.0).abs() < 0.1
+            })
+            .map(|t| t.0 as i64)
+            .expect("the (24, 22) tree stands");
+        (units, mines, tree)
+    };
+
+    let mut out = Vec::new();
+    let mut record = |driver: &RhaiDriver, n: usize| {
+        if RTS_CHECKPOINTS.contains(&n) {
+            out.push(Checkpoint {
+                scenario: "rts",
+                tick: n as u64,
+                hash: driver.state_hash(),
+            });
+        }
+    };
+
+    record(&driver, 0);
+    let mut soldier: Option<i64> = None;
+    for t in 1..=600usize {
+        match t {
+            // Both sides put their first worker on the gold loop.
+            2 => {
+                let (m0, x0, y0) = mines[0];
+                let (m1, x1, y1) = mines[1];
+                driver.apply_command(P0, &rts_cmd(2, units[0], x0, y0, m0));
+                driver.apply_command(P1, &rts_cmd(2, units[3], x1, y1, m1));
+            }
+            // A two-command group burst in one tick (the box-select shape).
+            10 => {
+                driver.apply_command(P0, &rts_cmd(1, units[1], 22, 24, 0));
+                driver.apply_command(P0, &rts_cmd(1, units[2], 24, 24, 0));
+            }
+            12 => driver.apply_command(P1, &rts_cmd(3, -1, 0, 0, 0)),
+            15 => driver.apply_command(P0, &rts_cmd(4, -1, 0, 0, 0)),
+            // The trained soldier (delivered ~tick 105) fells a tree:
+            // voxel_clear reshapes collision + nav inside the hashed run.
+            150 => {
+                let w = world.lock().expect("world mutex");
+                let s = w
+                    .entities(ArchetypeId(0))
+                    .iter()
+                    .find(|&&e| {
+                        w.field(e, "owner").expect("owner").to_f64() as i64 == 0
+                            && w.field(e, "kind").expect("kind").to_f64() as i64 == 1
+                    })
+                    .map(|e| e.0 as i64)
+                    .expect("P0's soldier was delivered");
+                drop(w);
+                soldier = Some(s);
+                driver.apply_command(P0, &rts_cmd(5, s, 24, 22, tree));
+            }
+            // Post-felling: walk the soldier onto the opened stump cell.
+            520 => {
+                if let Some(s) = soldier {
+                    driver.apply_command(P0, &rts_cmd(1, s, 24, 22, 0));
+                }
+            }
+            _ => {}
+        }
+        driver.step();
+        record(&driver, t);
+    }
+    out
+}
+
 /// Every gated scenario's checkpoints, in a fixed order.
 #[must_use]
 pub fn all_checkpoints() -> Vec<Checkpoint> {
@@ -449,6 +583,7 @@ pub fn all_checkpoints() -> Vec<Checkpoint> {
     out.extend(chess_checkpoints());
     out.extend(rpg_checkpoints());
     out.extend(ship_checkpoints());
+    out.extend(rts_checkpoints());
     out
 }
 
@@ -474,7 +609,8 @@ pub fn render_goldens(checkpoints: &[Checkpoint]) -> String {
          lockstep (two-session command demo), chess (turn-based rules), \
          rpg (real-time action-RPG: per-tick input + voxel-query + wave \
          RNG), ship (two-deck crew sim: deck-relative collision + stairwell \
-         deck-flip); seed \"MONADA_0\".\n",
+         deck-flip), rts (1v1 strategy: nav-routed orders + economy + \
+         combat + voxel_clear tree felling); seed \"MONADA_0\".\n",
     );
     s.push_str("# Regenerate with `cargo run -p monada-oracle -- --bless`.\n");
     for c in checkpoints {
