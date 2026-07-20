@@ -447,6 +447,38 @@ fn razing_the_hall_wins_the_game() {
 }
 
 #[test]
+fn a_group_arrives_as_a_crowd_not_a_stack() {
+    // Three workers ordered to ONE point: separation keeps their bodies
+    // apart, and the stall-arrival rule lets each call "close enough"
+    // instead of fighting forever for the exact pixel.
+    let (world, mut b) = fresh();
+    let us = units(&world);
+    for &u in &us[0..3] {
+        b.on_command(P0, &move_cmd(u, 24, 24)).expect("group order");
+    }
+    ticks(&mut b, 800);
+    for (i, &u) in us[0..3].iter().enumerate() {
+        let p = pos(&world, u);
+        let d = (p.x.to_f64() - 24.0)
+            .abs()
+            .max((p.y.to_f64() - 24.0).abs());
+        assert!(d < 2.5, "unit {i} settled near the rally (off by {d:.2})");
+        assert_eq!(field(&world, u, "has_dest"), 0, "unit {i} settled");
+    }
+    for i in 0..3 {
+        for j in i + 1..3 {
+            let a = pos(&world, us[i]);
+            let c = pos(&world, us[j]);
+            let d = (a.x.to_f64() - c.x.to_f64()).abs() + (a.y.to_f64() - c.y.to_f64()).abs();
+            assert!(
+                d > 0.45,
+                "units {i}/{j} kept their bodies apart (manhattan {d:.2})"
+            );
+        }
+    }
+}
+
+#[test]
 fn deterministic_march() {
     // Same seed + same orders → bit-identical positions (the lockstep
     // contract; TerrainBridge + nav are deterministic, render is no-op).

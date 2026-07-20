@@ -229,8 +229,11 @@ pub(crate) fn register_number_types(engine: &mut Engine) {
     engine.register_fn("/", |a: Fixed, b: Fixed| a / b);
     engine.register_fn("-", |a: Fixed| -a);
     engine.register_fn("==", |a: Fixed, b: Fixed| a == b);
+    engine.register_fn("!=", |a: Fixed, b: Fixed| a != b);
     engine.register_fn("<", |a: Fixed, b: Fixed| a < b);
     engine.register_fn(">", |a: Fixed, b: Fixed| a > b);
+    engine.register_fn("<=", |a: Fixed, b: Fixed| a <= b);
+    engine.register_fn(">=", |a: Fixed, b: Fixed| a >= b);
 
     // Fixed-point trig + the turn constant (the circle scenario's only
     // transcendentals).
@@ -766,3 +769,44 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
 
 /// The `local_player()` script sentinel for "no single local player".
 const NO_LOCAL_PLAYER: i64 = -1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bare engine with just the number types — the same registration
+    /// `RhaiBackend::new` applies.
+    fn engine() -> Engine {
+        let mut e = Engine::new();
+        register_number_types(&mut e);
+        e
+    }
+
+    /// Every ordering / equality operator a map may write on `Fixed` resolves.
+    /// Regression: `>=`/`<=` were unregistered, so a script using them (the RTS
+    /// `box_select` bounds test) panicked at run time with
+    /// `Function not found: >= (Fixed, Fixed)`.
+    #[test]
+    fn fixed_comparison_operators_resolve() {
+        let e = engine();
+        for (expr, want) in [
+            ("fixed(3) >= fixed(3)", true),
+            ("fixed(3) >= fixed(2)", true),
+            ("fixed(1) >= fixed(2)", false),
+            ("fixed(2) <= fixed(2)", true),
+            ("fixed(3) <= fixed(2)", false),
+            ("fixed(1) <= fixed(2)", true),
+            ("fixed(3) != fixed(2)", true),
+            ("fixed(2) != fixed(2)", false),
+            ("fixed(2) == fixed(2)", true),
+            ("fixed(2) < fixed(3)", true),
+            ("fixed(3) > fixed(2)", true),
+        ] {
+            assert_eq!(
+                e.eval::<bool>(expr).unwrap_or_else(|err| panic!("{expr}: {err}")),
+                want,
+                "{expr}"
+            );
+        }
+    }
+}

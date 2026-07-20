@@ -229,11 +229,14 @@ pub trait HostBridge: Send {
     /// functions — it cannot carry the anchor between ticks). Per-client,
     /// render-side, never hashed. The default ignores it.
     fn drag_begin(&mut self) {}
-    /// Finish the drag gesture and take its rectangle: `[anchor, end]` as
-    /// two sim-space ground points, or empty if no drag was active (or
-    /// the anchor never hit the ground). The map decides what the
-    /// rectangle means — box select, formation line, building footprint.
-    /// The default is empty.
+    /// Finish the drag gesture and take its rectangle: the FOUR sim-space
+    /// ground corners of the screen-aligned box (wound around the quad),
+    /// or empty if no drag was active (or the anchor never hit the ground).
+    /// The corners follow the camera's screen axes at the live yaw — not
+    /// world N/S/E/W — so an orbited view still box-selects what the player
+    /// framed; opposite corners `[0]`/`[2]` are the press/release diagonal.
+    /// The map decides what the rectangle means — box select, formation
+    /// line, building footprint. The default is empty.
     fn drag_end(&mut self) -> Vec<FixedVec3> {
         Vec::new()
     }

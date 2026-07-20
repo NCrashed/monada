@@ -54,6 +54,14 @@
 fn unit_speed() { ratio(14, 100) } // sim cells / tick (30 Hz)
 fn pan_speed() { ratio(50, 100) } // camera scroll, cells / tick
 
+// Unit separation (the RPG's boid push): bodies within `sep_radius` push
+// apart so a marching group arrives as a crowd, not a single stacked
+// sprite. `sep_gain` scales the push, `sep_max` caps it below unit_speed
+// so steering still dominates.
+fn sep_radius() { ratio(9, 10) }
+fn sep_gain() { ratio(8, 100) }
+fn sep_max() { ratio(9, 100) }
+
 // Economy tuning.
 fn start_gold() { 100 }
 fn worker_cost() { 50 }
@@ -129,6 +137,38 @@ fn approx_dist(dx, dy) {
     if ax > ay { ax + ay * ratio(1, 2) } else { ay + ax * ratio(1, 2) }
 }
 
+/// Boid separation for unit `u` at `up`: a push away from every OTHER
+/// unit within `sep_radius` (harder the closer), scaled and capped.
+/// Bodies are bodies — both sides push. Deterministic: fixed-point,
+/// ascending-id iteration.
+fn separation(u, up) {
+    let r = sep_radius();
+    let sx = fixed(0);
+    let sy = fixed(0);
+    for o in entities_of(0) {
+        if o == u {
+            continue;
+        }
+        let op = entity_position(o);
+        let dx = up.x - op.x; // pointing away from the neighbour
+        let dy = up.y - op.y;
+        let d = approx_dist(dx, dy);
+        if d > fixed(0) && d < r {
+            let w = (r - d) / d; // normalise + weight: stronger when closer
+            sx += dx * w;
+            sy += dy * w;
+        }
+    }
+    let px = sx * sep_gain();
+    let py = sy * sep_gain();
+    let pm = approx_dist(px, py);
+    if pm > sep_max() {
+        px = px * sep_max() / pm;
+        py = py * sep_max() / pm;
+    }
+    vec3(px, py, fixed(0))
+}
+
 /// The camera's orbit yaw — MUST match `camera_angle` in `init`, since the
 /// pan axis is view-relative.
 fn cam_yaw() { ratio(8, 10) }
@@ -193,7 +233,7 @@ fn init() {
     // move order (final dest + next nav waypoint + active flag), facing
     // yaw, the task FSM (harvest stations / attacking), its mine, its
     // attack victim + swing cooldown, carried gold.
-    archetype(["owner", "kind", "hp", "dest_x", "dest_y", "wp_x", "wp_y", "has_dest", "face", "task", "timer", "carry", "mine", "victim", "atkcd"]);
+    archetype(["owner", "kind", "hp", "dest_x", "dest_y", "wp_x", "wp_y", "has_dest", "face", "task", "timer", "carry", "mine", "victim", "atkcd", "stall"]);
     // Tree: a destructible prop. Its painted voxel column is what blocks
     // walking — the entity is the hittable half; felling clears the column.
     archetype(["hp"]);
@@ -212,10 +252,14 @@ fn init() {
     // The animated billboard actors (ids 0/1 by call order); placeholders
     // reusing RPG art (hero = worker, enemy = soldier — the soldier gets a
     // real attack animation), team-tinted per owner.
-    model_actor("assets/char/worker", ["idle", "run"], ratio(14, 10));
+    model_actor("assets/char/worker", ["idle", "run", "attack"], ratio(14, 10));
     model_actor("assets/char/soldier", ["idle", "run", "attack"], ratio(14, 10));
-    model_drop(0, ratio(35, 100)); // seat the visible feet on the floor
-    model_drop(1, ratio(35, 100));
+    // NO model_drop: the actor pivot already grounds on the art's trimmed
+    // opaque bottom, and unlike the RPG (render-only floor, where a 0.35-cell
+    // sink ≈ 5.6 world units is invisible) this map's terrain is REAL voxel
+    // columns — the RPG's drop buried units ankle-deep and hid the selection
+    // ring under the surface (the ship demo hit the same trap). Nudge with
+    // e.g. `model_drop(0, ratio(5, 100))` only if the art's feet float.
 
     // Starting bases — a town hall + a gold mine per plateau, painted as
     // voxel blocks whose columns block walking/nav by the same height rule
@@ -413,8 +457,8 @@ fn action(id, down) {
             drag_begin();
         } else {
             let r = drag_end();
-            if r.len() == 2 {
-                box_select(r[0], r[1]);
+            if r.len() == 4 {
+                box_select(r);
             }
         }
     } else if id == "order" && down {
@@ -502,11 +546,15 @@ fn mine_at(g) {
 fn minf(a, b) { if a < b { a } else { b } }
 fn maxf(a, b) { if a < b { b } else { a } }
 
-/// Resolve a finished select gesture. A tiny rectangle is a CLICK —
-/// single-select whatever unit is under the cursor (or clear); a real
-/// drag selects every own unit inside the ground rectangle.
-fn box_select(a, b) {
-    if approx_dist(b.x - a.x, b.y - a.y) < ratio(35, 100) {
+/// Resolve a finished select gesture. `q` is the host's screen-aligned drag
+/// quad — four sim-ground corners wound around the rect (`drag_end`). A tiny
+/// quad is a CLICK — single-select whatever unit is under the cursor (or
+/// clear); a real drag selects every own unit inside the (rotated) box. We
+/// test the oriented quad directly, so a unit is picked iff it sits under the
+/// on-screen rectangle, whatever the camera yaw.
+fn box_select(q) {
+    // Opposite corners q[0]/q[2] are the press/release diagonal.
+    if approx_dist(q[2].x - q[0].x, q[2].y - q[0].y) < ratio(35, 100) {
         let e = pick_entity();
         if e >= 0 && mine(e) {
             highlight(e);
@@ -515,20 +563,34 @@ fn box_select(a, b) {
         }
         return;
     }
-    let x0 = minf(a.x, b.x);
-    let x1 = maxf(a.x, b.x);
-    let y0 = minf(a.y, b.y);
-    let y1 = maxf(a.y, b.y);
     highlight_clear();
     for u in entities_of(0) {
         if !mine(u) {
             continue;
         }
         let p = entity_position(u);
-        if p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 {
+        if in_quad(q, p.x, p.y) {
             highlight_add(u);
         }
     }
+}
+
+/// Is sim point `(px, py)` inside the convex quad `q` (4 corners wound around
+/// it)? By the sign of each edge's cross product with the point: inside iff the
+/// point is on the same side of all four edges. No division, and winding-
+/// agnostic (works whichever way the host wound the corners). A point exactly
+/// on an edge (cross 0) counts as inside.
+fn in_quad(q, px, py) {
+    let pos = false;
+    let neg = false;
+    for i in 0..4 {
+        let a = q[i];
+        let b = q[(i + 1) % 4];
+        let cr = (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x);
+        if cr > fixed(0) { pos = true; }
+        if cr < fixed(0) { neg = true; }
+    }
+    !(pos && neg)
 }
 
 // --- commands: the only thing that crosses the wire ----------------------
@@ -867,6 +929,13 @@ fn step_unit(u) {
         }
         if to_int(entity_field(u, "has_dest")) == 0 {
             entity_set_anim(u, "idle");
+            // Even at rest, bodies push apart — a crowd that has arrived
+            // relaxes into a loose cluster instead of one stacked sprite.
+            let pos = entity_position(u);
+            let sep = separation(u, pos);
+            if nonzero(sep.x) || nonzero(sep.y) {
+                try_move(u, sep.x, sep.y);
+            }
             return;
         }
     }
@@ -892,11 +961,38 @@ fn step_unit(u) {
         dx = entity_field(u, "wp_x") - pos.x;
         dy = entity_field(u, "wp_y") - pos.y;
     }
+    let pos2 = entity_position(u);
     let v = nvel(dx, dy, unit_speed());
-    try_move(u, v.x, v.y);
+    let sep = separation(u, pos2);
+    try_move(u, v.x + sep.x, v.y + sep.y);
     entity_set_field(u, "face", dir_yaw(dx, dy));
     entity_set_facing(u, entity_field(u, "face"));
     entity_set_anim(u, "run");
+
+    // Stall detection: a crowd converging on one point can never ALL land
+    // within the strict arrival radius (separation holds them apart), and
+    // a jammed corridor can wedge a walker outright. If real progress
+    // stops: near the dest → call it arrived (the WC3 "close enough");
+    // far from it → replan around whatever now blocks the way.
+    let np = entity_position(u);
+    let moved = approx_dist(np.x - pos2.x, np.y - pos2.y);
+    if moved < unit_speed() * ratio(1, 3) {
+        let stall = to_int(entity_field(u, "stall")) + 1;
+        let fx = entity_field(u, "dest_x") - np.x;
+        let fy = entity_field(u, "dest_y") - np.y;
+        if stall > 8 && approx_dist(fx, fy) < fixed(2) {
+            entity_set_field(u, "stall", fixed(0));
+            entity_set_field(u, "has_dest", fixed(0));
+            entity_set_anim(u, "idle");
+        } else if stall > 30 {
+            entity_set_field(u, "stall", fixed(0));
+            replan(u);
+        } else {
+            entity_set_field(u, "stall", fixed(stall));
+        }
+    } else {
+        entity_set_field(u, "stall", fixed(0));
+    }
 }
 
 /// The nearest living enemy unit within aggro range of `u`, or `-1`.
@@ -936,12 +1032,20 @@ fn step_attack(u, owner) {
         let pos = entity_position(u);
         entity_set_field(u, "face", dir_yaw(vp.x - pos.x, vp.y - pos.y));
         entity_set_facing(u, entity_field(u, "face"));
-        entity_set_anim(u, if to_int(entity_field(u, "kind")) == 1 { "attack" } else { "idle" });
         if to_int(entity_field(u, "atkcd")) == 0 {
             entity_set_field(u, "atkcd", fixed(attack_cd()));
             let dmg = if to_int(entity_field(u, "kind")) == 1 { soldier_dmg() } else { worker_dmg() };
             deal_damage(v, dmg);
         }
+        // Play "attack" only for a window after each swing, dropping back
+        // to idle in between: the host restarts a clip on the state
+        // TRANSITION (`set_actor_state` fires on change only), so this
+        // idle gap is what makes every swing replay the animation from
+        // its first frame instead of freezing on the last. Workers swing
+        // too (chopping trees / desperate defence) — both actors now
+        // carry an "attack" state.
+        let swinging = to_int(entity_field(u, "atkcd")) > attack_cd() - 18;
+        entity_set_anim(u, if swinging { "attack" } else { "idle" });
         return;
     }
     // Chase: re-aim the walk whenever the victim drifted off our dest.
@@ -972,8 +1076,11 @@ fn deal_damage(v, dmg) {
             let p = entity_position(v);
             let x = cell(p.x);
             let y = cell(p.y);
-            voxel_clear(x, y, 0);
-            voxel_set(x, y, 0, 0x805b_4226); // dirt stump patches the floor
+            // Clear from z 1 up: the trunk's BASE voxel survives as a
+            // stump and the floor tile underneath is never touched (a
+            // z-0 clear would erase it — a hole in the world). The store
+            // keeps the column at top 0 → walkable (Δ0 from the lowland).
+            voxel_clear(x, y, 1);
             entity_despawn(v);
             return;
         }

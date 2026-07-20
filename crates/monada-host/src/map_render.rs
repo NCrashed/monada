@@ -354,6 +354,36 @@ fn deck_clip_world_z(z_hi: i64) -> i32 {
     (GROUND_Z as i64 - z_hi) as i32
 }
 
+/// The four sim-cell corners of a box-select drag rectangle, aligned to the
+/// SCREEN rather than to world north/south. The drag's two ground points
+/// `a`/`b` (press and release) are opposite corners; the other two follow the
+/// camera's ground-projected screen axes at the live `yaw`, so the box rotates
+/// with the view instead of sticking to world X/Y (which reads as skewed the
+/// moment the camera is orbited). The host owns this because only it knows the
+/// live camera angle — the map's `cam_yaw` is a frozen init constant.
+///
+/// Sim-space camera basis (world X is mirrored, see `world_of`, so a world dir
+/// `(wx, wy)` is sim dir `(-wx, wy)`): roxlap's `right = (-sin y, cos y)` →
+/// sim screen-right `u = (sin y, cos y)`; the forward's ground component
+/// `(cos y, sin y)` → sim screen-up `v = (-cos y, sin y)`. `u`/`v` are
+/// orthonormal, so decomposing `b - a` onto them and rebuilding is exact (the
+/// third corner comes back to `b`). Corners are wound around the quad. At
+/// `yaw = 0` this collapses to the old world-axis rectangle (screen == world).
+fn drag_quad_sim(yaw: f64, a: (f64, f64), b: (f64, f64)) -> [(f64, f64); 4] {
+    let (sy, cy) = yaw.sin_cos();
+    let (ux, uy) = (sy, cy); // screen-right, on the ground, in sim cells
+    let (vx, vy) = (-cy, sy); // screen-up, on the ground, in sim cells
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let du = dx * ux + dy * uy; // (b − a) projected on screen-right
+    let dv = dx * vx + dy * vy; // (b − a) projected on screen-up
+    [
+        a,
+        (a.0 + ux * du, a.1 + uy * du),
+        (a.0 + ux * du + vx * dv, a.1 + uy * du + vy * dv), // == b (exact)
+        (a.0 + vx * dv, a.1 + vy * dv),
+    ]
+}
+
 /// Intersect a world ray with the board plane `z = GROUND_Z`.
 fn ground_hit(origin: DVec3, dir: DVec3) -> Option<DVec3> {
     if dir.z.abs() < 1e-9 {
@@ -396,6 +426,16 @@ pub struct MapRender {
     /// it (RTS box select); ascending-id order is the `highlighted_all`
     /// contract.
     highlighted: BTreeSet<EntityId>,
+    /// The selection-ring marker on the renderer's DYNAMIC sprite layer,
+    /// for actor maps: their static sprite set uploads exactly once
+    /// (re-uploading resets the actor layer), so marker instances frozen
+    /// in it would never appear — instead `sync_rings` mirrors the
+    /// per-frame marker instances through add/remove_sprite_instance.
+    /// Actor-less maps (chess) keep the static path (`set_sprites` runs
+    /// every frame there and carries the marker itself).
+    ring_model: Option<roxlap_render::SpriteModelId>,
+    /// Live ring instance ids, torn down and re-issued each frame.
+    ring_ids: Vec<roxlap_render::SpriteInstanceId>,
     /// An active pointer drag's anchor (sim-space ground point), set by
     /// `drag_begin`; the far corner rides `cursor_ground`. Render-side
     /// gesture state — the stateless local script layer cannot hold it.
@@ -537,10 +577,25 @@ impl MapRender {
     ) -> MapRender {
         let mut scene = Scene::new();
         let grid = scene.add_grid(GridTransform::identity());
-        // Model 0: a flat amber tile the size of one cell — highlights the
-        // selected entity's *square*, sitting on the board surface under
-        // the sprite (rather than a marker floating in the entity).
-        let marker = sprite_box(SCALE as u32, SCALE as u32, 2, 0x80FF_E000, false);
+        // Model 0: a flat amber selection RING circling the selected
+        // entity's footprint on the ground under the sprite — the classic
+        // RTS read (a multi-selected squad shows one ring per unit). Same
+        // placement contract as the old filled tile (`from_fn` and
+        // `solid_box` share the pivot path), so chess's square highlight
+        // simply became a circle on its square.
+        let marker = {
+            let d = SCALE as u32 + 4; // a hair wider than the cell
+            let c = f64::from(d - 1) * 0.5;
+            let (r_out, r_in) = (c, c - 2.5);
+            let kv6 = Kv6::from_fn(d, d, 2, |x, y, _z| {
+                let (dx, dy) = (f64::from(x) - c, f64::from(y) - c);
+                let d2 = dx.mul_add(dx, dy * dy);
+                (d2 <= r_out * r_out && d2 >= r_in * r_in).then_some(VoxColor(0x80FF_E000))
+            });
+            let mut s = Sprite::axis_aligned(kv6, [0.0, 0.0, 0.0]);
+            s.flags = SPRITE_FLAG_NO_SHADING;
+            s
+        };
         let sprites = SpriteSet {
             models: vec![marker],
             instances: Vec::new(),
@@ -557,6 +612,8 @@ impl MapRender {
             actor_targets: Vec::new(),
             clips_registered: false,
             highlighted: BTreeSet::new(),
+            ring_model: None,
+            ring_ids: Vec::new(),
             drag_anchor: None,
             status: String::new(),
             camera: OrbitCamera::framing(DVec3::new(0.0, 0.0, GROUND_Z)),
@@ -1108,6 +1165,7 @@ impl MapRender {
             self.sprites_uploaded = true;
         }
         self.update_actors(renderer, camera, dt);
+        self.sync_rings(renderer);
         // Deck cutaway: clip the grid above the local crew's deck so the camera
         // sees inside (set before building `frame`, which doesn't touch scene).
         self.apply_deck_clip();
@@ -1158,6 +1216,34 @@ impl MapRender {
         }
     }
 
+    /// Mirror this frame's selection-marker instances onto the renderer's
+    /// dynamic sprite layer (see the `ring_model` field for why the static
+    /// path can't carry them on actor maps). Tear-down + re-add per frame:
+    /// selection counts are tiny and `remove_sprite_instance` is an O(1)
+    /// swap, so reconciliation would be complexity for nothing.
+    fn sync_rings(&mut self, renderer: &mut SceneRenderer) {
+        if self.actors.is_empty() {
+            return; // static path (chess) draws the marker itself
+        }
+        if self.ring_model.is_none() {
+            self.ring_model =
+                Some(renderer.add_sprite_model(&self.sprites.models[HIGHLIGHT_MODEL].kv6));
+        }
+        let Some(model) = self.ring_model else {
+            return;
+        };
+        for id in self.ring_ids.drain(..) {
+            renderer.remove_sprite_instance(id);
+        }
+        for inst in &self.sprites.instances {
+            if inst.model == HIGHLIGHT_MODEL {
+                if let Some(id) = renderer.add_sprite_instance(model, inst.pos) {
+                    self.ring_ids.push(id);
+                }
+            }
+        }
+    }
+
     /// The active pointer-drag rectangle (`drag_begin` … `drag_end`), as a
     /// ground-space outline glued to the terrain — WYSIWYG for a box
     /// select: the drawn region IS the sim region the map will query.
@@ -1175,14 +1261,12 @@ impl MapRender {
             let (cx, cy) = ((sx + 0.5).floor() as i64, (sy + 0.5).floor() as i64);
             GROUND_Z - self.terrain.ground_height(cx, cy) as f64 - 2.0
         };
-        // Sim rect corners → world (world X is mirrored; see world_of).
+        // Sim rect corners → world (world X is mirrored; see world_of). The
+        // rectangle is screen-aligned (`drag_quad_sim` at the live camera yaw),
+        // so the drawn outline is exactly the region `drag_end` hands the map.
         let world = |sx: f64, sy: f64| [-sx * SCALE, sy * SCALE, ground(sx, sy)];
-        let corners = [
-            world(ax, ay),
-            world(bx, ay),
-            world(bx, by),
-            world(ax, by),
-        ];
+        let q = drag_quad_sim(self.camera.yaw, (ax, ay), (bx, by));
+        let corners = q.map(|(sx, sy)| world(sx, sy));
         let mut lines = Vec::with_capacity(4);
         for i in 0..4 {
             lines.push(Line3 {
@@ -1533,15 +1617,17 @@ impl HostBridge for MapRender {
 
     fn voxel_set(&mut self, x: i64, y: i64, z: i64, color: i64) {
         self.terrain.set(x, y, z);
-        let scale = SCALE as i64;
-        let pos = IVec3::new(
-            (x * scale) as i32,
-            (y * scale) as i32,
-            // Height above the floor → world z `g - z` (world z grows down).
-            (GROUND_Z as i64 - z) as i32,
-        );
+        // One sim CELL layer (SCALE×SCALE×1 world voxels), with the same
+        // world-X mirror as voxel_fill — this used to paint a single
+        // world voxel at UNMIRRORED +x, i.e. a speck in the void on the
+        // wrong side of the map, silently diverging from the collision
+        // store's full-cell semantics.
+        let s = SCALE as i64;
+        let g = GROUND_Z as i64;
+        let lo = IVec3::new((-(x + 1) * s) as i32, (y * s) as i32, (g - z) as i32);
+        let hi = IVec3::new((-x * s - 1) as i32, ((y + 1) * s - 1) as i32, (g - z) as i32);
         if let Some(grid) = self.scene.grid_mut(self.grid) {
-            grid.set_voxel(pos, Some(VoxColor(color as u32)));
+            grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
         }
     }
 
@@ -1830,8 +1916,14 @@ impl HostBridge for MapRender {
         };
         // A release off-world (cursor over the sky) collapses to a click.
         let (bx, by) = self.cursor_ground.unwrap_or((ax, ay));
+        // The screen-aligned quad (matches what `draw_drag_rect` drew): four
+        // corners wound around the rect, so the map can point-test units in the
+        // rotated box instead of a world-axis bbox.
         let corner = |x: f64, y: f64| FixedVec3::new(Fixed::from_f64(x), Fixed::from_f64(y), Fixed::ZERO);
-        vec![corner(ax, ay), corner(bx, by)]
+        drag_quad_sim(self.camera.yaw, (ax, ay), (bx, by))
+            .iter()
+            .map(|&(x, y)| corner(x, y))
+            .collect()
     }
     fn highlighted(&self) -> i64 {
         self.highlighted.iter().next().map_or(-1, |e| e.0 as i64)
@@ -2046,9 +2138,14 @@ mod tests {
         r.voxel_set(cx, cy, 0, 0x80AA_AAAA); // lower deck floor (sim-z 0)
         r.voxel_set(cx, cy, 4, 0x8055_5555); // upper deck floor (sim-z 4)
 
-        // `voxel_set` places cell (x, y) at world (x·SCALE, y·SCALE, …); ray
-        // straight down the column (+z is "down", world z-down) from above both.
-        let col = DVec3::new(cx as f64 * SCALE + 0.5, cy as f64 * SCALE + 0.5, 0.0);
+        // `voxel_set` places cell (x, y) with the same world-X mirror as
+        // `voxel_fill` (world x ∈ [-(x+1)·S, -x·S)); ray straight down the
+        // mirrored cell centre (+z is "down", world z-down) from above both.
+        let col = DVec3::new(
+            -(cx as f64 + 0.5) * SCALE,
+            (cy as f64 + 0.5) * SCALE,
+            0.0,
+        );
         let down = DVec3::new(0.0, 0.0, 1.0);
         let hit_z = |r: &MapRender| {
             r.scene
@@ -2116,6 +2213,41 @@ mod tests {
         // Clearing the observer detaches the twin cleanly.
         r.vision_observer(-1);
         assert!(r.update_fow(0.016).is_none(), "no observer → no fog");
+    }
+
+    /// The box-select drag quad follows the SCREEN, not world N/S/E/W. Locks
+    /// the sim-space camera basis + the world-X mirror the geometry rides on.
+    #[test]
+    fn drag_quad_is_screen_aligned() {
+        let approx = |a: (f64, f64), b: (f64, f64)| {
+            assert!(
+                (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9,
+                "{a:?} ≈ {b:?}"
+            );
+        };
+        // At yaw 0 the box collapses to the old world-axis rectangle.
+        let q0 = drag_quad_sim(0.0, (2.0, 3.0), (6.0, 8.0));
+        approx(q0[0], (2.0, 3.0));
+        approx(q0[1], (2.0, 8.0));
+        approx(q0[2], (6.0, 8.0)); // opposite corner is always the release point
+        approx(q0[3], (6.0, 3.0));
+
+        // At an arbitrary yaw the quad stays a rectangle: opposite corner is
+        // still exactly `b`, and adjacent edges are perpendicular (a proper
+        // rotated rect, not a world-axis bbox).
+        let (a, b) = ((2.0, 3.0), (6.0, 8.0));
+        let q = drag_quad_sim(0.8, a, b);
+        approx(q[0], a);
+        approx(q[2], b);
+        let e1 = (q[1].0 - q[0].0, q[1].1 - q[0].1);
+        let e2 = (q[3].0 - q[0].0, q[3].1 - q[0].1);
+        let dot = e1.0 * e2.0 + e1.1 * e2.1;
+        assert!(dot.abs() < 1e-9, "adjacent edges are perpendicular (dot {dot})");
+        // …and it isn't the world-axis box: the corners moved off N/S/E/W.
+        assert!(
+            (q[1].0 - a.0).abs() > 1e-6,
+            "the screen-right edge is rotated off the world axis"
+        );
     }
 
     /// A small solid-colour single-frame GIF the importer can voxelize.
