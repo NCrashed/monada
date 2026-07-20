@@ -8,7 +8,8 @@
 //! (DESIGN.md §3.1). The build-time table itself is reproducible; see
 //! the argument in `build.rs`.
 //!
-//! Functions: `sin`, `cos`, `atan2`, `acos`. `tan` is deferred.
+//! Functions: `sin`, `cos`, `atan2`, `acos`. `tan` is deferred. `cos` uses
+//! the same `SIN_LUT` shifted by `LUT_LEN/4` (≡ π/2) in index space.
 //! `atan2` uses a first-octant `atan` LUT over `t ∈ [0, 1]` (4 097
 //! entries, both endpoints exact), exploiting `atan(|y|/|x|)` symmetry
 //! and quadrant mirroring to cover all of `(-π, π]`. `acos` uses a
@@ -65,7 +66,17 @@ pub fn sin(angle: Fixed) -> Fixed {
 /// Cosine of `angle` (radians).
 #[must_use]
 pub fn cos(angle: Fixed) -> Fixed {
-    sin(angle + FRAC_PI_2)
+    let r = angle.to_bits().rem_euclid(TAU_BITS);
+    let tau = i128::from(TAU_BITS);
+    let num = i128::from(r) * LUT_LEN as i128;
+    let idx0 = (num / tau) as usize;
+    let rem = num % tau;
+    // cos(x) = sin(x + π/2): shift index by LUT_LEN/4 with wraparound.
+    let idx0 = (idx0 + LUT_LEN / 4) % LUT_LEN;
+    let idx1 = if idx0 + 1 == LUT_LEN { 0 } else { idx0 + 1 };
+    let a = i128::from(SIN_LUT[idx0]);
+    let b = i128::from(SIN_LUT[idx1]);
+    Fixed::from_bits((a + (b - a) * rem / tau) as i64)
 }
 
 /// Angle of the vector `(x, y)` in radians, in `(-π, π]`.
