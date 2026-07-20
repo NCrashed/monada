@@ -12,9 +12,9 @@
 //! 2(q_xyz × v)`, then `q_xyz × t`), and intermediates can approach the
 //! ceiling even when the final result would be in-range.
 
-use core::ops::Mul;
+use core::ops::{Mul, Neg};
 
-use crate::trig::{cos, sin};
+use crate::trig::{acos, cos, sin};
 use crate::{Fixed, FixedVec3};
 
 /// A unit quaternion representing a 3-D rotation, stored as `(w, x, y, z)`.
@@ -129,12 +129,145 @@ impl FixedQuat {
             z: -self.z,
         }
     }
+
+    /// Dot product of the four components. Used to measure alignment between
+    /// two quaternions (positive = same hemisphere = same rotation direction).
+    #[inline]
+    #[must_use]
+    pub fn dot(self, rhs: FixedQuat) -> Fixed {
+        self.w * rhs.w + self.x * rhs.x + self.y * rhs.y + self.z * rhs.z
+    }
+
+    /// Normalised linear interpolation from `self` to `rhs` at parameter `t ∈ [0, 1]`.
+    ///
+    /// Takes the shortest arc (negates `rhs` if the dot product is negative).
+    /// Cheaper than [`slerp`](FixedQuat::slerp) but not constant angular speed.
+    #[must_use]
+    pub fn nlerp(self, rhs: FixedQuat, t: Fixed) -> FixedQuat {
+        let rhs = if self.dot(rhs).to_bits() < 0 {
+            -rhs
+        } else {
+            rhs
+        };
+        FixedQuat {
+            w: self.w + (rhs.w - self.w) * t,
+            x: self.x + (rhs.x - self.x) * t,
+            y: self.y + (rhs.y - self.y) * t,
+            z: self.z + (rhs.z - self.z) * t,
+        }
+        .normalize()
+    }
+
+    /// Spherical linear interpolation from `self` to `rhs` at parameter `t ∈ [0, 1]`.
+    ///
+    /// Constant angular speed along the great-circle arc. Falls back to
+    /// [`nlerp`](FixedQuat::nlerp) when the quaternions are nearly identical
+    /// (avoids division by `sin(ω) ≈ 0`).
+    #[must_use]
+    pub fn slerp(self, rhs: FixedQuat, t: Fixed) -> FixedQuat {
+        let d = self.dot(rhs);
+        // Shortest-path: if quats are in opposite hemispheres, negate one.
+        let (rhs, d) = if d.to_bits() < 0 {
+            (-rhs, -d)
+        } else {
+            (rhs, d)
+        };
+        // Clamp to [-1, 1] against rounding overshoot.
+        let d = if d > Fixed::ONE { Fixed::ONE } else { d };
+
+        // Near-identical quaternions: sin(ω) → 0, fall back to nlerp.
+        // Threshold 1 − 2⁻²⁰ ≈ 1 − 9.5e-7, same ballpark as glam.
+        let threshold = Fixed::ONE - Fixed::from_bits(1 << 12);
+        if d >= threshold {
+            return FixedQuat {
+                w: self.w + (rhs.w - self.w) * t,
+                x: self.x + (rhs.x - self.x) * t,
+                y: self.y + (rhs.y - self.y) * t,
+                z: self.z + (rhs.z - self.z) * t,
+            }
+            .normalize();
+        }
+
+        let omega = acos(d);
+        let sin_omega = sin(omega);
+        let scale0 = sin(omega * (Fixed::ONE - t)) / sin_omega;
+        let scale1 = sin(omega * t) / sin_omega;
+        FixedQuat {
+            w: self.w * scale0 + rhs.w * scale1,
+            x: self.x * scale0 + rhs.x * scale1,
+            y: self.y * scale0 + rhs.y * scale1,
+            z: self.z * scale0 + rhs.z * scale1,
+        }
+    }
+
+    /// The shortest rotation that takes unit vector `from` to unit vector `to`.
+    ///
+    /// Uses the half-angle trick `q = (1 + from·to, from×to).normalize()` —
+    /// no `acos` or `sin` at runtime. Handles the anti-parallel case by
+    /// choosing a perpendicular axis and rotating by π.
+    ///
+    /// Both arguments must be unit vectors.
+    #[must_use]
+    pub fn from_rotation_arc(from: FixedVec3, to: FixedVec3) -> FixedQuat {
+        let d = from.dot(to);
+
+        // Anti-parallel (from ≈ -to): rotate 180° around any perpendicular axis.
+        // Threshold: dot ≤ -1 + ~1.5e-5.
+        let anti_threshold = Fixed::NEG_ONE + Fixed::from_bits(1 << 16);
+        if d <= anti_threshold {
+            // Pick the cardinal axis most orthogonal to `from` (smallest component).
+            let (ax, ay, az) = (
+                from.x.to_bits().abs(),
+                from.y.to_bits().abs(),
+                from.z.to_bits().abs(),
+            );
+            let perp = if ax <= ay && ax <= az {
+                from.cross(FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO))
+            } else if ay <= az {
+                from.cross(FixedVec3::new(Fixed::ZERO, Fixed::ONE, Fixed::ZERO))
+            } else {
+                from.cross(FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ONE))
+            }
+            .normalize();
+            return FixedQuat {
+                w: Fixed::ZERO,
+                x: perp.x,
+                y: perp.y,
+                z: perp.z,
+            };
+        }
+
+        // General case: unnormalised quat (1 + d, from × to), then normalise.
+        let c = from.cross(to);
+        FixedQuat {
+            w: Fixed::ONE + d,
+            x: c.x,
+            y: c.y,
+            z: c.z,
+        }
+        .normalize()
+    }
 }
 
 impl Default for FixedQuat {
     #[inline]
     fn default() -> Self {
         Self::IDENTITY
+    }
+}
+
+/// Negation: `−q` represents the same rotation as `q` but lives in the
+/// opposite hemisphere. Used internally for shortest-path `nlerp`/`slerp`.
+impl Neg for FixedQuat {
+    type Output = FixedQuat;
+    #[inline]
+    fn neg(self) -> FixedQuat {
+        FixedQuat {
+            w: -self.w,
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+        }
     }
 }
 

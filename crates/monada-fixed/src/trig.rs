@@ -8,12 +8,14 @@
 //! (DESIGN.md §3.1). The build-time table itself is reproducible; see
 //! the argument in `build.rs`.
 //!
-//! Functions: `sin`, `cos`, `atan2`. `tan` is deferred.
+//! Functions: `sin`, `cos`, `atan2`, `acos`. `tan` is deferred.
 //! `atan2` uses a first-octant `atan` LUT over `t ∈ [0, 1]` (4 097
 //! entries, both endpoints exact), exploiting `atan(|y|/|x|)` symmetry
-//! and quadrant mirroring to cover all of `(-π, π]`; the same
-//! "integer-only at runtime, reproducible table at build time" contract
-//! applies.
+//! and quadrant mirroring to cover all of `(-π, π]`. `acos` uses a
+//! direct LUT over `x ∈ [0, 1]` (4 097 entries) with the identity
+//! `acos(-x) = π − acos(x)` for the negative half; both avoid `sqrt`
+//! at runtime. The same "integer-only at runtime, reproducible table at
+//! build time" contract applies throughout.
 
 use crate::Fixed;
 
@@ -24,7 +26,10 @@ use crate::Fixed;
 mod tables {
     include!(concat!(env!("OUT_DIR"), "/trig_tables.rs"));
 }
-use tables::{ATAN_LUT, ATAN_LUT_LEN, FRAC_PI_2_BITS, LUT_LEN, PI_BITS, SIN_LUT, TAU_BITS};
+use tables::{
+    ACOS_LUT, ACOS_LUT_LEN, ATAN_LUT, ATAN_LUT_LEN, FRAC_PI_2_BITS, LUT_LEN, PI_BITS, SIN_LUT,
+    TAU_BITS,
+};
 
 /// π as a [`Fixed`].
 pub const PI: Fixed = Fixed::from_bits(PI_BITS);
@@ -94,6 +99,41 @@ pub fn atan2(y: Fixed, x: Fixed) -> Fixed {
         (false, true) => PI - angle,
         (false, false) => angle - PI,
         (true, false) => -angle,
+    }
+}
+
+/// Arccosine of `x` in radians, result in `[0, π]`.
+///
+/// `x` is clamped to `[-1, 1]`; values outside that range (e.g. due to
+/// rounding) are silently clamped rather than producing garbage.
+#[must_use]
+pub fn acos(x: Fixed) -> Fixed {
+    let negate = x.to_bits() < 0;
+    // Work in the positive half; clamp overshoot from rounding.
+    let abs_x = if negate { -x } else { x };
+    let abs_x = if abs_x > Fixed::ONE {
+        Fixed::ONE
+    } else {
+        abs_x
+    };
+
+    // Index into ACOS_LUT: map abs_x ∈ [0, 1] → [0, ACOS_LUT_LEN].
+    // denom = Fixed::ONE.to_bits() = 2^32 (the Q32.32 scale factor).
+    let n = ACOS_LUT_LEN as i128;
+    let denom = i128::from(Fixed::ONE.to_bits());
+    let num = i128::from(abs_x.to_bits()) * n;
+    let idx0 = (num / denom) as usize;
+    let rem = num % denom;
+    let idx1 = (idx0 + 1).min(ACOS_LUT_LEN);
+
+    let a = i128::from(ACOS_LUT[idx0]);
+    let b = i128::from(ACOS_LUT[idx1]);
+    let angle = Fixed::from_bits((a + (b - a) * rem / denom) as i64);
+
+    if negate {
+        PI - angle
+    } else {
+        angle
     }
 }
 
