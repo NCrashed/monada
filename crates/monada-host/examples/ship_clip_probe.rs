@@ -55,20 +55,25 @@ fn world_of(x: f64, y: f64, z: f64) -> DVec3 {
 fn build_hull(scene: &mut Scene, grid: GridId) {
     let plate = 0x8055_5f6b;
     let wall = 0x8079_8592;
-    let hatch = 0x80e0_a828;
+    let step = 0x80b8_9850;
     // deck 0 (lower): floor z=0, walls z 1..24, full y=10 divider (doorway x 9..10)
     fill(scene, grid, 0, 0, 0, 19, 19, 0, plate);
     rim(scene, grid, 1, 24, wall);
     fill(scene, grid, 1, 10, 1, 8, 10, 24, wall);
     fill(scene, grid, 11, 10, 1, 18, 10, 24, wall);
-    // deck 1 (upper): floor z=28, walls z 29..52, x=10 divider (doorway y 9..10)
-    fill(scene, grid, 0, 0, 28, 19, 19, 28, plate);
+    // deck 1 (upper): floor z=28 with a hole over the staircase (cx 14..18 × cy 4..5)
+    fill(scene, grid, 0, 0, 28, 13, 19, 28, plate);
+    fill(scene, grid, 19, 0, 28, 19, 19, 28, plate);
+    fill(scene, grid, 14, 3, 28, 18, 19, 28, plate);
     rim(scene, grid, 29, 52, wall);
     fill(scene, grid, 10, 1, 29, 10, 8, 52, wall);
     fill(scene, grid, 10, 11, 29, 10, 18, 52, wall);
-    // fore-starboard deck hatch (cx 16..18 × cy 1..4)
-    fill(scene, grid, 16, 1, 0, 18, 4, 0, hatch);
-    fill(scene, grid, 16, 1, 28, 18, 4, 28, hatch);
+    // fore-starboard corner staircase climbing east: solid step columns, no wall
+    fill(scene, grid, 14, 1, 0, 14, 2, 0, step);
+    fill(scene, grid, 15, 1, 0, 15, 2, 7, step);
+    fill(scene, grid, 16, 1, 0, 16, 2, 14, step);
+    fill(scene, grid, 17, 1, 0, 17, 2, 21, step);
+    fill(scene, grid, 18, 1, 0, 18, 2, 28, step);
 }
 
 fn rim(scene: &mut Scene, grid: GridId, lo: i32, hi: i32, col: u32) {
@@ -132,7 +137,7 @@ fn main() {
     // Upper deck: focus at sim z=28, clip = G - deck_top(1)=55 → 45.
     let upper_focus = world_of(10.0, 10.0, 28.0);
     render_png("probe_upper_clip45", Some(45), upper_focus);
-    // Camera on the crew standing at the hatch (sim ~16,3) — does the amber
-    // marker read as a distinct hatch?
-    render_png("probe_hatch", Some(73), world_of(15.0, 3.0, 0.0));
+    // Camera near the fore staircase (steps at cx 14..18, cy 4..5, climbing
+    // east) — do the ascending brass steps read, with no fence around them?
+    render_png("probe_stairs", None, world_of(14.0, 3.0, 7.0));
 }
