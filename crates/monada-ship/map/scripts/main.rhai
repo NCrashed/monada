@@ -242,6 +242,11 @@ fn init() {
     camera_dist(fixed(60));
     camera_focus(vec3(fixed(6), fixed(4), fixed(0)));
 
+    // Fog of war: a ~110° facing cone reaching 9 cells + a 3-cell 360°
+    // peripheral. `follow_camera` names the LOCAL crew as the observer each tick
+    // (per-client — each peer sees its own line of sight). Render-side.
+    vision_config(110, 9, 3);
+
     status("ship demo — WASD to walk; the fore-starboard stairwell climbs between decks");
 }
 
@@ -401,6 +406,8 @@ fn follow_camera() {
     if idx < crew.len() {
         let c = crew[idx];
         camera_focus(entity_position(c));
+        // See the world through this crew member's eyes (fog of war).
+        vision_observer(c);
         // Show the crew's deck band (floor..deck_top): deck 0 cuts the upper
         // deck away; deck 1 is the top band and cuts nothing.
         let d = to_int(entity_field(c, "deck"));

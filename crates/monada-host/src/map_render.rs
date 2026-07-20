@@ -21,7 +21,7 @@ use image::AnimationDecoder;
 
 use crate::autotile;
 use crate::bindings::{MapActionStates, MapActionValue, Part};
-use glam::{DVec3, IVec3};
+use glam::{DVec3, IVec3, IVec2, Vec2};
 use monada_fixed::{Fixed, FixedVec3};
 use monada_format::ActionDecl;
 use monada_render::OrbitCamera;
@@ -39,6 +39,7 @@ use roxlap_render::{
     ActorState, BillboardActorDef, BillboardActorId, BillboardMode, FrameParams, Line3,
     SceneRenderer, SpriteInstanceDesc, SpriteSet, ViewCutout, VoxelClipId,
 };
+use roxlap_scene::fow::{DeckBand, FogOfWar, FowObserver, FowTwin, VisionConfig};
 use roxlap_scene::{GridId, GridTransform, Scene};
 
 /// World voxels per sim unit (x/y). The board's 8 squares span 8·SCALE.
@@ -390,8 +391,15 @@ pub struct MapRender {
     /// Whether the actor clips have been registered with the renderer (done
     /// once, on the first frame a renderer is available — like `sky_uploaded`).
     clips_registered: bool,
-    /// Locally selected entity (per-player UI, never networked/hashed).
-    highlighted: Option<EntityId>,
+    /// Locally selected entities (per-player UI, never networked/hashed).
+    /// `highlight` replaces the set (single-select), `highlight_add` grows
+    /// it (RTS box select); ascending-id order is the `highlighted_all`
+    /// contract.
+    highlighted: BTreeSet<EntityId>,
+    /// An active pointer drag's anchor (sim-space ground point), set by
+    /// `drag_begin`; the far corner rides `cursor_ground`. Render-side
+    /// gesture state — the stateless local script layer cannot hold it.
+    drag_anchor: Option<(f64, f64)>,
     /// HUD status line, set by the map's `status(...)`.
     status: String,
     camera: OrbitCamera,
@@ -486,6 +494,27 @@ pub struct MapRender {
     /// `z_clip` (voxels above it — smaller grid-z — are cut). `None` = show the
     /// whole grid. Render-side, never hashed.
     deck_clip: Option<i32>,
+    /// The current deck band (`deck_clip`'s sim `z_lo..=z_hi`), kept so the fog
+    /// of war can build its `DeckBand`. `None` = no deck declared.
+    deck_band: Option<(i64, i64)>,
+    /// Fog of war (`vision_observer`): the local observer entity, or `None`.
+    /// Per-client, never hashed.
+    vision_entity: Option<EntityId>,
+    /// Fog-of-war tuning (`vision_config`): `(cone_deg, range_cells, peripheral_cells)`.
+    vision_cfg: (i64, i64, i64),
+    /// The live fog mask + its dimmed "known twin" grid, lazily built for the
+    /// observer once a deck band is known; rebuilt when the band changes (deck
+    /// change). `fow_band` is the sim band the current mask was built for.
+    fow: Option<FogOfWar>,
+    fow_twin: Option<FowTwin>,
+    fow_band: Option<(i64, i64)>,
+    /// The observer's world feet-position + facing yaw, captured in
+    /// `build_instances` (which has the `World`) for `render_into` to build the
+    /// `FowObserver` from.
+    observer_pose: Option<(DVec3, f64)>,
+    /// Queued `vision_hear` reveals `(grid cell x, y, deck z sim, loudness)`,
+    /// drained into the mask each frame.
+    vision_hears: Vec<(i64, i64, i64, f32)>,
 }
 
 /// A decoded animated HUD image (a portrait): its frames as `(RGBA, delay_ms)`
@@ -527,7 +556,8 @@ impl MapRender {
             entity_actors: BTreeMap::new(),
             actor_targets: Vec::new(),
             clips_registered: false,
-            highlighted: None,
+            highlighted: BTreeSet::new(),
+            drag_anchor: None,
             status: String::new(),
             camera: OrbitCamera::framing(DVec3::new(0.0, 0.0, GROUND_Z)),
             pending: Vec::new(),
@@ -558,6 +588,14 @@ impl MapRender {
             cursor_entity: -1,
             cutout: None,
             deck_clip: None,
+            deck_band: None,
+            vision_entity: None,
+            vision_cfg: (100, 8, 3),
+            fow: None,
+            fow_twin: None,
+            fow_band: None,
+            observer_pose: None,
+            vision_hears: Vec::new(),
         }
     }
 
@@ -568,6 +606,101 @@ impl MapRender {
         if let Some(grid) = self.scene.grid_mut(self.grid) {
             grid.z_clip = self.deck_clip;
         }
+    }
+
+    /// Drop the fog mask + detach its twin grid from the scene (so the real
+    /// grid draws normally again). Called when the observer / config changes.
+    fn drop_fow(&mut self) {
+        if let Some(twin) = self.fow_twin.take() {
+            twin.detach(&mut self.scene);
+        }
+        self.fow = None;
+        self.fow_band = None;
+    }
+
+    /// Update the fog of war for the local observer (captured in
+    /// `build_instances`) and return the twin grid to style via
+    /// `FrameParams.fow`, or `None` if vision is off / not ready. Mirrors the
+    /// roxlap boarding demo's FW.5 loop (build → update → sync twin).
+    fn update_fow(&mut self, dt: f64) -> Option<GridId> {
+        self.vision_entity?; // no observer ⇒ no fog (guards a stale pose)
+        let (feet, yaw) = self.observer_pose?;
+        self.deck_band?; // a deck was declared (deck_clip ran) ⇒ vision is ready
+        // Build the mask once. The fog rides ONE fixed grid-local band spanning
+        // the whole hull, NOT the crew's current `deck_clip` band. A staircase
+        // BRIDGES two decks — its columns run from the lower floor up past the
+        // upper one — so any per-deck band never contains the whole run and
+        // leaves it permanently fogged. `deck_clip` still hides the non-current
+        // deck visually; the fog just tracks every column and lets LOS (blocked
+        // within `EYE_HALF` of the eye) do the between-deck occlusion. A fixed
+        // band also means the mask never rebuilds on a deck flip, so remembered
+        // cells survive a climb (vision_observer/vision_config drop it explicitly
+        // when the viewpoint or tuning actually changes).
+        if self.fow.is_none() {
+            let (cone_deg, range, peripheral) = self.vision_cfg;
+            // z-down: the floor is the LARGER grid-z (the lowest deck sits at
+            // GROUND_Z, sim_z 0), the ceiling the smaller. HULL_SPAN clears the
+            // tallest deck + its walls with margin.
+            let hull_span: i32 = 64;
+            let z_bottom = GROUND_Z as i32; // lowest floor
+            let z_top = GROUND_Z as i32 - hull_span; // generous ceiling
+            let mut cfg = VisionConfig::for_decks(vec![DeckBand { z_top, z_bottom }]);
+            cfg.cone_half_angle = (cone_deg as f32).to_radians() * 0.5;
+            // Ranges are sim cells; grid columns are SCALE finer.
+            cfg.range = range as f32 * SCALE as f32;
+            cfg.peripheral_range = peripheral as f32 * SCALE as f32;
+            cfg.memory_decay = 2.0;
+            self.fow = Some(FogOfWar::new(cfg));
+            self.fow_twin = Some(FowTwin::attach(&mut self.scene, self.grid));
+            self.fow_band = self.deck_band;
+        }
+        // The observer, grid-local (identity grid ⇒ grid-local == world). Facing
+        // is the crew's yaw in world xy (world_of mirrors sim +x → world -x); the
+        // eye rides a hair above the feet (z-down ⇒ a smaller grid-z).
+        let observer = FowObserver {
+            cell: IVec2::new(feet.x.floor() as i32, feet.y.floor() as i32),
+            facing: Vec2::new(-(yaw.cos() as f32), yaw.sin() as f32),
+            deck: 0,
+            // Eye near HEAD height above the feet (z-down ⇒ a smaller grid-z).
+            // Two forces set this:
+            //  - roxlap blocks LOS with any voxel within `EYE_HALF` (2) of the
+            //    eye. The crew stands ON the 1-voxel floor slab (at `feet.z`), so
+            //    a low eye sits in the floor's opacity band and goes blind to a
+            //    patch underfoot.
+            //  - Each staircase riser (7 tall) OCCLUDES the tread behind it: an
+            //    eye that barely clears one step sees risers, not treads, so the
+            //    step tops stay fogged from below (correct LOS, but too low).
+            // The roxlap boarding demo rides the eye at ~83% of body height
+            // (EYE_HEIGHT 10 of a 12-tall body) so the crew looks OVER the near
+            // steps onto the treads — `-16` (≈head height on the ~22-tall crew,
+            // clears two 7-risers) matches that and reveals the run from below.
+            eye_z: feet.z as i32 - 16,
+        };
+        // Take the mask + twin out to keep `self.scene` borrows disjoint.
+        let mut fow = self.fow.take()?;
+        let mut twin = self.fow_twin.take()?;
+        if let Some(grid) = self.scene.grid(self.grid) {
+            fow.update(grid, &observer, dt as f32);
+        }
+        for (hx, hy, _hz, loud) in std::mem::take(&mut self.vision_hears) {
+            let w = world_of(FixedVec3::new(
+                Fixed::from_int(hx as i32),
+                Fixed::from_int(hy as i32),
+                Fixed::ZERO,
+            ));
+            fow.hear(0, IVec2::new(w.x.floor() as i32, w.y.floor() as i32), loud);
+        }
+        let out = if twin.sync(&mut self.scene, &fow) {
+            let id = twin.twin();
+            self.fow_twin = Some(twin);
+            Some(id)
+        } else {
+            // Twin lost (snapshot / rollback) — re-arm for next frame.
+            self.fow_twin = Some(FowTwin::attach(&mut self.scene, self.grid));
+            None
+        };
+        self.fow = Some(fow);
+        out
     }
 
     /// Apply one input edge to a declared action's live value (the host's
@@ -643,6 +776,13 @@ impl MapRender {
     pub fn build_instances(&mut self, world: &World) {
         self.sprites.instances.clear();
         self.actor_targets.clear();
+        // Capture the fog-of-war observer's world pose (feet + facing yaw) while
+        // we have the World; `render_into` builds the `FowObserver` from it.
+        self.observer_pose = self.vision_entity.and_then(|e| {
+            let p = world.position(e)?;
+            let yaw = self.entity_actors.get(&e).map_or(0.0, |a| a.facing);
+            Some((world_of(p), yaw))
+        });
         // Snapshot the bindings so the loop can mutate the disjoint sprite /
         // actor-target fields freely (the map is small — per-entity).
         let bindings: Vec<(EntityId, usize)> = self.models.iter().map(|(&e, &m)| (e, m)).collect();
@@ -685,14 +825,20 @@ impl MapRender {
                 None => {}
             }
         }
-        if let Some(h) = self.highlighted {
+        // Selection markers: one per selected entity. Despawned entities
+        // (killed / captured since selection) silently drop out of the set,
+        // so `highlighted_all` never hands the map a stale id.
+        self.highlighted.retain(|e| world.position(*e).is_some());
+        for &h in &self.highlighted {
             if let Some(p) = world.position(h) {
                 let w = world_of(p);
                 self.sprites.instances.push(SpriteInstanceDesc {
-                    // Seat the tile flush on the board surface, centred on
-                    // the entity's square (x/y already cell-centred).
+                    // Seat the tile flush on the ground the entity stands
+                    // on (its own w.z, not the z=0 board plane — a unit up
+                    // on a plateau keeps its marker underfoot), centred on
+                    // its cell (x/y already cell-centred).
                     model: HIGHLIGHT_MODEL,
-                    pos: [w.x as f32, w.y as f32, (GROUND_Z - 1.0) as f32],
+                    pos: [w.x as f32, w.y as f32, (w.z - 1.0) as f32],
                 });
             }
         }
@@ -965,6 +1111,9 @@ impl MapRender {
         // Deck cutaway: clip the grid above the local crew's deck so the camera
         // sees inside (set before building `frame`, which doesn't touch scene).
         self.apply_deck_clip();
+        // Fog of war: update the observer's mask + its twin grid (mutates the
+        // scene), then style the twin below. `None` when vision is off.
+        let fow_twin = self.update_fow(dt);
         // roxlap 0.30: `FrameParams` is `#[non_exhaustive]` — build from
         // `new` and override. The GPU mip/step/FOV knobs moved off the frame
         // (mip-scan → `RenderOptions`; step budget + FOV are now derived from
@@ -999,11 +1148,52 @@ impl MapRender {
                 z_bias: 0.5,                  // plane AT the floor (feet), walls above cut
             }
         });
+        // Style the fog twin (the dimmed last-seen grid the mask paints over).
+        frame.fow = fow_twin.map(|g| (g, self.fow.as_ref().expect("fow mask present")));
         renderer.render(&mut self.scene, camera, &frame);
 
+        self.draw_drag_rect(renderer, camera);
         if debug {
             self.draw_debug_footprints(renderer, camera);
         }
+    }
+
+    /// The active pointer-drag rectangle (`drag_begin` … `drag_end`), as a
+    /// ground-space outline glued to the terrain — WYSIWYG for a box
+    /// select: the drawn region IS the sim region the map will query.
+    /// Corners ride each cell's own ground height, lifted a hair so the
+    /// lines never z-fight the floor. No-op when no drag is active.
+    fn draw_drag_rect(&self, renderer: &mut SceneRenderer, camera: &Camera) {
+        let Some((ax, ay)) = self.drag_anchor else {
+            return;
+        };
+        let Some((bx, by)) = self.cursor_ground else {
+            return;
+        };
+        let col = OverlayColor(0xFFE8_F4A0); // pale WC3-ish selection green
+        let ground = |sx: f64, sy: f64| {
+            let (cx, cy) = ((sx + 0.5).floor() as i64, (sy + 0.5).floor() as i64);
+            GROUND_Z - self.terrain.ground_height(cx, cy) as f64 - 2.0
+        };
+        // Sim rect corners → world (world X is mirrored; see world_of).
+        let world = |sx: f64, sy: f64| [-sx * SCALE, sy * SCALE, ground(sx, sy)];
+        let corners = [
+            world(ax, ay),
+            world(bx, ay),
+            world(bx, by),
+            world(ax, by),
+        ];
+        let mut lines = Vec::with_capacity(4);
+        for i in 0..4 {
+            lines.push(Line3 {
+                a: corners[i],
+                b: corners[(i + 1) % 4],
+                color: col,
+                width_px: 2.0,
+                depth_test: false,
+            });
+        }
+        renderer.draw_lines(camera, &lines);
     }
 
     /// Debug overlay (F1): draw each animated actor's collision footprint — the
@@ -1598,13 +1788,32 @@ impl HostBridge for MapRender {
     }
 
     fn highlight(&mut self, entity: i64) {
-        self.highlighted = Some(EntityId(entity as u64));
+        self.highlighted.clear();
+        self.highlighted.insert(EntityId(entity as u64));
+    }
+    fn highlight_add(&mut self, entity: i64) {
+        self.highlighted.insert(EntityId(entity as u64));
     }
     fn highlight_clear(&mut self) {
-        self.highlighted = None;
+        self.highlighted.clear();
+    }
+    fn highlighted_all(&self) -> Vec<i64> {
+        self.highlighted.iter().map(|e| e.0 as i64).collect()
+    }
+    fn drag_begin(&mut self) {
+        self.drag_anchor = self.cursor_ground;
+    }
+    fn drag_end(&mut self) -> Vec<FixedVec3> {
+        let Some((ax, ay)) = self.drag_anchor.take() else {
+            return Vec::new();
+        };
+        // A release off-world (cursor over the sky) collapses to a click.
+        let (bx, by) = self.cursor_ground.unwrap_or((ax, ay));
+        let corner = |x: f64, y: f64| FixedVec3::new(Fixed::from_f64(x), Fixed::from_f64(y), Fixed::ZERO);
+        vec![corner(ax, ay), corner(bx, by)]
     }
     fn highlighted(&self) -> i64 {
-        self.highlighted.map_or(-1, |e| e.0 as i64)
+        self.highlighted.iter().next().map_or(-1, |e| e.0 as i64)
     }
 
     fn status(&mut self, text: &str) {
@@ -1638,14 +1847,38 @@ impl HostBridge for MapRender {
         self.cutout = (r > 0.0).then(|| (r, feather.to_f64().max(0.0)));
     }
 
-    fn deck_clip(&mut self, _z_lo: i64, z_hi: i64) {
+    fn deck_clip(&mut self, z_lo: i64, z_hi: i64) {
         // roxlap's `Grid::z_clip` cuts one side: voxels with grid-z BELOW the
         // threshold (smaller grid-z = higher up, z-down) become air. So clip at
-        // the band top (sim `z_hi`) to cut everything above it. The band floor
-        // (`z_lo`) is reserved — the engine can't cut the underside with a
-        // single threshold yet. A band whose top is the world's tallest voxel
-        // yields a threshold at/below all geometry, cutting nothing.
+        // the band top (sim `z_hi`) to cut everything above it. A band whose top
+        // is the world's tallest voxel yields a threshold at/below all geometry,
+        // cutting nothing.
         self.deck_clip = Some(deck_clip_world_z(z_hi));
+        // The full sim band drives the fog of war's `DeckBand` too.
+        self.deck_band = Some((z_lo, z_hi));
+    }
+
+    fn vision_observer(&mut self, entity: i64) {
+        let e = (entity >= 0).then_some(EntityId(entity as u64));
+        if e != self.vision_entity {
+            // Changing (or clearing) the observer drops the mask; it rebuilds
+            // for the new observer on the next frame.
+            self.vision_entity = e;
+            self.drop_fow();
+        }
+    }
+
+    fn vision_config(&mut self, cone_deg: i64, range: i64, peripheral: i64) {
+        let cfg = (cone_deg, range, peripheral);
+        if cfg != self.vision_cfg {
+            self.vision_cfg = cfg;
+            self.drop_fow(); // rebuild with the new tuning
+        }
+    }
+
+    fn vision_hear(&mut self, x: i64, y: i64, z: i64, loudness: Fixed) {
+        self.vision_hears
+            .push((x, y, z, loudness.to_f64().clamp(0.0, 1.0) as f32));
     }
 
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3) {
@@ -1828,6 +2061,40 @@ mod tests {
             Some(GROUND_Z as i32 - 4),
             "top band cuts nothing"
         );
+    }
+
+    /// The fog-of-war path runs headlessly (no window): paint a floor, declare
+    /// an observer + a deck band, capture its pose, and update the mask. Catches
+    /// panics in `FowTwin::attach` / `FogOfWar::update` / `sync` and confirms a
+    /// twin grid is produced for `FrameParams.fow`.
+    #[test]
+    fn fog_of_war_updates_without_a_renderer() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        r.voxel_fill(0, 0, 0, 8, 8, 0, 0x8055_5f6b); // a floor slab to see across
+        r.vision_config(110, 6, 3);
+        r.deck_clip(0, 3); // sets the deck band the mask needs
+
+        // An observer entity at sim (4, 4); `build_instances` captures its pose.
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let e = world.spawn(arch);
+        world.set_position(
+            e,
+            FixedVec3::new(Fixed::from_int(4), Fixed::from_int(4), Fixed::ZERO),
+        );
+        r.vision_observer(e.0 as i64);
+        r.build_instances(&world);
+
+        assert!(
+            r.update_fow(0.016).is_some(),
+            "fog of war produced a twin grid to style"
+        );
+        // A second frame reuses the mask (band unchanged) — no re-attach, no panic.
+        r.build_instances(&world);
+        assert!(r.update_fow(0.016).is_some(), "mask persists across frames");
+        // Clearing the observer detaches the twin cleanly.
+        r.vision_observer(-1);
+        assert!(r.update_fow(0.016).is_none(), "no observer → no fog");
     }
 
     /// A small solid-colour single-frame GIF the importer can voxelize.

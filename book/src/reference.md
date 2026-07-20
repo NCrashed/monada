@@ -160,6 +160,9 @@ collision queries above.
 | `camera_pan(dx, dy)` | shift the camera focus by a sim-space delta — an RTS-style scroll, accumulated host-side |
 | `camera_cutout(radius, feather)` | dissolve geometry between the camera and its focus inside a keyhole (sim cells; `radius <= 0` off) |
 | `deck_clip(z_lo, z_hi)` | show only the sim-z band `z_lo..=z_hi`, cutting the ceiling above it away |
+| `vision_observer(entity)` | declare the local fog-of-war viewpoint (per-client); `-1` clears it |
+| `vision_config(cone_deg, range, peripheral)` | tune the observer's vision cone / reach / peripheral radius (cells) |
+| `vision_hear(x, y, z, loudness)` | briefly reveal a cell from a heard sound (`0..1`) |
 | `set_light(dir, intensity)` | declare the directional "sun" |
 | `set_sky(path)` | load a sky panorama from an asset |
 
@@ -169,9 +172,13 @@ Per-client UI state — never networked or hashed.
 
 | Function | Result |
 |---|---|
-| `highlight(entity)` | mark an entity as locally selected |
+| `highlight(entity)` | mark an entity as locally selected (replaces the selection) |
+| `highlight_add(entity)` | add an entity to the selection (multi-select) |
 | `highlight_clear()` | clear the local selection |
-| `highlighted()` | the selected entity, or `-1` |
+| `highlighted()` | the (first) selected entity, or `-1` |
+| `highlighted_all()` | every selected entity, ascending |
+| `drag_begin()` | anchor a ground-space drag rectangle at the cursor; the host draws it until `drag_end` |
+| `drag_end()` | finish the drag: `[anchor, end]` sim points, or `[]` if none was active |
 | `status(text)` | set the HUD status line |
 
 ## Audio — *presentation*

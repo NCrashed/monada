@@ -42,8 +42,11 @@ pub use rhai_backend::RhaiBackend;
 /// maps written against the old surface are refused loudly instead of
 /// desyncing or dying mid-game.
 /// History: 2 = `camera_pan`; 3 = `nav_path`/`nav_block` (RTS demo,
-/// docs/plans/rts-demo.md).
-pub const HOST_API_VERSION: u32 = 3;
+/// docs/plans/rts-demo.md); 4 = `vision_observer`/`vision_config`/
+/// `vision_hear` (ship demo, docs/plans/ship-visibility.md); 5 =
+/// `highlight_add`/`highlighted_all`/`drag_begin`/`drag_end` (RTS
+/// multi-select).
+pub const HOST_API_VERSION: u32 = 5;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -188,12 +191,43 @@ pub trait HostBridge: Send {
     fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64);
     /// Paint a single voxel into the world grid, in sim coordinates.
     fn voxel_set(&mut self, x: i64, y: i64, z: i64, color: i64);
-    /// Mark `entity` as the locally selected one (a highlight overlay).
+    /// Mark `entity` as the locally selected one (a highlight overlay),
+    /// REPLACING any current selection (single-select semantics — the
+    /// chess-era contract).
     fn highlight(&mut self, entity: i64);
+    /// ADD `entity` to the local selection (multi-select, e.g. an RTS box
+    /// select) without touching what is already selected. The default
+    /// ignores it.
+    fn highlight_add(&mut self, _entity: i64) {}
     /// Clear the local selection.
     fn highlight_clear(&mut self);
-    /// The locally selected entity, or `-1`.
+    /// The locally selected entity, or `-1`. With a multi-selection this
+    /// is its first (lowest-id) member — single-select maps never see the
+    /// difference.
     fn highlighted(&self) -> i64;
+    /// Every locally selected entity (ascending id). The group-order side
+    /// of multi-select: a map iterates this to submit one command per
+    /// selected unit. The default is empty.
+    fn highlighted_all(&self) -> Vec<i64> {
+        Vec::new()
+    }
+
+    /// Begin a pointer drag gesture: the host anchors a ground-space
+    /// rectangle at the cursor's CURRENT ground point and keeps its far
+    /// corner glued to the cursor until [`drag_end`](Self::drag_end),
+    /// drawing the rectangle as a world overlay each frame. Gesture state
+    /// lives host-side because the local script layer is stateless (pure
+    /// functions — it cannot carry the anchor between ticks). Per-client,
+    /// render-side, never hashed. The default ignores it.
+    fn drag_begin(&mut self) {}
+    /// Finish the drag gesture and take its rectangle: `[anchor, end]` as
+    /// two sim-space ground points, or empty if no drag was active (or
+    /// the anchor never hit the ground). The map decides what the
+    /// rectangle means — box select, formation line, building footprint.
+    /// The default is empty.
+    fn drag_end(&mut self) -> Vec<FixedVec3> {
+        Vec::new()
+    }
     /// Set the HUD status line.
     fn status(&mut self, text: &str);
     /// Aim the camera at a point (sim coordinates).
@@ -232,6 +266,24 @@ pub trait HostBridge: Send {
     /// local crew's deck band; a band whose top is the tallest thing in the
     /// world cuts nothing. Render-side only; the default ignores it.
     fn deck_clip(&mut self, _z_lo: i64, _z_hi: i64) {}
+
+    /// Declare the local viewpoint for fog of war: the host maintains a
+    /// per-observer visibility mask against the world grid, updated every frame
+    /// from this entity's cell, facing, deck and eye height. Unseen cells dim to
+    /// a remembered "last seen" look; cells outside the live view hide the
+    /// actors standing in them. Pass `-1` to clear. **Per-client, never hashed**
+    /// — declare the LOCAL crew member (`local_player()`'s entity), so each peer
+    /// sees its own line of sight. Render-side only; the default ignores it.
+    fn vision_observer(&mut self, _entity: i64) {}
+    /// Tune the observer's vision: facing-cone half-angle (`cone_deg` degrees),
+    /// cone reach and 360° peripheral reach (`range`/`peripheral` cells). Sets
+    /// roxlap's `VisionConfig`. Render-side only; the default ignores it.
+    fn vision_config(&mut self, _cone_deg: i64, _range: i64, _peripheral: i64) {}
+    /// Briefly reveal cell `(x, y, z)` from a heard sound (SS13 "you hear
+    /// something" — live data, remembered styling); `loudness` in `0..1`. Pairs
+    /// with `play_sound`. Render-side only; the default ignores it.
+    fn vision_hear(&mut self, _x: i64, _y: i64, _z: i64, _loudness: Fixed) {}
+
     /// Queue a sim command for the host to route through the command path
     /// after the current trigger returns (never applied re-entrantly).
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3);

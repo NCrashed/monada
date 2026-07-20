@@ -487,6 +487,36 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     });
 
     let b = bridge.clone();
+    engine.register_fn("highlight_add", move |e: i64| {
+        b.lock().expect("bridge mutex").highlight_add(e);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("highlighted_all", move || -> Array {
+        b.lock()
+            .expect("bridge mutex")
+            .highlighted_all()
+            .into_iter()
+            .map(Dynamic::from)
+            .collect()
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("drag_begin", move || {
+        b.lock().expect("bridge mutex").drag_begin();
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("drag_end", move || -> Array {
+        b.lock()
+            .expect("bridge mutex")
+            .drag_end()
+            .into_iter()
+            .map(Dynamic::from)
+            .collect()
+    });
+
+    let b = bridge.clone();
     engine.register_fn("highlight_clear", move || {
         b.lock().expect("bridge mutex").highlight_clear();
     });
@@ -531,6 +561,23 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     let b = bridge.clone();
     engine.register_fn("deck_clip", move |z_lo: i64, z_hi: i64| {
         b.lock().expect("bridge mutex").deck_clip(z_lo, z_hi);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("vision_observer", move |entity: i64| {
+        b.lock().expect("bridge mutex").vision_observer(entity);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("vision_config", move |cone_deg: i64, range: i64, peripheral: i64| {
+        b.lock()
+            .expect("bridge mutex")
+            .vision_config(cone_deg, range, peripheral);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("vision_hear", move |x: i64, y: i64, z: i64, loudness: Fixed| {
+        b.lock().expect("bridge mutex").vision_hear(x, y, z, loudness);
     });
 
     let b = bridge.clone();
