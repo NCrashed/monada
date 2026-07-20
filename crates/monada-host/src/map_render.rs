@@ -1510,6 +1510,27 @@ impl HostBridge for MapRender {
         }
     }
 
+    fn voxel_clear(&mut self, x: i64, y: i64, z: i64) {
+        // Truncate the collision column; the previous top bounds the render
+        // span, so the clear erases exactly what was solid (an unpainted
+        // column is a no-op — nothing to erase, nothing to collide with).
+        let Some(prev_top) = self.terrain.clear_above(x, y, z) else {
+            return;
+        };
+        if prev_top < z {
+            return; // already clear at and above z
+        }
+        let s = SCALE as i64;
+        let g = GROUND_Z as i64;
+        // Same cell→world mapping as voxel_fill (world X mirrored, world z
+        // grows down): sim heights z..=prev_top occupy world z g-prev_top..=g-z.
+        let lo = IVec3::new((-(x + 1) * s) as i32, (y * s) as i32, (g - prev_top) as i32);
+        let hi = IVec3::new((-x * s - 1) as i32, ((y + 1) * s - 1) as i32, (g - z) as i32);
+        if let Some(grid) = self.scene.grid_mut(self.grid) {
+            grid.set_rect(lo, hi, None);
+        }
+    }
+
     fn voxel_set(&mut self, x: i64, y: i64, z: i64, color: i64) {
         self.terrain.set(x, y, z);
         let scale = SCALE as i64;

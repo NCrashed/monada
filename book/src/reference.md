@@ -144,6 +144,7 @@ collision queries above.
 |---|---|
 | `voxel_fill(x0, y0, z0, x1, y1, z1, color)` | fill a solid box of voxels |
 | `voxel_set(x, y, z, color)` | set one voxel |
+| `voxel_clear(x, y, z)` | cut a column down: everything at and above `z` becomes air (render + collision + nav) |
 | `tile(path)` | load a per-cell tile texture; returns a tile id, or `-1` |
 | `tile_fill(x0, y0, z0, x1, y1, z1, tile)` | paint a cell region with a tile |
 | `transition(low, high, path)` | register an autotile transition sheet |

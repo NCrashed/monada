@@ -28,13 +28,22 @@
 //! (walk to mine → mine → carry to hall → +gold → repeat), and worker
 //! training at the hall for gold, capped by supply.
 //!
+//! R-E adds combat and the win: a barracks per side trains soldiers,
+//! ATTACK orders (and soldier auto-acquire) resolve melee against units,
+//! buildings and trees — a felled tree `voxel_clear`s its column, so the
+//! cell opens for walking AND nav in the same breath — and destroying
+//! the enemy town hall wins the game.
+//!
 //! Archetypes register in order: UNIT = 0, TREE = 1, BUILDING = 2,
 //! MINE = 3, GAME = 4.
-//! Model ids by call order: worker actor = 0.
+//! Model ids by call order: worker actor = 0, soldier actor = 1.
 //! Command verbs: 1 = MOVE(unit, dest), 2 = HARVEST(unit, arg.z = mine),
-//! 3 = TRAIN (the sender's hall).
-//! Worker task field: 0 = idle/move, 1 = to-mine, 2 = mining,
-//! 3 = to-hall.
+//! 3 = TRAIN worker (hall), 4 = TRAIN soldier (barracks),
+//! 5 = ATTACK(unit, arg.z = victim entity).
+//! Unit task field: 0 = idle/move, 1 = to-mine, 2 = mining, 3 = to-hall,
+//! 4 = attacking. Unit kind: 0 = worker, 1 = soldier.
+//! Building kind: 0 = hall, 1 = barracks. game.winner: 0 none, 1/2 =
+//! player + 1.
 
 // --- tuning (all fixed-point; no_float Rhai forbids IEEE) ---------------
 // NB: Rhai functions are pure — they do NOT see top-level `const`s — so the
@@ -48,11 +57,20 @@ fn pan_speed() { ratio(50, 100) } // camera scroll, cells / tick
 // Economy tuning.
 fn start_gold() { 100 }
 fn worker_cost() { 50 }
+fn soldier_cost() { 75 }
 fn train_ticks() { 90 } // 3 s at 30 Hz
 fn mine_ticks() { 45 } // 1.5 s inside the mine per trip
 fn gold_per_trip() { 10 }
 fn mine_reserve() { 500 } // per mine
 fn supply_cap() { 12 } // max units per player
+
+// Combat tuning.
+fn worker_hp() { 40 }
+fn soldier_hp() { 60 }
+fn worker_dmg() { 3 } // workers chop / defend weakly
+fn soldier_dmg() { 10 }
+fn attack_cd() { 30 } // ticks between swings (1 s)
+fn aggro_range() { fixed(5) } // soldier auto-acquire (approx cells)
 
 /// Team colours: a render-side tint multiply (0x00RRGGBB) over the shared
 /// worker sprite — player 0 cool blue, player 1 warm red.
@@ -171,36 +189,41 @@ fn try_move(e, vx, vy) {
 // Archetype ids by registration order: UNIT = 0, TREE = 1. Model id by
 // `model_actor` order: worker = 0.
 fn init() {
-    // Unit: owner (player 0/1), hit points (combat lands in R-E), the move
-    // order (final dest + next nav waypoint + active flag), facing yaw,
-    // and the harvest loop (task FSM, mine-visit timer, carried gold flag,
-    // the mine entity it works).
-    archetype(["owner", "hp", "dest_x", "dest_y", "wp_x", "wp_y", "has_dest", "face", "task", "timer", "carry", "mine"]);
-    // Tree: a destructible prop (hp; felling lands in R-E). Its painted
-    // voxel column is what blocks walking — the entity is the hittable half.
+    // Unit: owner (player 0/1), kind (worker/soldier), hit points, the
+    // move order (final dest + next nav waypoint + active flag), facing
+    // yaw, the task FSM (harvest stations / attacking), its mine, its
+    // attack victim + swing cooldown, carried gold.
+    archetype(["owner", "kind", "hp", "dest_x", "dest_y", "wp_x", "wp_y", "has_dest", "face", "task", "timer", "carry", "mine", "victim", "atkcd"]);
+    // Tree: a destructible prop. Its painted voxel column is what blocks
+    // walking — the entity is the hittable half; felling clears the column.
     archetype(["hp"]);
-    // Building: hall (kind 0; trains workers) — barracks (kind 1) lands in
-    // R-E. Painted as a voxel block; the entity carries hp + the queue.
+    // Building: hall (kind 0, trains workers) / barracks (kind 1, trains
+    // soldiers). Painted as a voxel block; the entity carries hp + queue.
     archetype(["owner", "kind", "hp", "queue", "progress"]);
     // Gold mine: neutral, finite.
     archetype(["gold"]);
-    // Game singleton: per-player gold.
-    archetype(["gold0", "gold1"]);
+    // Game singleton: per-player gold + the winner (0 none, player + 1).
+    archetype(["gold0", "gold1", "winner"]);
 
     set_light(vec3(ratio(-6, 10), ratio(-3, 10), ratio(7, 10)), ratio(8, 10));
 
     build_terrain();
 
-    // The animated billboard worker actor (id 0 by call order); reuses the
-    // RPG hero's idle/run GIFs as a placeholder, team-tinted per owner.
+    // The animated billboard actors (ids 0/1 by call order); placeholders
+    // reusing RPG art (hero = worker, enemy = soldier — the soldier gets a
+    // real attack animation), team-tinted per owner.
     model_actor("assets/char/worker", ["idle", "run"], ratio(14, 10));
+    model_actor("assets/char/soldier", ["idle", "run", "attack"], ratio(14, 10));
     model_drop(0, ratio(35, 100)); // seat the visible feet on the floor
+    model_drop(1, ratio(35, 100));
 
     // Starting bases — a town hall + a gold mine per plateau, painted as
     // voxel blocks whose columns block walking/nav by the same height rule
     // as everything else. 180°-rotation symmetric (cell → (47−x, 47−y)).
     spawn_hall(0, 5, 5);
     spawn_hall(1, 42, 42);
+    spawn_barracks(0, 5, 12);
+    spawn_barracks(1, 42, 35);
     spawn_mine(10, 10);
     spawn_mine(37, 37);
 
@@ -311,6 +334,19 @@ fn spawn_hall(owner, x, y) {
     entity_set_field(b, "hp", fixed(300));
 }
 
+/// A barracks: a 3×3 painted block (kind 1) that trains soldiers.
+fn spawn_barracks(owner, x, y) {
+    let base = ground_height(x, y);
+    let wall = if owner == 0 { 0x805a_6a8a } else { 0x808a_5a5a };
+    voxel_fill(x - 1, y - 1, base, x + 1, y + 1, base + 6, wall);
+    voxel_fill(x - 1, y - 1, base + 7, x + 1, y + 1, base + 7, 0x8044_4a55);
+    let b = entity_create(2);
+    entity_set_position(b, vec3(fixed(x), fixed(y), fixed(base)));
+    entity_set_field(b, "owner", fixed(owner));
+    entity_set_field(b, "kind", fixed(1));
+    entity_set_field(b, "hp", fixed(200));
+}
+
 /// A neutral gold mine: a 3×3 painted rock block with a gold-flecked top
 /// + the mine entity holding its reserve.
 fn spawn_mine(x, y) {
@@ -322,12 +358,15 @@ fn spawn_mine(x, y) {
     entity_set_field(m, "gold", fixed(mine_reserve()));
 }
 
-fn spawn_worker(owner, x, y) {
+fn spawn_worker(owner, x, y) { spawn_unit(owner, 0, x, y) }
+
+fn spawn_unit(owner, kind, x, y) {
     let u = entity_create(0);
     entity_set_position(u, vec3(fixed(x), fixed(y), fixed(ground_height(x, y))));
     entity_set_field(u, "owner", fixed(owner));
-    entity_set_field(u, "hp", fixed(40));
-    entity_set_model(u, 0); // worker actor model
+    entity_set_field(u, "kind", fixed(kind));
+    entity_set_field(u, "hp", fixed(if kind == 0 { worker_hp() } else { soldier_hp() }));
+    entity_set_model(u, kind); // model ids mirror unit kinds (0/1)
     entity_set_anim(u, "idle");
     entity_set_tint(u, team_tint(owner));
 }
@@ -381,13 +420,21 @@ fn action(id, down) {
     } else if id == "order" && down {
         let g = pick_ground();
         if g != () {
-            // Context order: a click on a gold mine sends HARVEST (the
-            // mine entity id rides arg.z), open ground sends MOVE — one
-            // command per selected unit either way.
+            // Context order, WC3 style, one command per selected unit: an
+            // enemy unit under the cursor → ATTACK it; an enemy building
+            // or a tree under the ground point → ATTACK (painted blocks
+            // are invisible to pick_entity, so those two are cell tests);
+            // a gold mine → HARVEST; open ground → MOVE.
+            let victim = pick_entity();
+            if !(victim >= 0 && is_unit_local(victim) && !mine(victim)) {
+                victim = hostile_at(g);
+            }
             let m = mine_at(g);
             for e in highlighted_all() {
                 if mine(e) {
-                    if m >= 0 {
+                    if victim >= 0 {
+                        submit_command(5, e, vec3(g.x, g.y, fixed(victim)));
+                    } else if m >= 0 {
                         submit_command(2, e, vec3(g.x, g.y, fixed(m)));
                     } else {
                         submit_command(1, e, vec3(g.x, g.y, fixed(0)));
@@ -398,7 +445,41 @@ fn action(id, down) {
     } else if id == "train1" && down {
         // Queue a worker at this player's hall (the sim locates it).
         submit_command(3, -1, vec3(fixed(0), fixed(0), fixed(0)));
+    } else if id == "train2" && down {
+        // Queue a soldier at this player's barracks.
+        submit_command(4, -1, vec3(fixed(0), fixed(0), fixed(0)));
     }
+}
+
+fn is_unit_local(e) {
+    for u in entities_of(0) {
+        if u == e {
+            return true;
+        }
+    }
+    false
+}
+
+/// The attackable thing whose block/cell contains ground point `g`: an
+/// enemy building (its 3×3 block) or a tree (its cell); `-1` otherwise.
+fn hostile_at(g) {
+    let cx = cell(g.x);
+    let cy = cell(g.y);
+    for b in entities_of(2) {
+        if to_int(entity_field(b, "owner")) != me() {
+            let p = entity_position(b);
+            if cx >= cell(p.x) - 1 && cx <= cell(p.x) + 1 && cy >= cell(p.y) - 1 && cy <= cell(p.y) + 1 {
+                return b;
+            }
+        }
+    }
+    for t in entities_of(1) {
+        let p = entity_position(t);
+        if cx == cell(p.x) && cy == cell(p.y) {
+            return t;
+        }
+    }
+    -1
 }
 
 /// The gold mine whose 3×3 block contains ground point `g`, or `-1`.
@@ -477,22 +558,72 @@ fn command(player, verb, target, arg) {
         let p = entity_position(m);
         walk_to(target, p.x, p.y);
     } else if verb == 3 {
-        let h = hall_of(player);
-        if h < 0 {
+        train_at(player, 0, worker_cost());
+    } else if verb == 4 {
+        train_at(player, 1, soldier_cost());
+    } else if verb == 5 {
+        if !is_unit(target) || to_int(entity_field(target, "owner")) != player {
             return;
         }
-        let g = entities_of(4)[0];
-        let purse = "gold" + player;
-        let queued = to_int(entity_field(h, "queue"));
-        if to_int(entity_field(g, purse)) < worker_cost() {
+        let v = to_int(arg.z);
+        if !attackable(v, player) {
             return;
         }
-        if count_units(player) + queued >= supply_cap() {
-            return;
-        }
-        entity_set_field(g, purse, entity_field(g, purse) - fixed(worker_cost()));
-        entity_set_field(h, "queue", fixed(queued + 1));
+        entity_set_field(target, "task", fixed(4));
+        entity_set_field(target, "victim", fixed(v));
+        let p = entity_position(v);
+        walk_to(target, p.x, p.y);
     }
+}
+
+/// Queue one unit at `player`'s building of `bkind` (0 hall → worker,
+/// 1 barracks → soldier), gold + supply gated — the deduction runs inside
+/// the command fold, so every peer's purse agrees.
+fn train_at(player, bkind, cost) {
+    let h = building_of(player, bkind);
+    if h < 0 {
+        return;
+    }
+    let g = entities_of(4)[0];
+    let purse = "gold" + player;
+    let queued = to_int(entity_field(h, "queue"));
+    if to_int(entity_field(g, purse)) < cost {
+        return;
+    }
+    if count_units(player) + total_queued(player) >= supply_cap() {
+        return;
+    }
+    entity_set_field(g, purse, entity_field(g, purse) - fixed(cost));
+    entity_set_field(h, "queue", fixed(queued + 1));
+}
+
+fn total_queued(player) {
+    let n = 0;
+    for b in entities_of(2) {
+        if to_int(entity_field(b, "owner")) == player {
+            n += to_int(entity_field(b, "queue"));
+        }
+    }
+    n
+}
+
+/// May `player`'s unit attack entity `v`? Enemy units, enemy buildings,
+/// and any tree.
+fn attackable(v, player) {
+    if is_unit(v) {
+        return to_int(entity_field(v, "owner")) != player;
+    }
+    for b in entities_of(2) {
+        if b == v {
+            return to_int(entity_field(v, "owner")) != player;
+        }
+    }
+    for t in entities_of(1) {
+        if t == v {
+            return true;
+        }
+    }
+    false
 }
 
 /// Point unit `u` at `(x, y)`: clamp into the field, arm the order, plan
@@ -526,9 +657,12 @@ fn is_mine(e) {
 }
 
 /// `player`'s town hall (kind 0), or `-1` if it no longer stands.
-fn hall_of(player) {
+fn hall_of(player) { building_of(player, 0) }
+
+/// `player`'s building of `kind`, or `-1`.
+fn building_of(player, kind) {
     for b in entities_of(2) {
-        if to_int(entity_field(b, "kind")) == 0 && to_int(entity_field(b, "owner")) == player {
+        if to_int(entity_field(b, "kind")) == kind && to_int(entity_field(b, "owner")) == player {
             return b;
         }
     }
@@ -584,6 +718,11 @@ fn replan(u) {
 
 // --- one simulation tick ------------------------------------------------
 fn tick() {
+    let game = entities_of(4)[0];
+    if to_int(entity_field(game, "winner")) != 0 {
+        build_ui(); // game over: the world freezes, the banner stays
+        return;
+    }
     for u in entities_of(0) {
         step_unit(u);
     }
@@ -613,7 +752,8 @@ fn step_building(b) {
     if out.x < fixed(0) {
         return; // ring jammed: hold at full progress, retry next tick
     }
-    spawn_worker(owner, to_int(out.x), to_int(out.y));
+    // A hall delivers workers, a barracks soldiers (unit kind = building kind).
+    spawn_unit(owner, to_int(entity_field(b, "kind")), to_int(out.x), to_int(out.y));
     entity_set_field(b, "queue", fixed(q - 1));
     entity_set_field(b, "progress", fixed(0));
 }
@@ -647,15 +787,45 @@ fn build_ui() {
     let g = entities_of(4)[0];
     ui_scale(fixed(2));
     ui_text(8, 8, "Gold " + to_int(entity_field(g, "gold" + p)) + "    Supply " + count_units(p) + "/" + supply_cap(), 12);
-    ui_text(8, 38, "LMB select · drag box · RMB move/harvest · Q train worker", 8);
+    ui_text(8, 38, "LMB select · drag box · RMB move/harvest/attack · Q worker · E soldier", 8);
+    let winner = to_int(entity_field(g, "winner"));
+    if winner != 0 {
+        let msg = if winner == p + 1 { "VICTORY — the enemy hall has fallen" } else { "DEFEAT — your hall has fallen" };
+        ui_text(w / 4, ui_height() / 2 - 20, msg, 20);
+    }
 }
 
-/// Advance one unit: run the harvest FSM at its stations (mining inside
-/// the mine, deciding at arrivals), then walk it along its nav waypoints
-/// under the walk rule.
+/// Advance one unit: run the combat / harvest FSM at its stations, then
+/// walk it along its nav waypoints under the walk rule.
 fn step_unit(u) {
     let owner = to_int(entity_field(u, "owner"));
     entity_set_tint(u, team_tint(owner));
+
+    // Cooldown always runs down, even mid-walk.
+    let cd = to_int(entity_field(u, "atkcd"));
+    if cd > 0 {
+        entity_set_field(u, "atkcd", fixed(cd - 1));
+    }
+
+    // Idle soldiers pick their own fights (WC3 auto-acquire): the nearest
+    // enemy UNIT inside aggro range (deterministic ascending-id scan).
+    if to_int(entity_field(u, "task")) == 0 && to_int(entity_field(u, "kind")) == 1 {
+        let v = nearest_enemy_unit(u, owner);
+        if v >= 0 {
+            entity_set_field(u, "task", fixed(4));
+            entity_set_field(u, "victim", fixed(v));
+            let p = entity_position(v);
+            walk_to(u, p.x, p.y);
+        }
+    }
+
+    // Station: fighting (task 4) — swing in reach, chase otherwise.
+    if to_int(entity_field(u, "task")) == 4 {
+        step_attack(u, owner);
+        if to_int(entity_field(u, "has_dest")) == 0 {
+            return; // in reach (or the fight ended) — no walking this tick
+        }
+    }
 
     // Station: inside the mine (task 2) — count the visit down, then
     // shoulder the gold and head home.
@@ -727,6 +897,107 @@ fn step_unit(u) {
     entity_set_field(u, "face", dir_yaw(dx, dy));
     entity_set_facing(u, entity_field(u, "face"));
     entity_set_anim(u, "run");
+}
+
+/// The nearest living enemy unit within aggro range of `u`, or `-1`.
+/// Ascending-id iteration + strict `<` keep the pick deterministic.
+fn nearest_enemy_unit(u, owner) {
+    let up = entity_position(u);
+    let best = -1;
+    let bestd = fixed(0);
+    for e in entities_of(0) {
+        if to_int(entity_field(e, "owner")) == owner {
+            continue;
+        }
+        let p = entity_position(e);
+        let d = approx_dist(p.x - up.x, p.y - up.y);
+        if d < aggro_range() && (best < 0 || d < bestd) {
+            best = e;
+            bestd = d;
+        }
+    }
+    best
+}
+
+/// One combat tick for a task-4 unit: victim gone → stand down; in reach
+/// (Chebyshev 2 cells — the ring of a building block, generous for a
+/// unit) → stop and swing on cooldown; out of reach → keep the chase
+/// pointed at where the victim IS now.
+fn step_attack(u, owner) {
+    let v = to_int(entity_field(u, "victim"));
+    if !attackable(v, owner) {
+        entity_set_field(u, "task", fixed(0));
+        entity_set_field(u, "has_dest", fixed(0));
+        return;
+    }
+    let vp = entity_position(v);
+    if near(u, v, 2) {
+        entity_set_field(u, "has_dest", fixed(0)); // planted for the swing
+        let pos = entity_position(u);
+        entity_set_field(u, "face", dir_yaw(vp.x - pos.x, vp.y - pos.y));
+        entity_set_facing(u, entity_field(u, "face"));
+        entity_set_anim(u, if to_int(entity_field(u, "kind")) == 1 { "attack" } else { "idle" });
+        if to_int(entity_field(u, "atkcd")) == 0 {
+            entity_set_field(u, "atkcd", fixed(attack_cd()));
+            let dmg = if to_int(entity_field(u, "kind")) == 1 { soldier_dmg() } else { worker_dmg() };
+            deal_damage(v, dmg);
+        }
+        return;
+    }
+    // Chase: re-aim the walk whenever the victim drifted off our dest.
+    let dx = entity_field(u, "dest_x") - vp.x;
+    let dy = entity_field(u, "dest_y") - vp.y;
+    if to_int(entity_field(u, "has_dest")) == 0 || approx_dist(dx, dy) > fixed(2) {
+        walk_to(u, vp.x, vp.y);
+    }
+}
+
+/// Apply `dmg` to entity `v` (unit, building or tree) and resolve its
+/// death: units despawn; a felled tree despawns, `voxel_clear`s its
+/// column (walking + nav open up in the same breath — chasers replan on
+/// their next waypoint) and leaves a dirt stump voxel; a destroyed hall
+/// ends the game.
+fn deal_damage(v, dmg) {
+    let hp = to_int(entity_field(v, "hp")) - dmg;
+    if hp > 0 {
+        entity_set_field(v, "hp", fixed(hp));
+        return;
+    }
+    if is_unit(v) {
+        entity_despawn(v);
+        return;
+    }
+    for t in entities_of(1) {
+        if t == v {
+            let p = entity_position(v);
+            let x = cell(p.x);
+            let y = cell(p.y);
+            voxel_clear(x, y, 0);
+            voxel_set(x, y, 0, 0x805b_4226); // dirt stump patches the floor
+            entity_despawn(v);
+            return;
+        }
+    }
+    // A building fell: raze its 3×3 block down to one voxel above its
+    // base — the surviving foundation layer reads as a ruin scar AND keeps
+    // the plateau surface intact (walkable, Δ1), so the site opens for
+    // movement + nav. A hall decides the game.
+    let kind = to_int(entity_field(v, "kind"));
+    let owner = to_int(entity_field(v, "owner"));
+    let p = entity_position(v);
+    let bx = cell(p.x);
+    let by = cell(p.y);
+    let base = to_int(p.z);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            voxel_clear(bx + dx, by + dy, base + 1);
+        }
+    }
+    entity_despawn(v);
+    if kind == 0 {
+        let g = entities_of(4)[0];
+        entity_set_field(g, "winner", fixed(2 - owner)); // the OTHER player + 1
+    }
 }
 
 /// A task-1 worker has stopped walking: beside its mine (the nav closest-

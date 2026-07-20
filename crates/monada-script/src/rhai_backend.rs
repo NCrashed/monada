@@ -615,6 +615,11 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     // pure function of the script's own paint calls, so every peer answers
     // identically — safe to feed hashed `tick()` decisions.
     let b = bridge.clone();
+    engine.register_fn("voxel_clear", move |x: i64, y: i64, z: i64| {
+        b.lock().expect("bridge mutex").voxel_clear(x, y, z);
+    });
+
+    let b = bridge.clone();
     engine.register_fn("voxel_solid", move |x: i64, y: i64, z: i64| -> bool {
         b.lock().expect("bridge mutex").voxel_solid(x, y, z)
     });

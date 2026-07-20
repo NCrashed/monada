@@ -27,6 +27,8 @@ const GAME: ArchetypeId = ArchetypeId(4);
 const VERB_MOVE: u32 = 1;
 const VERB_HARVEST: u32 = 2;
 const VERB_TRAIN: u32 = 3;
+const VERB_TRAIN_SOLDIER: u32 = 4;
+const VERB_ATTACK: u32 = 5;
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 
@@ -236,7 +238,7 @@ fn gold(world: &SharedWorld, player: usize) -> i64 {
 fn economy_spawns_at_init() {
     let (world, _b) = fresh();
     let w = world.lock().unwrap();
-    assert_eq!(w.count(BUILDING), 2, "a town hall per player");
+    assert_eq!(w.count(BUILDING), 4, "a town hall + a barracks per player");
     assert_eq!(w.count(MINE), 2, "a gold mine per plateau");
     assert_eq!(w.count(GAME), 1, "the game singleton");
     drop(w);
@@ -319,6 +321,129 @@ fn training_costs_gold_and_stops_at_an_empty_purse() {
     assert_eq!(gold(&world, 0), 0, "second cost deducted, third refused");
     ticks(&mut b, 200);
     assert_eq!(p0_units(&world), 5, "exactly one more worker delivered");
+}
+
+/// An ATTACK order: `unit` fights `victim` (id rides `arg.z`).
+fn attack_cmd(unit: EntityId, victim: EntityId) -> Command {
+    #[allow(clippy::cast_possible_wrap)]
+    Command::on(
+        VERB_ATTACK,
+        unit,
+        FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::from_int(victim.0 as i32)),
+    )
+}
+
+/// Train one soldier for `player` and hand back its id (the newest unit).
+fn train_soldier(world: &SharedWorld, b: &mut RhaiBackend, player: PlayerId) -> EntityId {
+    let before = units(world).len();
+    b.on_command(player, &Command::on(VERB_TRAIN_SOLDIER, EntityId(0), FixedVec3::ZERO))
+        .expect("train soldier");
+    ticks(b, 120);
+    let after = units(world);
+    assert_eq!(after.len(), before + 1, "soldier delivered");
+    *after.last().expect("has units")
+}
+
+#[test]
+fn soldier_hunts_down_an_ordered_victim() {
+    // A P0 soldier is ordered onto a P1 worker crossing the lowland: it
+    // chases the MOVING target (the chase re-aims as the victim drifts)
+    // and kills it — 40 hp / 10 dmg = 4 swings.
+    let (world, mut b) = fresh();
+    let victim = units(&world)[3]; // P1 worker
+    let soldier = train_soldier(&world, &mut b, P0);
+    assert_eq!(field(&world, soldier, "kind"), 1, "trained a soldier");
+
+    // March both toward the middle; then the kill order.
+    b.on_command(P0, &move_cmd(soldier, 24, 24)).expect("march");
+    b.on_command(P1, &move_cmd(victim, 26, 30)).expect("victim walks");
+    ticks(&mut b, 450);
+    b.on_command(P0, &attack_cmd(soldier, victim)).expect("attack order");
+    ticks(&mut b, 600);
+    assert!(
+        !units(&world).contains(&victim),
+        "the ordered victim was chased down and killed"
+    );
+}
+
+#[test]
+fn idle_soldier_auto_acquires() {
+    // A P1 worker wanders into an idle P0 soldier's aggro radius: the
+    // soldier engages with NO P0 command at all.
+    let (world, mut b) = fresh();
+    let wanderer = units(&world)[3]; // P1 worker
+    let soldier = train_soldier(&world, &mut b, P0);
+    b.on_command(P0, &move_cmd(soldier, 24, 24)).expect("post the guard");
+    ticks(&mut b, 450);
+    b.on_command(P1, &move_cmd(wanderer, 22, 22)).expect("wander past");
+    ticks(&mut b, 700);
+    assert!(
+        !units(&world).contains(&wanderer),
+        "the guard engaged on its own aggro"
+    );
+}
+
+#[test]
+fn felling_a_tree_opens_its_cell() {
+    let (world, mut b) = fresh();
+    let tree = {
+        // The tree standing at (24, 14) — the one the parking test uses.
+        let w = world.lock().unwrap();
+        *w.entities(TREE)
+            .iter()
+            .find(|&&t| {
+                let p = w.position(t).expect("tree pos");
+                (p.x.to_f64() - 24.0).abs() < 0.1 && (p.y.to_f64() - 14.0).abs() < 0.1
+            })
+            .expect("the (24,14) tree stands")
+    };
+    let soldier = train_soldier(&world, &mut b, P0);
+    b.on_command(P0, &attack_cmd(soldier, tree)).expect("chop order");
+    ticks(&mut b, 800); // march + 3 swings (30 hp / 10 dmg)
+    assert_eq!(
+        world.lock().unwrap().count(TREE),
+        9,
+        "the tree fell"
+    );
+
+    // The cell is open now: an order INTO it arrives (R-B's parking test
+    // proves the same order used to stop adjacent).
+    b.on_command(P0, &move_cmd(soldier, 24, 14)).expect("walk the stump");
+    ticks(&mut b, 300);
+    let p = pos(&world, soldier);
+    assert!(
+        (p.x.to_f64() - 24.0).abs() < 0.4 && (p.y.to_f64() - 14.0).abs() < 0.4,
+        "soldier stands on the felled tree's cell (at {:.2}, {:.2})",
+        p.x.to_f64(),
+        p.y.to_f64()
+    );
+}
+
+#[test]
+fn razing_the_hall_wins_the_game() {
+    let (world, mut b) = fresh();
+    let p1_hall = {
+        let w = world.lock().unwrap();
+        *w.entities(BUILDING)
+            .iter()
+            .find(|&&e| {
+                w.field(e, "owner").expect("owner").to_f64() as i64 == 1
+                    && w.field(e, "kind").expect("kind").to_f64() as i64 == 0
+            })
+            .expect("P1 hall stands")
+    };
+    let soldier = train_soldier(&world, &mut b, P0);
+    b.on_command(P0, &attack_cmd(soldier, p1_hall)).expect("siege order");
+    // March across the map + 30 swings (300 hp / 10 dmg / 1 s cd) ≈ 1900 ticks.
+    ticks(&mut b, 2600);
+    let w = world.lock().unwrap();
+    let g = w.entities(GAME)[0];
+    assert_eq!(
+        w.field(g, "winner").expect("winner").to_f64() as i64,
+        1,
+        "player 0 (winner = player + 1) took the game"
+    );
+    assert_eq!(w.count(BUILDING), 3, "the fallen hall is gone");
 }
 
 #[test]

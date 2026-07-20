@@ -45,8 +45,9 @@ pub use rhai_backend::RhaiBackend;
 /// docs/plans/rts-demo.md); 4 = `vision_observer`/`vision_config`/
 /// `vision_hear` (ship demo, docs/plans/ship-visibility.md); 5 =
 /// `highlight_add`/`highlighted_all`/`drag_begin`/`drag_end` (RTS
-/// multi-select).
-pub const HOST_API_VERSION: u32 = 5;
+/// multi-select); 6 = `voxel_clear` (destructibles — RTS tree felling,
+/// ship doors).
+pub const HOST_API_VERSION: u32 = 6;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -191,6 +192,14 @@ pub trait HostBridge: Send {
     fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64);
     /// Paint a single voxel into the world grid, in sim coordinates.
     fn voxel_set(&mut self, x: i64, y: i64, z: i64, color: i64);
+    /// Cut column `(x, y)` down to below sim-`z`: everything at and above
+    /// `z` becomes air, in the render grid AND the collision store — so
+    /// movers, `nav_path` and the eye agree the space opened (a felled
+    /// tree, a breached wall). The heightmap collision store truncates
+    /// columns (it cannot hole-punch); repaint the floor voxel afterwards
+    /// if the clear reached ground level. Same determinism contract as
+    /// [`voxel_fill`](Self::voxel_fill). The default ignores it.
+    fn voxel_clear(&mut self, _x: i64, _y: i64, _z: i64) {}
     /// Mark `entity` as the locally selected one (a highlight overlay),
     /// REPLACING any current selection (single-select semantics — the
     /// chess-era contract).
@@ -612,6 +621,25 @@ impl VoxelStore {
         *e = (*e).max(z);
     }
 
+    /// Cut column `(x, y)` down: everything at and above sim-`z` becomes
+    /// air (the store is a heightmap — it can truncate a column, never
+    /// hole-punch it). Only ever lowers; a column cut below 0 reverts to
+    /// the unpainted default. Returns the previous top so a renderer can
+    /// clear exactly the span that was solid, or `None` if the column was
+    /// never painted.
+    pub fn clear_above(&mut self, x: i64, y: i64, z: i64) -> Option<i64> {
+        let prev = self.tops.get(&(x, y)).copied();
+        if let Some(top) = prev {
+            let new_top = top.min(z - 1);
+            if new_top < 0 {
+                self.tops.remove(&(x, y));
+            } else {
+                self.tops.insert((x, y), new_top);
+            }
+        }
+        prev
+    }
+
     /// Whether `(x, y, z)` is at or below the column's top solid voxel.
     #[must_use]
     pub fn solid(&self, x: i64, y: i64, z: i64) -> bool {
@@ -747,6 +775,9 @@ impl HostBridge for TerrainBridge {
     }
     fn voxel_set(&mut self, x: i64, y: i64, z: i64, _color: i64) {
         self.terrain.set(x, y, z);
+    }
+    fn voxel_clear(&mut self, x: i64, y: i64, z: i64) {
+        self.terrain.clear_above(x, y, z);
     }
     fn highlight(&mut self, _entity: i64) {}
     fn highlight_clear(&mut self) {}
