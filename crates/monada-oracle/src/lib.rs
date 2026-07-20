@@ -371,6 +371,75 @@ pub fn rpg_checkpoints() -> Vec<Checkpoint> {
     out
 }
 
+/// The spaceship crew-sim demo map, embedded for the golden (read straight
+/// from the map's script file). Like the RPG it runs headless under a
+/// [`TerrainBridge`]; its render-side calls (camera, deck clip, fog of war,
+/// HUD, actor anim) no-op, leaving only the hashed sim: crew movement, the
+/// deck-relative collision, and the stairwell deck-flip.
+const SHIP_SCRIPT: &str = include_str!("../../monada-ship/map/scripts/main.rhai");
+/// Hash the ship run at these tick counts (`ship@0` = post-init, hull painted
+/// but no crew yet — the crew spawns on the first input).
+const SHIP_CHECKPOINTS: &[usize] = &[0, 1, 30, 150, 600];
+
+/// A fixed, deterministic per-tick input for the ship golden (verb 0,
+/// `arg.xy` = the move axis, values in `-1..=1` like the real `action_axis2`;
+/// `target` is ignored by the map). Movement is view-relative through
+/// `cam_relative(yaw = 0.8)`, so `(1, -1)` resolves to ~due-east: it walks the
+/// crew from its fore-port spawn onto the fore-starboard stairwell and climbs
+/// it to the upper deck (exercising the deck-flip + stair seating), then orbits
+/// to slide along the upper divider.
+fn ship_input(t: usize) -> Command {
+    let (mx, my) = if t <= 200 {
+        (1, -1) // ~east: onto the stairwell, climb to the upper deck
+    } else {
+        match t % 4 {
+            0 => (1, 0),
+            1 => (0, 1),
+            2 => (-1, 0),
+            _ => (0, -1),
+        }
+    };
+    Command::on(
+        0,
+        EntityId(0),
+        FixedVec3::new(Fixed::from_int(mx), Fixed::from_int(my), Fixed::ZERO),
+    )
+}
+
+/// The ship golden: the crew-sim demo driven through its own script under a
+/// headless [`TerrainBridge`], one input command per tick, hashed at fixed
+/// tick counts. Gates cross-platform determinism of the two-deck movement,
+/// deck-relative collision, and the stairwell deck-flip — the ship's sim half
+/// (its visibility/camera work is render-side and unhashed by design).
+///
+/// # Panics
+/// Panics on a script compile/run failure (a bug, not a data condition).
+#[must_use]
+pub fn ship_checkpoints() -> Vec<Checkpoint> {
+    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let mut driver =
+        RhaiDriver::with_bridge(shared_world(SEED), SHIP_SCRIPT, &bridge).expect("compile ship");
+
+    let mut out = Vec::new();
+    let mut record = |driver: &RhaiDriver, n: usize| {
+        if SHIP_CHECKPOINTS.contains(&n) {
+            out.push(Checkpoint {
+                scenario: "ship",
+                tick: n as u64,
+                hash: driver.state_hash(),
+            });
+        }
+    };
+
+    record(&driver, 0);
+    for t in 1..=600usize {
+        driver.apply_command(P0, &ship_input(t));
+        driver.step();
+        record(&driver, t);
+    }
+    out
+}
+
 /// Every gated scenario's checkpoints, in a fixed order.
 #[must_use]
 pub fn all_checkpoints() -> Vec<Checkpoint> {
@@ -379,6 +448,7 @@ pub fn all_checkpoints() -> Vec<Checkpoint> {
     out.extend(lockstep_checkpoints());
     out.extend(chess_checkpoints());
     out.extend(rpg_checkpoints());
+    out.extend(ship_checkpoints());
     out
 }
 
@@ -403,7 +473,8 @@ pub fn render_goldens(checkpoints: &[Checkpoint]) -> String {
         "# scenarios: walk (scripted circle), kernel (pure-Rust anchor), \
          lockstep (two-session command demo), chess (turn-based rules), \
          rpg (real-time action-RPG: per-tick input + voxel-query + wave \
-         RNG); seed \"MONADA_0\".\n",
+         RNG), ship (two-deck crew sim: deck-relative collision + stairwell \
+         deck-flip); seed \"MONADA_0\".\n",
     );
     s.push_str("# Regenerate with `cargo run -p monada-oracle -- --bless`.\n");
     for c in checkpoints {
