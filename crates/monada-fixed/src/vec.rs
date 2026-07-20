@@ -124,6 +124,37 @@ impl FixedVec3 {
             z: self.z * s,
         }
     }
+
+    /// Unit vector in the same direction, or [`FixedVec3::ZERO`] for the
+    /// zero vector.
+    #[must_use]
+    pub fn normalize(self) -> FixedVec3 {
+        let len = self.length();
+        if len == Fixed::ZERO {
+            return FixedVec3::ZERO;
+        }
+        self.scale(Fixed::ONE / len)
+    }
+
+    /// Returns `self` unchanged if its length is ≤ `max`, otherwise scales
+    /// it down so its length equals `max`.
+    #[must_use]
+    pub fn clamp_length_max(self, max: Fixed) -> FixedVec3 {
+        let len_sq = self.length_squared();
+        let max_sq = max * max;
+        if len_sq <= max_sq {
+            self
+        } else {
+            self.scale(max / len_sq.sqrt())
+        }
+    }
+
+    /// Vector rejection of `self` from `rhs`: the component of `self`
+    /// perpendicular to `rhs`. `rhs` must be non-zero.
+    #[must_use]
+    pub fn reject(self, rhs: FixedVec3) -> FixedVec3 {
+        self - rhs.scale(self.dot(rhs) / rhs.length_squared())
+    }
 }
 
 macro_rules! impl_vec_ops {

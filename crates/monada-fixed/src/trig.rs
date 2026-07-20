@@ -103,8 +103,8 @@ pub fn atan2(y: Fixed, x: Fixed) -> Fixed {
 /// and linearly interpolates. All arithmetic is integer-only.
 fn atan_first_octant(a_bits: i64, b_bits: i64) -> Fixed {
     let n = ATAN_LUT_LEN as i128;
-    let num = a_bits as i128 * n;
-    let denom = b_bits as i128;
+    let num = i128::from(a_bits) * n;
+    let denom = i128::from(b_bits);
     let idx0 = (num / denom) as usize;
     let rem = num % denom;
     // idx0 ≤ ATAN_LUT_LEN because a_bits ≤ b_bits; clamp idx1 to stay in bounds.

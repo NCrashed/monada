@@ -227,6 +227,42 @@ fn vec2_geometry() {
 }
 
 #[test]
+fn vec3_normalize_clamp_reject() {
+    let eps = 1 << 16;
+
+    // normalize: result is unit length
+    let v = FixedVec3::new(Fixed::from_int(3), Fixed::from_int(4), Fixed::ZERO);
+    close(v.normalize().length(), Fixed::ONE, eps);
+    // direction preserved: normalized x/y ratio matches original 3:4
+    let n = v.normalize();
+    close(n.x * Fixed::from_int(4), n.y * Fixed::from_int(3), eps);
+    // zero input returns zero, no panic
+    assert_eq!(FixedVec3::ZERO.normalize(), FixedVec3::ZERO);
+
+    // clamp_length_max: short vector unchanged
+    let short = FixedVec3::new(Fixed::from_int(1), Fixed::ZERO, Fixed::ZERO);
+    assert_eq!(short.clamp_length_max(Fixed::from_int(5)), short);
+    // long vector clamped to max length
+    let long = FixedVec3::new(Fixed::from_int(10), Fixed::ZERO, Fixed::ZERO);
+    let clamped = long.clamp_length_max(Fixed::from_int(3));
+    close(clamped.length(), Fixed::from_int(3), eps);
+    // exact length is unchanged
+    let at_max = FixedVec3::new(Fixed::from_int(3), Fixed::ZERO, Fixed::ZERO);
+    assert_eq!(at_max.clamp_length_max(Fixed::from_int(3)), at_max);
+
+    // reject: component perpendicular to rhs
+    // rejecting (3, 4, 0) from x-axis leaves only the y component
+    let a = FixedVec3::new(Fixed::from_int(3), Fixed::from_int(4), Fixed::ZERO);
+    let x_axis = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
+    let r = a.reject(x_axis);
+    close(r.x, Fixed::ZERO, 1 << 12);
+    close(r.y, Fixed::from_int(4), 1 << 12);
+    close(r.z, Fixed::ZERO, 1 << 12);
+    // reject is perpendicular to rhs: dot product ≈ 0
+    close(r.dot(x_axis), Fixed::ZERO, 1 << 12);
+}
+
+#[test]
 fn vec3_geometry() {
     let x = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
     let y = FixedVec3::new(Fixed::ZERO, Fixed::ONE, Fixed::ZERO);
