@@ -517,6 +517,11 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     });
 
     let b = bridge.clone();
+    engine.register_fn("camera_pan", move |dx: Fixed, dy: Fixed| {
+        b.lock().expect("bridge mutex").camera_pan(dx, dy);
+    });
+
+    let b = bridge.clone();
     engine.register_fn("camera_cutout", move |radius: Fixed, feather: Fixed| {
         b.lock()
             .expect("bridge mutex")

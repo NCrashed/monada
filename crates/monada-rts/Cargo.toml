@@ -1,0 +1,42 @@
+[package]
+name = "monada-rts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "A Warcraft-III-class RTS demo map (scripts + GIF actors) forcing monada's deterministic navigation + selection seams, with a thin `cargo run` launcher. R-A: the click-move skeleton."
+publish = false
+
+[[bin]]
+name = "monada-rts"
+path = "src/main.rs"
+
+[dependencies]
+# The host event loop + shared map CLI + archive loader. Like monada-rpg /
+# monada-ship, this crate just loads the bundled `rts.monada` and hands it to
+# the host. `default-features = false` + re-adding `audio` via this crate's
+# own feature lets a headless build (`--no-default-features`) drop cpal/ALSA.
+monada-host = { path = "../monada-host", default-features = false }
+monada-format = { workspace = true }
+
+[features]
+default = ["audio"]
+# Forwards to the host's real sound playback (on by default).
+audio = ["monada-host/audio"]
+
+[build-dependencies]
+# build.rs packs `map/` into a deterministic `rts.monada` in OUT_DIR.
+monada-format = { workspace = true }
+
+[dev-dependencies]
+# Headless smoke / determinism tests drive the Rhai backend directly (no host,
+# no window) under a TerrainBridge, mirroring monada-rpg / monada-ship.
+monada-format = { workspace = true }
+monada-script = { workspace = true }
+monada-sim = { workspace = true }
+monada-fixed = { workspace = true }
+
+[lints]
+workspace = true

@@ -41,7 +41,8 @@ pub use rhai_backend::RhaiBackend;
 /// breaking change: bump **both** constants to the same new value, so
 /// maps written against the old surface are refused loudly instead of
 /// desyncing or dying mid-game.
-pub const HOST_API_VERSION: u32 = 1;
+/// History: 2 = `camera_pan` (RTS demo, docs/plans/rts-demo.md).
+pub const HOST_API_VERSION: u32 = 2;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -205,6 +206,14 @@ pub trait HostBridge: Send {
     /// how close the view sits. The host clamps it to a sane range. The
     /// default ignores it (a map that never calls it keeps the host default).
     fn camera_dist(&mut self, _dist: Fixed) {}
+
+    /// Shift the camera focus by a sim-space delta (cells) — a free RTS-style
+    /// camera pan. Unlike `camera_focus` (absolute, needs a point the script
+    /// can name), a pan accumulates on the host's stored focus, so a *local*
+    /// layer with no persistent state of its own can scroll the view
+    /// (script functions are pure — they cannot carry a focus variable
+    /// across ticks). Per-client, render-side only; the default ignores it.
+    fn camera_pan(&mut self, _dx: Fixed, _dy: Fixed) {}
 
     /// Dissolve geometry between the camera and its focus point inside a
     /// screen-space "keyhole" (roxlap's `ViewCutout`) — so a third-person crew

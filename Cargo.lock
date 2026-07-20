@@ -1657,6 +1657,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "monada-rts"
+version = "0.0.1"
+dependencies = [
+ "monada-fixed",
+ "monada-format",
+ "monada-host",
+ "monada-script",
+ "monada-sim",
+]
+
+[[package]]
 name = "monada-script"
 version = "0.0.1"
 dependencies = [

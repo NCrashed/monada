@@ -1592,6 +1592,14 @@ impl HostBridge for MapRender {
         self.camera.dist = dist.to_f64().clamp(60.0, 2000.0);
     }
 
+    fn camera_pan(&mut self, dx: Fixed, dy: Fixed) {
+        // A sim-space delta through `world_of`'s linear part: world-X is
+        // mirrored, x/y scale by SCALE, z untouched. Accumulates on the
+        // stored focus, so a stateless local layer can scroll the view.
+        self.camera.center.x -= dx.to_f64() * SCALE;
+        self.camera.center.y += dy.to_f64() * SCALE;
+    }
+
     fn camera_cutout(&mut self, radius: Fixed, feather: Fixed) {
         let r = radius.to_f64();
         self.cutout = (r > 0.0).then(|| (r, feather.to_f64().max(0.0)));

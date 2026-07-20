@@ -155,6 +155,7 @@ collision queries above.
 | `camera_focus(point)` | aim the camera at a sim-space point |
 | `camera_angle(yaw, pitch)` | set the camera's orbit angles (radians) |
 | `camera_dist(dist)` | set the camera's distance from its focus |
+| `camera_pan(dx, dy)` | shift the camera focus by a sim-space delta — an RTS-style scroll, accumulated host-side |
 | `camera_cutout(radius, feather)` | dissolve geometry between the camera and its focus inside a keyhole (sim cells; `radius <= 0` off) |
 | `deck_clip(z_lo, z_hi)` | show only the sim-z band `z_lo..=z_hi`, cutting the ceiling above it away |
 | `set_light(dir, intensity)` | declare the directional "sun" |
