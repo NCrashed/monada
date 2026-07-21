@@ -273,9 +273,9 @@ impl Mul<FixedQuat> for FixedQuat {
 /// Uses `v' = v + 2w(q_xyz × v) + 2(q_xyz × (q_xyz × v))`, which needs two
 /// cross products and avoids a full quaternion multiply + division.
 ///
-/// **Overflow**: intermediates grow up to `8×` the input magnitude, so
-/// components of `v` should stay below roughly `5_000` to avoid Q32.32
-/// overflow in the nested cross products.
+/// **Range**: intermediates reach ≈ 3× |v|, so the result is exact up to
+/// rounding until |v| nears the Q32.32 ceiling (≈ 2³¹). Safe for any
+/// world coordinate short of a few hundred million units.
 impl Mul<FixedVec3> for FixedQuat {
     type Output = FixedVec3;
     #[inline]
