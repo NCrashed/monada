@@ -26,6 +26,14 @@ use std::path::Path;
 /// and cheap to bake (32 KiB of `i64`).
 const LUT_LEN: usize = 4096;
 
+/// Number of intervals in the `atan` first-octant table (`t ∈ [0, 1]`).
+/// The table has `ATAN_LUT_LEN + 1` entries so both endpoints are exact.
+const ATAN_LUT_LEN: usize = 4096;
+
+/// Number of intervals in the `acos` table (`x ∈ [0, 1]`).
+/// Negative-half covered by the identity `acos(-x) = π − acos(x)`.
+const ACOS_LUT_LEN: usize = 4096;
+
 /// `2^32`, the Q32.32 scale factor.
 const SCALE: f64 = 4_294_967_296.0;
 
@@ -60,6 +68,36 @@ fn main() {
     for i in 0..LUT_LEN {
         let angle = (i as f64) / (LUT_LEN as f64) * tau;
         let _ = writeln!(src, "    {},", to_fixed(angle.sin()));
+    }
+    src.push_str("];\n");
+
+    let _ = writeln!(
+        src,
+        "pub(crate) const ATAN_LUT_LEN: usize = {ATAN_LUT_LEN};"
+    );
+    let _ = writeln!(
+        src,
+        "pub(crate) const ATAN_LUT: [i64; {}] = [",
+        ATAN_LUT_LEN + 1
+    );
+    for i in 0..=ATAN_LUT_LEN {
+        let t = (i as f64) / (ATAN_LUT_LEN as f64);
+        let _ = writeln!(src, "    {},", to_fixed(t.atan()));
+    }
+    src.push_str("];\n");
+
+    let _ = writeln!(
+        src,
+        "pub(crate) const ACOS_LUT_LEN: usize = {ACOS_LUT_LEN};"
+    );
+    let _ = writeln!(
+        src,
+        "pub(crate) const ACOS_LUT: [i64; {}] = [",
+        ACOS_LUT_LEN + 1
+    );
+    for i in 0..=ACOS_LUT_LEN {
+        let t = (i as f64) / (ACOS_LUT_LEN as f64);
+        let _ = writeln!(src, "    {},", to_fixed(t.acos()));
     }
     src.push_str("];\n");
 

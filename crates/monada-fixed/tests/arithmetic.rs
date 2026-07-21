@@ -2,8 +2,8 @@
 //! determinism contract: defined overflow, fixed rounding, and
 //! integer-only trig (DESIGN.md §3.1).
 
-use monada_fixed::trig::{cos, sin, FRAC_PI_2, PI, TAU};
-use monada_fixed::{Fixed, FixedVec2, FixedVec3};
+use monada_fixed::trig::{acos, atan2, cos, sin, FRAC_PI_2, PI, TAU};
+use monada_fixed::{Fixed, FixedQuat, FixedVec2, FixedVec3};
 
 /// Assert two `Fixed` are within `eps` raw steps of each other.
 fn close(a: Fixed, b: Fixed, eps_bits: i64) {
@@ -227,6 +227,42 @@ fn vec2_geometry() {
 }
 
 #[test]
+fn vec3_normalize_clamp_reject() {
+    let eps = 1 << 16;
+
+    // normalize: result is unit length
+    let v = FixedVec3::new(Fixed::from_int(3), Fixed::from_int(4), Fixed::ZERO);
+    close(v.normalize().length(), Fixed::ONE, eps);
+    // direction preserved: normalized x/y ratio matches original 3:4
+    let n = v.normalize();
+    close(n.x * Fixed::from_int(4), n.y * Fixed::from_int(3), eps);
+    // zero input returns zero, no panic
+    assert_eq!(FixedVec3::ZERO.normalize(), FixedVec3::ZERO);
+
+    // clamp_length_max: short vector unchanged
+    let short = FixedVec3::new(Fixed::from_int(1), Fixed::ZERO, Fixed::ZERO);
+    assert_eq!(short.clamp_length_max(Fixed::from_int(5)), short);
+    // long vector clamped to max length
+    let long = FixedVec3::new(Fixed::from_int(10), Fixed::ZERO, Fixed::ZERO);
+    let clamped = long.clamp_length_max(Fixed::from_int(3));
+    close(clamped.length(), Fixed::from_int(3), eps);
+    // exact length is unchanged
+    let at_max = FixedVec3::new(Fixed::from_int(3), Fixed::ZERO, Fixed::ZERO);
+    assert_eq!(at_max.clamp_length_max(Fixed::from_int(3)), at_max);
+
+    // reject: component perpendicular to rhs
+    // rejecting (3, 4, 0) from x-axis leaves only the y component
+    let a = FixedVec3::new(Fixed::from_int(3), Fixed::from_int(4), Fixed::ZERO);
+    let x_axis = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
+    let r = a.reject(x_axis);
+    close(r.x, Fixed::ZERO, 1 << 12);
+    close(r.y, Fixed::from_int(4), 1 << 12);
+    close(r.z, Fixed::ZERO, 1 << 12);
+    // reject is perpendicular to rhs: dot product ≈ 0
+    close(r.dot(x_axis), Fixed::ZERO, 1 << 12);
+}
+
+#[test]
 fn vec3_geometry() {
     let x = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
     let y = FixedVec3::new(Fixed::ZERO, Fixed::ONE, Fixed::ZERO);
@@ -238,4 +274,191 @@ fn vec3_geometry() {
     assert_eq!(x.dot(y), Fixed::ZERO);
     let v = FixedVec3::new(Fixed::from_int(2), Fixed::from_int(3), Fixed::from_int(6));
     assert_eq!(v.length(), Fixed::from_int(7)); // 2-3-6-7 Pythagorean quadruple
+}
+
+#[test]
+fn quat_rotation() {
+    let eps = 1 << 18; // LUT-driven; two trig calls per quat construction
+
+    // Identity leaves every vector unchanged — bit-exact (no trig involved).
+    let v = FixedVec3::new(Fixed::from_int(3), Fixed::from_int(4), Fixed::from_int(5));
+    assert_eq!(FixedQuat::IDENTITY * v, v);
+    assert_eq!(FixedQuat::default() * v, v);
+
+    // Rotate x-axis 90° around z-axis → y-axis.
+    let z = FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ONE);
+    let q90z = FixedQuat::from_axis_angle(z, FRAC_PI_2);
+    let x_axis = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
+    let y_axis = FixedVec3::new(Fixed::ZERO, Fixed::ONE, Fixed::ZERO);
+    let rotated = q90z * x_axis;
+    close(rotated.x, y_axis.x, eps);
+    close(rotated.y, y_axis.y, eps);
+    close(rotated.z, y_axis.z, eps);
+
+    // Isometry: rotation preserves vector length.
+    close(rotated.length(), x_axis.length(), eps);
+    let w = FixedVec3::new(Fixed::from_int(3), Fixed::from_int(4), Fixed::ZERO);
+    let rotated_w = q90z * w;
+    close(rotated_w.length(), w.length(), 1 << 20);
+
+    // Composition: (q1 * q2) * v == q1 * (q2 * v).
+    let x = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
+    let quat_x90 = FixedQuat::from_axis_angle(x, FRAC_PI_2);
+    let composed = q90z * quat_x90;
+    let diag = FixedVec3::new(Fixed::ONE, Fixed::ONE, Fixed::ONE);
+    let via_composed = composed * diag;
+    let via_sequential = q90z * (quat_x90 * diag);
+    close(via_composed.x, via_sequential.x, eps);
+    close(via_composed.y, via_sequential.y, eps);
+    close(via_composed.z, via_sequential.z, eps);
+
+    // Round-trip: q.inverse() * (q * v) ≈ v.
+    let rt = q90z.inverse() * (q90z * v);
+    close(rt.x, v.x, eps);
+    close(rt.y, v.y, eps);
+    close(rt.z, v.z, eps);
+
+    // from_scaled_axis matches from_axis_angle.
+    let q_sa = FixedQuat::from_scaled_axis(z.scale(FRAC_PI_2));
+    let expected = q90z * x_axis;
+    let got_sa = q_sa * x_axis;
+    close(got_sa.x, expected.x, eps);
+    close(got_sa.y, expected.y, eps);
+    close(got_sa.z, expected.z, eps);
+
+    // normalize brings a slightly drifted quaternion back to unit length.
+    let drifted = FixedQuat::new(q90z.x, q90z.y, q90z.z, q90z.w + Fixed::from_bits(1 << 20));
+    close(drifted.normalize().length(), Fixed::ONE, 1 << 16);
+
+    // Zero axis and zero scaled-axis return identity.
+    assert_eq!(
+        FixedQuat::from_axis_angle(FixedVec3::ZERO, FRAC_PI_2),
+        FixedQuat::IDENTITY
+    );
+    assert_eq!(
+        FixedQuat::from_scaled_axis(FixedVec3::ZERO),
+        FixedQuat::IDENTITY
+    );
+}
+
+#[test]
+fn acos_landmarks_and_roundtrip() {
+    let eps = 1 << 16;
+
+    // Exact endpoints and midpoint.
+    close(acos(Fixed::ONE), Fixed::ZERO, eps); // acos(1) = 0
+    close(acos(Fixed::ZERO), FRAC_PI_2, eps); // acos(0) = π/2
+    close(acos(Fixed::NEG_ONE), PI, eps); // acos(-1) = π
+
+    // acos(cos(a)) ≈ a for a ∈ [0, π].
+    let step = PI / Fixed::from_int(100);
+    let mut a = Fixed::ZERO;
+    while a <= PI {
+        close(acos(cos(a)), a, 1 << 18);
+        a += step;
+    }
+
+    // cos(acos(x)) ≈ x for x ∈ [-1, 1].
+    let step = Fixed::from_ratio(1, 50);
+    let mut x = Fixed::NEG_ONE;
+    while x <= Fixed::ONE {
+        close(cos(acos(x)), x, 1 << 16);
+        x += step;
+    }
+
+    // Clamping: values slightly outside [-1, 1] should not panic.
+    let _ = acos(Fixed::ONE + Fixed::from_bits(1 << 10));
+    let _ = acos(Fixed::NEG_ONE - Fixed::from_bits(1 << 10));
+}
+
+#[test]
+fn quat_slerp_nlerp_arc() {
+    let eps = 1 << 18;
+
+    let z = FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ONE);
+    let q0 = FixedQuat::IDENTITY;
+    let q1 = FixedQuat::from_axis_angle(z, FRAC_PI_2);
+
+    // dot: IDENTITY · IDENTITY = 1.
+    assert_eq!(FixedQuat::IDENTITY.dot(FixedQuat::IDENTITY), Fixed::ONE);
+    // Opposite hemispheres.
+    assert!(q0.dot(-q0).to_bits() < 0);
+
+    // nlerp endpoints match the inputs.
+    let n0 = q0.nlerp(q1, Fixed::ZERO);
+    close(n0.w, q0.w, eps);
+    close(n0.z, q0.z, eps);
+    let n1 = q0.nlerp(q1, Fixed::ONE);
+    close(n1.w, q1.w, eps);
+    close(n1.z, q1.z, eps);
+    // nlerp result is unit length.
+    close(
+        q0.nlerp(q1, Fixed::from_ratio(1, 2)).length(),
+        Fixed::ONE,
+        eps,
+    );
+
+    // slerp endpoints match the inputs.
+    let s0 = q0.slerp(q1, Fixed::ZERO);
+    close(s0.w, q0.w, eps);
+    close(s0.z, q0.z, eps);
+    let s1 = q0.slerp(q1, Fixed::ONE);
+    close(s1.w, q1.w, eps);
+    close(s1.z, q1.z, eps);
+
+    // slerp(0.5): halfway between identity and 90° z-rotation is 45° z.
+    // Rotating x-axis by 45° → x ≈ y (equal components).
+    let half = q0.slerp(q1, Fixed::from_ratio(1, 2));
+    let x_axis = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
+    let rotated = half * x_axis;
+    close(rotated.x, rotated.y, 1 << 20); // x == y at 45°
+
+    // from_rotation_arc: result maps `from` to `to`.
+    let from = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
+    let to = FixedVec3::new(Fixed::ZERO, Fixed::ONE, Fixed::ZERO);
+    let q_arc = FixedQuat::from_rotation_arc(from, to);
+    let got = q_arc * from;
+    close(got.x, to.x, eps);
+    close(got.y, to.y, eps);
+    close(got.z, to.z, eps);
+
+    // from_rotation_arc identity case (from == to).
+    let q_id = FixedQuat::from_rotation_arc(from, from);
+    let got = q_id * from;
+    close(got.x, from.x, eps);
+    close(got.y, from.y, eps);
+
+    // from_rotation_arc anti-parallel: from == -to, should still rotate correctly.
+    let q_flip = FixedQuat::from_rotation_arc(from, -from);
+    let got = q_flip * from;
+    close(got.x, (-from).x, eps);
+    close(got.y, (-from).y, eps);
+    close(got.z, (-from).z, eps);
+}
+
+#[test]
+fn atan2_landmarks() {
+    let eps = 1 << 16; // ~1.5e-5, two lerp steps
+
+    // Cardinal directions.
+    close(atan2(Fixed::ZERO, Fixed::ONE), Fixed::ZERO, eps); // +x axis → 0
+    close(atan2(Fixed::ONE, Fixed::ZERO), FRAC_PI_2, eps); // +y axis → π/2
+    close(atan2(Fixed::ZERO, Fixed::NEG_ONE), PI, eps); // −x axis → π
+    close(atan2(Fixed::NEG_ONE, Fixed::ZERO), -FRAC_PI_2, eps); // −y axis → −π/2
+
+    // 45° diagonals.
+    let frac_pi_4 = FRAC_PI_2 / Fixed::from_int(2);
+    close(atan2(Fixed::ONE, Fixed::ONE), frac_pi_4, eps); // Q1 diagonal
+    close(atan2(Fixed::ONE, Fixed::NEG_ONE), PI - frac_pi_4, eps); // Q2
+    close(atan2(Fixed::NEG_ONE, Fixed::NEG_ONE), frac_pi_4 - PI, eps); // Q3
+    close(atan2(Fixed::NEG_ONE, Fixed::ONE), -frac_pi_4, eps); // Q4
+
+    // Consistent with sin/cos: atan2(sin(a), cos(a)) == a for a ∈ (−π, π].
+    let mut st = 1234u64;
+    for _ in 0..500 {
+        let raw = i64::from(lcg(&mut st) % 6_283); // raw steps, range < 2π
+        let a = Fixed::from_bits(raw * (1 << 16)) - PI; // a ∈ (−π, π]
+        let recovered = atan2(sin(a), cos(a));
+        close(recovered, a, 1 << 18);
+    }
 }
