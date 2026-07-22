@@ -216,7 +216,11 @@ fn init() {
     // cells (outside the hull) show it. Render-side (headless no-op).
     set_sky("assets/starfield.png");
 
-    build_hull();
+    // Spawn the ship's own voxel grid (separate from the world grid) so the
+    // hull can later be moved/rotated as a unit. grid_spawn returns a
+    // render-side handle; (0, 0, 0) places it at the world voxel origin.
+    let ship_grid = grid_spawn(0, 0, 0);
+    build_hull(ship_grid);
 
     // The animated billboard crew actor (id 0 by call order). The 3rd arg is
     // the rendered height in cells; the host scales the art to it. Reuses the
@@ -250,53 +254,54 @@ fn init() {
     status("ship demo — WASD to walk; the fore-starboard stairwell climbs between decks");
 }
 
-/// Paint the two-deck hull, for the EYE. Collision is the `blocked` predicate
-/// above (the heightmap store can't do stacked decks); keep this layout and
-/// that predicate in sync. A deck is a floor slab + a tall rim wall band; an
-/// interior divider (with a doorway gap) splits each deck into two compartments
-/// joined by the gap — the "corridor". The two decks get perpendicular dividers
-/// so they read distinct, and sit `DECK_STRIDE = 28` apart in (unscaled) z.
-fn build_hull() {
+/// Paint the two-deck hull into `grid`, for the EYE. Collision is the `blocked`
+/// predicate above (the heightmap store can't do stacked decks); keep this
+/// layout and that predicate in sync. A deck is a floor slab + a tall rim wall
+/// band; an interior divider (with a doorway gap) splits each deck into two
+/// compartments joined by the gap — the "corridor". The two decks get
+/// perpendicular dividers so they read distinct, and sit `DECK_STRIDE = 28`
+/// apart in (unscaled) z.
+fn build_hull(grid) {
     let plate = 0x8055_5f6b; // steel floor plating
     let wall = 0x8079_8592; // hull wall
     let step = 0x80b8_9850; // brass stair steps
 
     // --- deck 0 (lower): floor z=0, walls z 1..24 ---
-    voxel_fill(0, 0, 0, 19, 19, 0, plate);
-    rim_walls(1, 24, wall);
+    voxel_fill_in(grid, 0, 0, 0, 19, 19, 0, plate);
+    rim_walls(grid, 1, 24, wall);
     // Full divider along y=10 splitting fore (y<10) / aft (y>10), doorway gap
     // x 9..10 (the stairwell is off this row, so no other opening is needed).
-    voxel_fill(1, 10, 1, 8, 10, 24, wall);
-    voxel_fill(11, 10, 1, 18, 10, 24, wall);
+    voxel_fill_in(grid, 1, 10, 1, 8, 10, 24, wall);
+    voxel_fill_in(grid, 11, 10, 1, 18, 10, 24, wall);
 
     // --- deck 1 (upper): floor slab z=28 with a HOLE over the staircase
     // (cx 14..18 × cy 1..2, so the crew climbs up through it), walls z 29..52 ---
-    voxel_fill(0, 0, 28, 13, 19, 28, plate); // west of the stair hole
-    voxel_fill(19, 0, 28, 19, 19, 28, plate); // east sliver (under the rim)
-    voxel_fill(14, 3, 28, 18, 19, 28, plate); // north of the hole (cy 3..19)
-    rim_walls(29, 52, wall);
+    voxel_fill_in(grid, 0, 0, 28, 13, 19, 28, plate); // west of the stair hole
+    voxel_fill_in(grid, 19, 0, 28, 19, 19, 28, plate); // east sliver (under the rim)
+    voxel_fill_in(grid, 14, 3, 28, 18, 19, 28, plate); // north of the hole (cy 3..19)
+    rim_walls(grid, 29, 52, wall);
     // Divider along x=10 splitting port (x<10) / starboard (x>10), gap y 9..10.
-    voxel_fill(10, 1, 29, 10, 8, 52, wall);
-    voxel_fill(10, 11, 29, 10, 18, 52, wall);
+    voxel_fill_in(grid, 10, 1, 29, 10, 8, 52, wall);
+    voxel_fill_in(grid, 10, 11, 29, 10, 18, 52, wall);
 
     // The staircase (fore-starboard corner, cy 1..2) climbs EAST: solid step
     // blocks at cx 14..18, each a column from z 0 up to `stair_z(cx)` — 0 at cx
     // 14 (flush with the lower floor) to 28 (the upper floor) at cx 18. No
     // surrounding wall: the blocks' own risers do the containment (see
     // `reachable`). Keep in sync with `on_stairs` / `stair_z`.
-    voxel_fill(14, 1, 0, 14, 2, 0, step); // cx 14 → z 0 (lower floor)
-    voxel_fill(15, 1, 0, 15, 2, 7, step);
-    voxel_fill(16, 1, 0, 16, 2, 14, step);
-    voxel_fill(17, 1, 0, 17, 2, 21, step);
-    voxel_fill(18, 1, 0, 18, 2, 28, step); // cx 18 → z 28 (upper floor)
+    voxel_fill_in(grid, 14, 1, 0, 14, 2, 0, step); // cx 14 → z 0 (lower floor)
+    voxel_fill_in(grid, 15, 1, 0, 15, 2, 7, step);
+    voxel_fill_in(grid, 16, 1, 0, 16, 2, 14, step);
+    voxel_fill_in(grid, 17, 1, 0, 17, 2, 21, step);
+    voxel_fill_in(grid, 18, 1, 0, 18, 2, 28, step); // cx 18 → z 28 (upper floor)
 }
 
-/// A rim wall band (z `lo`..`hi`) around the 20×20 hull edge.
-fn rim_walls(lo, hi, col) {
-    voxel_fill(0, 0, lo, 19, 0, hi, col); // south
-    voxel_fill(0, 19, lo, 19, 19, hi, col); // north
-    voxel_fill(0, 0, lo, 0, 19, hi, col); // west
-    voxel_fill(19, 0, lo, 19, 19, hi, col); // east
+/// A rim wall band (z `lo`..`hi`) around the 20×20 hull edge, painted into `grid`.
+fn rim_walls(grid, lo, hi, col) {
+    voxel_fill_in(grid, 0, 0, lo, 19, 0, hi, col); // south
+    voxel_fill_in(grid, 0, 19, lo, 19, 19, hi, col); // north
+    voxel_fill_in(grid, 0, 0, lo, 0, 19, hi, col); // west
+    voxel_fill_in(grid, 19, 0, lo, 19, 19, hi, col); // east
 }
 
 /// Spawn crew members lazily as each player's input first arrives (co-op join),

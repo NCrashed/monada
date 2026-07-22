@@ -21,7 +21,7 @@ use image::AnimationDecoder;
 
 use crate::autotile;
 use crate::bindings::{MapActionStates, MapActionValue, Part};
-use glam::{DVec3, IVec3, IVec2, Vec2};
+use glam::{DVec3, IVec2, IVec3, Vec2};
 use monada_fixed::{Fixed, FixedVec3};
 use monada_format::ActionDecl;
 use monada_render::OrbitCamera;
@@ -400,6 +400,9 @@ pub struct MapRender {
     scene: Scene,
     /// The world grid the map paints (board / terrain).
     grid: GridId,
+    /// Script-spawned grids (via `grid_spawn`). The script's i64 handle is the
+    /// index into this Vec; never reordered or compacted so handles stay stable.
+    script_grids: Vec<GridId>,
     /// Sprite model registry (index 0 = highlight marker) + per-frame
     /// instances. Holds the box/kv6 models; actor models live in `actors`.
     sprites: SpriteSet,
@@ -604,6 +607,7 @@ impl MapRender {
         MapRender {
             scene,
             grid,
+            script_grids: Vec::new(),
             sprites,
             model_refs: Vec::new(),
             actors: Vec::new(),
@@ -683,16 +687,16 @@ impl MapRender {
         self.vision_entity?; // no observer ⇒ no fog (guards a stale pose)
         let (feet, yaw) = self.observer_pose?;
         self.deck_band?; // a deck was declared (deck_clip ran) ⇒ vision is ready
-        // Build the mask once. The fog rides ONE fixed grid-local band spanning
-        // the whole hull, NOT the crew's current `deck_clip` band. A staircase
-        // BRIDGES two decks — its columns run from the lower floor up past the
-        // upper one — so any per-deck band never contains the whole run and
-        // leaves it permanently fogged. `deck_clip` still hides the non-current
-        // deck visually; the fog just tracks every column and lets LOS (blocked
-        // within `EYE_HALF` of the eye) do the between-deck occlusion. A fixed
-        // band also means the mask never rebuilds on a deck flip, so remembered
-        // cells survive a climb (vision_observer/vision_config drop it explicitly
-        // when the viewpoint or tuning actually changes).
+                         // Build the mask once. The fog rides ONE fixed grid-local band spanning
+                         // the whole hull, NOT the crew's current `deck_clip` band. A staircase
+                         // BRIDGES two decks — its columns run from the lower floor up past the
+                         // upper one — so any per-deck band never contains the whole run and
+                         // leaves it permanently fogged. `deck_clip` still hides the non-current
+                         // deck visually; the fog just tracks every column and lets LOS (blocked
+                         // within `EYE_HALF` of the eye) do the between-deck occlusion. A fixed
+                         // band also means the mask never rebuilds on a deck flip, so remembered
+                         // cells survive a climb (vision_observer/vision_config drop it explicitly
+                         // when the viewpoint or tuning actually changes).
         if self.fow.is_none() {
             let (cone_deg, range, peripheral) = self.vision_cfg;
             // z-down: the floor is the LARGER grid-z (the lowest deck sits at
@@ -1577,20 +1581,58 @@ impl HostBridge for MapRender {
         // Mirror into the sim-space terrain store for collision queries.
         self.terrain.fill(x0, y0, z0, x1, y1, z1);
         let s = SCALE as i64;
-        let g = GROUND_Z as i64;
+        let gz = GROUND_Z as i64;
         // World X is mirrored (see `world_of`): sim cell x occupies world X
         // in [-(x+1)·s, -x·s), so the rect flips and swaps its X bounds.
         // World z grows DOWN, but sim z is height ABOVE the floor (matching
         // `world_of` and the terrain store), so height `z` sits at world
-        // `g - z`: a taller fill (`z1 > z0`) reaches further up (smaller z).
-        let lo = IVec3::new((-(x1 + 1) * s) as i32, (y0 * s) as i32, (g - z1) as i32);
+        // `gz - z`: a taller fill (`z1 > z0`) reaches further up (smaller z).
+        let lo = IVec3::new((-(x1 + 1) * s) as i32, (y0 * s) as i32, (gz - z1) as i32);
         let hi = IVec3::new(
             (-x0 * s - 1) as i32,
             ((y1 + 1) * s - 1) as i32,
-            (g - z0) as i32,
+            (gz - z0) as i32,
         );
         if let Some(grid) = self.scene.grid_mut(self.grid) {
             grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
+        }
+    }
+
+    fn grid_spawn(&mut self, wx: i64, wy: i64, wz: i64) -> i64 {
+        let pos = glam::DVec3::new(wx as f64, wy as f64, wz as f64);
+        let id = self.scene.add_grid(GridTransform::at(pos));
+        let idx = self.script_grids.len() as i64;
+        self.script_grids.push(id);
+        idx
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn voxel_fill_in(
+        &mut self,
+        grid: i64,
+        x0: i64,
+        y0: i64,
+        z0: i64,
+        x1: i64,
+        y1: i64,
+        z1: i64,
+        color: i64,
+    ) {
+        // Render-side only — does NOT update self.terrain. Same sim→world
+        // coordinate transform as voxel_fill (world X mirrored, z unscaled).
+        let Some(&id) = self.script_grids.get(grid as usize) else {
+            return;
+        };
+        let s = SCALE as i64;
+        let gz = GROUND_Z as i64;
+        let lo = IVec3::new((-(x1 + 1) * s) as i32, (y0 * s) as i32, (gz - z1) as i32);
+        let hi = IVec3::new(
+            (-x0 * s - 1) as i32,
+            ((y1 + 1) * s - 1) as i32,
+            (gz - z0) as i32,
+        );
+        if let Some(g) = self.scene.grid_mut(id) {
+            g.set_rect(lo, hi, Some(VoxColor(color as u32)));
         }
     }
 
@@ -1605,11 +1647,19 @@ impl HostBridge for MapRender {
             return; // already clear at and above z
         }
         let s = SCALE as i64;
-        let g = GROUND_Z as i64;
+        let gz = GROUND_Z as i64;
         // Same cell→world mapping as voxel_fill (world X mirrored, world z
-        // grows down): sim heights z..=prev_top occupy world z g-prev_top..=g-z.
-        let lo = IVec3::new((-(x + 1) * s) as i32, (y * s) as i32, (g - prev_top) as i32);
-        let hi = IVec3::new((-x * s - 1) as i32, ((y + 1) * s - 1) as i32, (g - z) as i32);
+        // grows down): sim heights z..=prev_top occupy world z gz-prev_top..=gz-z.
+        let lo = IVec3::new(
+            (-(x + 1) * s) as i32,
+            (y * s) as i32,
+            (gz - prev_top) as i32,
+        );
+        let hi = IVec3::new(
+            (-x * s - 1) as i32,
+            ((y + 1) * s - 1) as i32,
+            (gz - z) as i32,
+        );
         if let Some(grid) = self.scene.grid_mut(self.grid) {
             grid.set_rect(lo, hi, None);
         }
@@ -1623,9 +1673,13 @@ impl HostBridge for MapRender {
         // wrong side of the map, silently diverging from the collision
         // store's full-cell semantics.
         let s = SCALE as i64;
-        let g = GROUND_Z as i64;
-        let lo = IVec3::new((-(x + 1) * s) as i32, (y * s) as i32, (g - z) as i32);
-        let hi = IVec3::new((-x * s - 1) as i32, ((y + 1) * s - 1) as i32, (g - z) as i32);
+        let gz = GROUND_Z as i64;
+        let lo = IVec3::new((-(x + 1) * s) as i32, (y * s) as i32, (gz - z) as i32);
+        let hi = IVec3::new(
+            (-x * s - 1) as i32,
+            ((y + 1) * s - 1) as i32,
+            (gz - z) as i32,
+        );
         if let Some(grid) = self.scene.grid_mut(self.grid) {
             grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
         }
@@ -1919,7 +1973,8 @@ impl HostBridge for MapRender {
         // The screen-aligned quad (matches what `draw_drag_rect` drew): four
         // corners wound around the rect, so the map can point-test units in the
         // rotated box instead of a world-axis bbox.
-        let corner = |x: f64, y: f64| FixedVec3::new(Fixed::from_f64(x), Fixed::from_f64(y), Fixed::ZERO);
+        let corner =
+            |x: f64, y: f64| FixedVec3::new(Fixed::from_f64(x), Fixed::from_f64(y), Fixed::ZERO);
         drag_quad_sim(self.camera.yaw, (ax, ay), (bx, by))
             .iter()
             .map(|&(x, y)| corner(x, y))
@@ -2141,11 +2196,7 @@ mod tests {
         // `voxel_set` places cell (x, y) with the same world-X mirror as
         // `voxel_fill` (world x ∈ [-(x+1)·S, -x·S)); ray straight down the
         // mirrored cell centre (+z is "down", world z-down) from above both.
-        let col = DVec3::new(
-            -(cx as f64 + 0.5) * SCALE,
-            (cy as f64 + 0.5) * SCALE,
-            0.0,
-        );
+        let col = DVec3::new(-(cx as f64 + 0.5) * SCALE, (cy as f64 + 0.5) * SCALE, 0.0);
         let down = DVec3::new(0.0, 0.0, 1.0);
         let hit_z = |r: &MapRender| {
             r.scene
@@ -2242,7 +2293,10 @@ mod tests {
         let e1 = (q[1].0 - q[0].0, q[1].1 - q[0].1);
         let e2 = (q[3].0 - q[0].0, q[3].1 - q[0].1);
         let dot = e1.0 * e2.0 + e1.1 * e2.1;
-        assert!(dot.abs() < 1e-9, "adjacent edges are perpendicular (dot {dot})");
+        assert!(
+            dot.abs() < 1e-9,
+            "adjacent edges are perpendicular (dot {dot})"
+        );
         // …and it isn't the world-axis box: the corners moved off N/S/E/W.
         assert!(
             (q[1].0 - a.0).abs() > 1e-6,

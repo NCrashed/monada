@@ -46,8 +46,8 @@ pub use rhai_backend::RhaiBackend;
 /// `vision_hear` (ship demo, docs/plans/ship-visibility.md); 5 =
 /// `highlight_add`/`highlighted_all`/`drag_begin`/`drag_end` (RTS
 /// multi-select); 6 = `voxel_clear` (destructibles — RTS tree felling,
-/// ship doors).
-pub const HOST_API_VERSION: u32 = 6;
+/// ship doors); 7 = `grid_spawn`/`voxel_fill_in` (multi-grid ships).
+pub const HOST_API_VERSION: u32 = 7;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -200,6 +200,35 @@ pub trait HostBridge: Send {
     /// if the clear reached ground level. Same determinism contract as
     /// [`voxel_fill`](Self::voxel_fill). The default ignores it.
     fn voxel_clear(&mut self, _x: i64, _y: i64, _z: i64) {}
+
+    /// Spawn a new voxel grid at world-voxel position `(wx, wy, wz)` and
+    /// return its render-side grid id. Use `(0, 0, 0)` for the default world
+    /// origin. The id is render-side only — never put it into [`World`] state
+    /// or hashed `tick()` logic. Paint into the grid with
+    /// [`voxel_fill_in`](Self::voxel_fill_in). The default returns `-1`
+    /// (no grid allocated).
+    fn grid_spawn(&mut self, _wx: i64, _wy: i64, _wz: i64) -> i64 {
+        -1
+    }
+
+    /// Paint a solid voxel box into a specific grid (by id from
+    /// [`grid_spawn`](Self::grid_spawn)), in sim coordinates. Same
+    /// coordinate convention as [`voxel_fill`](Self::voxel_fill) but
+    /// render-side only — does NOT update the collision store. The default
+    /// ignores it.
+    #[allow(clippy::too_many_arguments)]
+    fn voxel_fill_in(
+        &mut self,
+        _grid: i64,
+        _x0: i64,
+        _y0: i64,
+        _z0: i64,
+        _x1: i64,
+        _y1: i64,
+        _z1: i64,
+        _color: i64,
+    ) {
+    }
     /// Mark `entity` as the locally selected one (a highlight overlay),
     /// REPLACING any current selection (single-select semantics — the
     /// chess-era contract).
