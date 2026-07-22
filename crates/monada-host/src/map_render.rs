@@ -398,10 +398,8 @@ fn ground_hit(origin: DVec3, dir: DVec3) -> Option<DVec3> {
 /// [`SharedBridge`](monada_script::SharedBridge) for the Rhai engine.
 pub struct MapRender {
     scene: Scene,
-    /// The world grid the map paints (board / terrain). `None` until the first
-    /// painting call (`voxel_fill`, `tile_fill`, etc.); created lazily so maps
-    /// that use only dynamic grids pay nothing for it.
-    grid: Option<GridId>,
+    /// The world grid the map paints (board / terrain).
+    grid: GridId,
     /// Dynamically spawned grids (via `grid_spawn`). The script's i64 handle is
     /// the index into this Vec; never reordered or compacted so handles stay stable.
     dynamic_grids: Vec<GridId>,
@@ -580,7 +578,8 @@ impl MapRender {
         local_player: Option<i64>,
         actions: &[ActionDecl],
     ) -> MapRender {
-        let scene = Scene::new();
+        let mut scene = Scene::new();
+        let grid = scene.add_grid(GridTransform::identity());
         // Model 0: a flat amber selection RING circling the selected
         // entity's footprint on the ground under the sprite — the classic
         // RTS read (a multi-selected squad shows one ring per unit). Same
@@ -607,7 +606,7 @@ impl MapRender {
         };
         MapRender {
             scene,
-            grid: None,
+            grid,
             dynamic_grids: Vec::new(),
             sprites,
             model_refs: Vec::new(),
@@ -661,25 +660,12 @@ impl MapRender {
         }
     }
 
-    /// Return the world grid, creating it on first call.
-    fn ensure_main_grid(&mut self) -> GridId {
-        if let Some(id) = self.grid {
-            id
-        } else {
-            let id = self.scene.add_grid(GridTransform::identity());
-            self.grid = Some(id);
-            id
-        }
-    }
-
     /// Push the current deck cutaway onto the grid's `z_clip` (the render + the
     /// unit test share this one apply path, so the test exercises exactly what
     /// `render_into` does). `None` clears the clip (whole grid shown).
     fn apply_deck_clip(&mut self) {
-        if let Some(id) = self.grid {
-            if let Some(grid) = self.scene.grid_mut(id) {
-                grid.z_clip = self.deck_clip;
-            }
+        if let Some(grid) = self.scene.grid_mut(self.grid) {
+            grid.z_clip = self.deck_clip;
         }
         for &id in &self.dynamic_grids {
             if let Some(grid) = self.scene.grid_mut(id) {
@@ -731,9 +717,7 @@ impl MapRender {
             cfg.peripheral_range = peripheral as f32 * SCALE as f32;
             cfg.memory_decay = 2.0;
             self.fow = Some(FogOfWar::new(cfg));
-            if let Some(id) = self.grid {
-                self.fow_twin = Some(FowTwin::attach(&mut self.scene, id));
-            }
+            self.fow_twin = Some(FowTwin::attach(&mut self.scene, self.grid));
             self.fow_band = self.deck_band;
         }
         // The observer, grid-local (identity grid ⇒ grid-local == world). Facing
@@ -761,10 +745,8 @@ impl MapRender {
         // Take the mask + twin out to keep `self.scene` borrows disjoint.
         let mut fow = self.fow.take()?;
         let mut twin = self.fow_twin.take()?;
-        if let Some(id) = self.grid {
-            if let Some(grid) = self.scene.grid(id) {
-                fow.update(grid, &observer, dt as f32);
-            }
+        if let Some(grid) = self.scene.grid(self.grid) {
+            fow.update(grid, &observer, dt as f32);
         }
         for (hx, hy, _hz, loud) in std::mem::take(&mut self.vision_hears) {
             let w = world_of(FixedVec3::new(
@@ -780,9 +762,7 @@ impl MapRender {
             Some(id)
         } else {
             // Twin lost (snapshot / rollback) — re-arm for next frame.
-            if let Some(id) = self.grid {
-                self.fow_twin = Some(FowTwin::attach(&mut self.scene, id));
-            }
+            self.fow_twin = Some(FowTwin::attach(&mut self.scene, self.grid));
             None
         };
         self.fow = Some(fow);
@@ -1618,8 +1598,7 @@ impl HostBridge for MapRender {
             ((y1 + 1) * s - 1) as i32,
             (gz - z0) as i32,
         );
-        let id = self.ensure_main_grid();
-        if let Some(grid) = self.scene.grid_mut(id) {
+        if let Some(grid) = self.scene.grid_mut(self.grid) {
             grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
         }
     }
@@ -1686,8 +1665,7 @@ impl HostBridge for MapRender {
             ((y + 1) * s - 1) as i32,
             (gz - z) as i32,
         );
-        let id = self.ensure_main_grid();
-        if let Some(grid) = self.scene.grid_mut(id) {
+        if let Some(grid) = self.scene.grid_mut(self.grid) {
             grid.set_rect(lo, hi, None);
         }
     }
@@ -1707,8 +1685,7 @@ impl HostBridge for MapRender {
             ((y + 1) * s - 1) as i32,
             (gz - z) as i32,
         );
-        let id = self.ensure_main_grid();
-        if let Some(grid) = self.scene.grid_mut(id) {
+        if let Some(grid) = self.scene.grid_mut(self.grid) {
             grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
         }
     }
@@ -1756,8 +1733,7 @@ impl HostBridge for MapRender {
         };
         let s = SCALE as i64;
         let g = GROUND_Z as i64;
-        let id = self.ensure_main_grid();
-        let Some(grid) = self.scene.grid_mut(id) else {
+        let Some(grid) = self.scene.grid_mut(self.grid) else {
             return;
         };
         for cy in y0.min(y1)..=y0.max(y1) {
@@ -1819,9 +1795,8 @@ impl HostBridge for MapRender {
             return; // no terrain set
         }
         let g = GROUND_Z as i64;
-        let id = self.ensure_main_grid();
         let autotiler = &self.autotiler;
-        let Some(grid) = self.scene.grid_mut(id) else {
+        let Some(grid) = self.scene.grid_mut(self.grid) else {
             return;
         };
         // Floor pixel (fx, fy) is sim-aligned; world X is mirrored (`-fx - 1`,
