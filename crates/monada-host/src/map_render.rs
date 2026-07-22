@@ -667,6 +667,11 @@ impl MapRender {
         if let Some(grid) = self.scene.grid_mut(self.grid) {
             grid.z_clip = self.deck_clip;
         }
+        for &id in &self.script_grids {
+            if let Some(grid) = self.scene.grid_mut(id) {
+                grid.z_clip = self.deck_clip;
+            }
+        }
     }
 
     /// Drop the fog mask + detach its twin grid from the scene (so the real
