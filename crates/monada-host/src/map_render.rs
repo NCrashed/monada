@@ -402,7 +402,7 @@ pub struct MapRender {
     /// the index into this Vec; never reordered or compacted so handles stay stable.
     /// Index 0 is the world / terrain grid for maps that call `grid_spawn(0,0,0)`
     /// at init; the ship demo adds its room grids here instead.
-    dynamic_grids: Vec<GridId>,
+    grids: Vec<GridId>,
     /// Sprite model registry (index 0 = highlight marker) + per-frame
     /// instances. Holds the box/kv6 models; actor models live in `actors`.
     sprites: SpriteSet,
@@ -604,7 +604,7 @@ impl MapRender {
         };
         MapRender {
             scene,
-            dynamic_grids: Vec::new(),
+            grids: Vec::new(),
             sprites,
             model_refs: Vec::new(),
             actors: Vec::new(),
@@ -661,7 +661,7 @@ impl MapRender {
     /// unit test share this one apply path, so the test exercises exactly what
     /// `render_into` does). `None` clears the clip (whole grid shown).
     fn apply_deck_clip(&mut self) {
-        for &id in &self.dynamic_grids {
+        for &id in &self.grids {
             if let Some(grid) = self.scene.grid_mut(id) {
                 grid.z_clip = self.deck_clip;
             }
@@ -686,7 +686,7 @@ impl MapRender {
         self.vision_entity?; // no observer ⇒ no fog (guards a stale pose)
         let (feet, yaw) = self.observer_pose?;
         self.deck_band?; // a deck was declared (deck_clip ran) ⇒ vision is ready
-        let main_grid = self.dynamic_grids.first().copied()?; // no grid yet ⇒ no fog
+        let main_grid = self.grids.first().copied()?; // no grid yet ⇒ no fog
                                                               // Build the mask once. The fog rides ONE fixed grid-local band spanning
                                                               // the whole hull, NOT the crew's current `deck_clip` band. A staircase
                                                               // BRIDGES two decks — its columns run from the lower floor up past the
@@ -1593,7 +1593,7 @@ impl HostBridge for MapRender {
             ((y1 + 1) * s - 1) as i32,
             (gz - z0) as i32,
         );
-        if let Some(&id) = self.dynamic_grids.first() {
+        if let Some(&id) = self.grids.first() {
             if let Some(grid) = self.scene.grid_mut(id) {
                 grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
             }
@@ -1603,8 +1603,8 @@ impl HostBridge for MapRender {
     fn grid_spawn(&mut self, wx: i64, wy: i64, wz: i64) -> i64 {
         let pos = glam::DVec3::new(wx as f64, wy as f64, wz as f64);
         let id = self.scene.add_grid(GridTransform::at(pos));
-        let idx = self.dynamic_grids.len() as i64;
-        self.dynamic_grids.push(id);
+        let idx = self.grids.len() as i64;
+        self.grids.push(id);
         idx
     }
 
@@ -1622,7 +1622,7 @@ impl HostBridge for MapRender {
     ) {
         // Render-side only — does NOT update self.terrain. Same sim→world
         // coordinate transform as voxel_fill (world X mirrored, z unscaled).
-        let Some(&id) = self.dynamic_grids.get(grid as usize) else {
+        let Some(&id) = self.grids.get(grid as usize) else {
             return;
         };
         let s = SCALE as i64;
@@ -1662,7 +1662,7 @@ impl HostBridge for MapRender {
             ((y + 1) * s - 1) as i32,
             (gz - z) as i32,
         );
-        if let Some(&id) = self.dynamic_grids.first() {
+        if let Some(&id) = self.grids.first() {
             if let Some(grid) = self.scene.grid_mut(id) {
                 grid.set_rect(lo, hi, None);
             }
@@ -1684,7 +1684,7 @@ impl HostBridge for MapRender {
             ((y + 1) * s - 1) as i32,
             (gz - z) as i32,
         );
-        if let Some(&id) = self.dynamic_grids.first() {
+        if let Some(&id) = self.grids.first() {
             if let Some(grid) = self.scene.grid_mut(id) {
                 grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
             }
@@ -1734,7 +1734,7 @@ impl HostBridge for MapRender {
         };
         let s = SCALE as i64;
         let g = GROUND_Z as i64;
-        let Some(&first_id) = self.dynamic_grids.first() else {
+        let Some(&first_id) = self.grids.first() else {
             return;
         };
         let Some(grid) = self.scene.grid_mut(first_id) else {
@@ -1800,7 +1800,7 @@ impl HostBridge for MapRender {
         }
         let g = GROUND_Z as i64;
         let autotiler = &self.autotiler;
-        let Some(&first_id) = self.dynamic_grids.first() else {
+        let Some(&first_id) = self.grids.first() else {
             return;
         };
         let Some(grid) = self.scene.grid_mut(first_id) else {
@@ -2201,7 +2201,7 @@ mod tests {
     #[test]
     fn deck_clip_cuts_the_deck_above_via_a_real_grid() {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
-        r.grid_spawn(0, 0, 0); // world grid at the origin (dynamic_grids[0])
+        r.grid_spawn(0, 0, 0); // world grid at the origin (grids[0])
         let (cx, cy) = (2_i64, 2_i64);
         r.voxel_set(cx, cy, 0, 0x80AA_AAAA); // lower deck floor (sim-z 0)
         r.voxel_set(cx, cy, 4, 0x8055_5555); // upper deck floor (sim-z 4)
@@ -2252,7 +2252,7 @@ mod tests {
     #[test]
     fn fog_of_war_updates_without_a_renderer() {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
-        r.grid_spawn(0, 0, 0); // world grid at the origin (dynamic_grids[0])
+        r.grid_spawn(0, 0, 0); // world grid at the origin (grids[0])
         r.voxel_fill(0, 0, 0, 8, 8, 0, 0x8055_5f6b); // a floor slab to see across
         r.vision_config(110, 6, 3);
         r.deck_clip(0, 3); // sets the deck band the mask needs
