@@ -229,6 +229,8 @@ fn try_move(e, vx, vy) {
 // Archetype ids by registration order: UNIT = 0, TREE = 1. Model id by
 // `model_actor` order: worker = 0.
 fn init() {
+    grid_spawn(0, 0, 0); // world grid for terrain painting
+
     // Unit: owner (player 0/1), kind (worker/soldier), hit points, the
     // move order (final dest + next nav waypoint + active flag), facing
     // yaw, the task FSM (harvest stations / attacking), its mine, its
