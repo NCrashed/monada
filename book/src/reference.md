@@ -151,6 +151,15 @@ collision queries above.
 | `terrain_fill(x0, y0, x1, y1, type)` | set the floor terrain type of a region |
 | `terrain_blit(base_type)` | autotile-paint the floor from the terrain types set |
 
+## Dynamic grids — *presentation*
+
+Spawn and paint additional voxel grids independent of the world grid (e.g. ships, moving platforms). Render-only: dynamic grids do not feed collision.
+
+| Function | Result |
+|---|---|
+| `grid_spawn(wx, wy, wz)` | spawn a new grid at world position `(wx, wy, wz)`; returns an opaque grid handle (i64) |
+| `voxel_fill_in(grid, x0, y0, z0, x1, y1, z1, color)` | fill a solid box of voxels in the given dynamic grid |
+
 ## Camera, lighting, sky — *presentation*
 
 | Function | Result |

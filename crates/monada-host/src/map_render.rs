@@ -400,9 +400,9 @@ pub struct MapRender {
     scene: Scene,
     /// The world grid the map paints (board / terrain).
     grid: GridId,
-    /// Script-spawned grids (via `grid_spawn`). The script's i64 handle is the
-    /// index into this Vec; never reordered or compacted so handles stay stable.
-    script_grids: Vec<GridId>,
+    /// Dynamically spawned grids (via `grid_spawn`). The script's i64 handle is
+    /// the index into this Vec; never reordered or compacted so handles stay stable.
+    dynamic_grids: Vec<GridId>,
     /// Sprite model registry (index 0 = highlight marker) + per-frame
     /// instances. Holds the box/kv6 models; actor models live in `actors`.
     sprites: SpriteSet,
@@ -607,7 +607,7 @@ impl MapRender {
         MapRender {
             scene,
             grid,
-            script_grids: Vec::new(),
+            dynamic_grids: Vec::new(),
             sprites,
             model_refs: Vec::new(),
             actors: Vec::new(),
@@ -667,7 +667,7 @@ impl MapRender {
         if let Some(grid) = self.scene.grid_mut(self.grid) {
             grid.z_clip = self.deck_clip;
         }
-        for &id in &self.script_grids {
+        for &id in &self.dynamic_grids {
             if let Some(grid) = self.scene.grid_mut(id) {
                 grid.z_clip = self.deck_clip;
             }
@@ -1606,8 +1606,8 @@ impl HostBridge for MapRender {
     fn grid_spawn(&mut self, wx: i64, wy: i64, wz: i64) -> i64 {
         let pos = glam::DVec3::new(wx as f64, wy as f64, wz as f64);
         let id = self.scene.add_grid(GridTransform::at(pos));
-        let idx = self.script_grids.len() as i64;
-        self.script_grids.push(id);
+        let idx = self.dynamic_grids.len() as i64;
+        self.dynamic_grids.push(id);
         idx
     }
 
@@ -1625,7 +1625,7 @@ impl HostBridge for MapRender {
     ) {
         // Render-side only — does NOT update self.terrain. Same sim→world
         // coordinate transform as voxel_fill (world X mirrored, z unscaled).
-        let Some(&id) = self.script_grids.get(grid as usize) else {
+        let Some(&id) = self.dynamic_grids.get(grid as usize) else {
             return;
         };
         let s = SCALE as i64;
