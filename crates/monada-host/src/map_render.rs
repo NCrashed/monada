@@ -1058,12 +1058,16 @@ impl MapRender {
             self.fow_band = self.deck_band;
         }
         // The observer, in the vision grid's local voxels (`feet` was re-based
-        // above). Facing is the crew's yaw in world xy (world_of mirrors sim +x →
-        // world -x), rotated into the grid's frame by the same `grid_rot_inv` so
-        // the cone turns with a yawing hull; the eye rides a hair above the feet
-        // (z-down ⇒ a smaller grid-z).
-        let facing_world = DVec3::new(-(yaw.cos()), yaw.sin(), 0.0);
-        let facing_local = grid_rot_inv * facing_world;
+        // above). The crew's `facing` yaw is HULL-RELATIVE: it is authored the
+        // same way the sprite's is, and the sprite turns it to world by the grid
+        // rotation (see `grid_facing_yaw`). The fog mask is built in grid-local
+        // space and the twin grid re-applies the grid rotation when it renders,
+        // so we feed the hull-relative facing straight in — the twin then turns
+        // the cone to world and it tracks a spinning hull exactly as the sprite
+        // does. De-rotating here by `grid_rot_inv` (as this used to) cancels the
+        // twin's rotation and pins the cone to one world direction while the hull
+        // spins under it. `world_of` mirrors sim +x → world -x (hence `-cos`).
+        let facing_local = DVec3::new(-(yaw.cos()), yaw.sin(), 0.0);
         let observer = FowObserver {
             cell: IVec2::new(feet.x.floor() as i32, feet.y.floor() as i32),
             facing: Vec2::new(facing_local.x as f32, facing_local.y as f32),
@@ -3296,6 +3300,61 @@ mod tests {
             mask.state(0, flat_cell).0,
             CellState::Unseen,
             "un-rotated column {flat_cell:?} must stay Unseen"
+        );
+    }
+
+    /// The vision *cone* rides the hull too, not just the position. The crew's
+    /// facing is hull-relative, the mask is built grid-local, and the twin grid
+    /// re-applies the grid rotation when it renders — so the grid-local cone must
+    /// be independent of how the hull is turned (it is hull-fixed; the twin does
+    /// the world rotation). Regression for the bug where the facing was de-rotated
+    /// by `grid_rot_inv`, cancelling the twin and pinning the cone to one world
+    /// direction while the hull spun under it.
+    #[test]
+    fn fog_cone_is_hull_fixed_under_rotation() {
+        use roxlap_scene::fow::CellState;
+
+        // Default facing yaw is 0 ⇒ the grid-local cone points local -x
+        // (`(-cos 0, sin 0) = (-1, 0)`). A quarter-turn of the hull must NOT move
+        // that grid-local cone: a column far down local -x stays lit and its
+        // perpendicular stays dark. Both probes sit beyond the peripheral radius
+        // (a full-circle near reveal) so only the directional cone can reach them.
+        // Under the old de-rotating code the grid-local cone would swing to local
+        // +y, flipping both assertions.
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn(0, 0, 0); // world origin ⇒ pure rotation, no offset
+        let gid = r.grids[g as usize];
+        r.scene.grid_mut(gid).expect("grid").transform.rotation =
+            DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+
+        r.voxel_fill_in(g, -80, -80, 0, 80, 80, 0, 0x8055_5f6b); // floor spanning the cone reach
+        r.vision_config(110, 6, 3);
+        r.deck_clip(0, 3);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let e = world.spawn(arch);
+        world.set_position(e, FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ZERO));
+        r.vision_observer_in(e.0 as i64, g);
+
+        // Two frames: the cone needs a prior mask to accumulate into.
+        r.build_instances(&world);
+        let _ = r.update_fow(0.016);
+        r.build_instances(&world);
+        let _ = r.update_fow(0.016);
+
+        let mask = r.fow.as_ref().expect("mask built");
+        let in_cone = IVec2::new(-60, 0);
+        let across = IVec2::new(0, 60);
+        assert_eq!(
+            mask.state(0, in_cone).0,
+            CellState::Visible,
+            "the hull-fixed cone (local -x) lights {in_cone:?} regardless of hull rotation"
+        );
+        assert_eq!(
+            mask.state(0, across).0,
+            CellState::Unseen,
+            "the perpendicular column {across:?} stays dark — the cone did not swing with the hull"
         );
     }
 
