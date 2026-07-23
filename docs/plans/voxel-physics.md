@@ -285,6 +285,43 @@ restitution ≈ 0 default. Single-body scenarios against an in-crate test field.
 under sleep threshold) within N ticks and stays; body on a 30° voxel slope
 slides or holds according to friction coefficient; goldens.
 
+**P2 amendments (approved 2026-07-24).** Surfaced per §7 and folded in:
+
+- **The 30° acceptance runs as tilted gravity over a flat voxel floor.**
+  A literal voxel slope is a staircase; the skin catches on step edges and
+  the test would measure step geometry, not Coulomb friction. Tilting `g`
+  by 30° isolates exactly `μ` vs `tan 30° ≈ 0.577` (test points 0.7 / 0.3,
+  same material on body and floor so `√(μ·μ) = μ` keeps the documented
+  boundary honest). The literal stepped slope is exercised by P3's bumpy
+  terrain.
+- **Per-voxel inertia uses the solid-cube convention**: each voxel
+  contributes `ρ·[(|d|²·E − d⊗d) + E/6]` about the CoM (own term + parallel
+  axis). Point masses would hand a singular tensor to legal input (a single
+  voxel, a 1×1×n rod); the cube term makes every non-empty body SPD by
+  construction.
+- **Explicit-mass bodies (`BodyDef`) have no collision skin** — free-flying
+  ghosts for tests and lumped modules; only voxel bodies collide.
+- **Position correction is full-K NGS (split impulse)**: velocity pass has
+  no Baumgarte bias (restitution only); the position pass applies
+  pseudo-impulses through the full K operator — translation *and*
+  orientation — so angular-origin penetration resolves as rotation, not as
+  body-wide shift.
+- **The warm-start impulse cache is hashed sim state** (accumulated
+  impulses feed the next tick), stored as a `Vec<ContactCacheEntry>` sorted
+  by `(body, sphere, cell)` rather than a `BTreeMap`: contact generation
+  order is already lexicographic, so the Vec is canonical by construction,
+  hashes through the existing slice impl, and stays serde-friendly (JSON
+  cannot encode struct map keys).
+- **`max_speed` is a hashed world field** (no setter until a demo needs
+  one), defaulting to 2000 voxels/s = 80 voxels/tick at 25 Hz — which is
+  also the minimum obstacle thickness the clamp guarantees against
+  tunnelling; documented at the clamp as the continuation of P1's rule-5
+  note. Fast projectiles stay engine-side raycasts (non-goal).
+- **`VoxelField::material` ids are a cross-crate contract**: they must
+  come from this world's `register_material` order; the solver asserts
+  with a legible message on an out-of-range id rather than crashing
+  data-dependently mid-solve.
+
 **P3 — Vehicle: raycast wheels.**
 Wheel module (suspension spring-damper, longitudinal/lateral friction
 impulses, drive/brake torque), vehicle assembled as one body + K wheels.
