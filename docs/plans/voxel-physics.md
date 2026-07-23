@@ -251,6 +251,33 @@ Semi-implicit Euler, gravity, angular velocity + quaternion integration
 *Accept:* ballistic trajectory matches closed-form within documented
 tolerance; golden stable; energy drift over 10k ticks bounded and documented.
 
+**P1 amendments (approved 2026-07-23).** Surfaced per §7 and folded in:
+
+- **No gyroscopic term in v1.** The integrator holds ω constant for a free
+  body; `ω̇ = I⁻¹(ω × Iω)` is omitted. Explicit gyroscopic integration
+  under semi-implicit Euler pumps energy and would need an implicit step
+  (Catto) or damping — pure budget loss for the target feel. Bonus: constant
+  ω makes the P1 rotation/energy tests exact rather than approximate.
+  Revisit only if a demo visibly misses precession.
+- **`BodyDef` carries explicit mass properties** (`mass`, `inertia_body`).
+  Voxel-derived mass arrives with `shape` in P2; the explicit path stays
+  forever as the tests' ground truth for P4's incremental-vs-full recompute
+  check.
+- **Derived caches (`inv_mass`, `inv_inertia_body`) are serialized, not
+  hashed.** Serializing them keeps snapshot → restore → step bit-equal by
+  construction (rule 7) with a plain derive; recompute-on-deserialize would
+  risk a one-bit divergence from the spawn path. They are excluded from the
+  hash fold as pure functions of hashed fields. P4 splits must update the
+  caches together with mass/inertia — documented on `RigidBody`.
+- **Energy drift is pinned to the closed form**, not a measured bound: for
+  semi-implicit Euler in a uniform field, `E_n − E_0 = −½·m·|g|²·dt²·n`
+  exactly (linear, known slope); the P1 test asserts this with an
+  ulp-tolerance. Velocity is asserted bit-exact (`g·dt` rounds identically
+  every tick, and additions are exact).
+- Rotation-accuracy comparisons stay under one total revolution so they
+  test the integrator, not the LUT's angle reduction; the 10k-tick run
+  checks only unit-norm retention.
+
 **P2 — Voxel field contact + solver.**
 Sphere-skin vs `VoxelField` narrowphase, sequential impulse solver, friction,
 restitution ≈ 0 default. Single-body scenarios against an in-crate test field.
