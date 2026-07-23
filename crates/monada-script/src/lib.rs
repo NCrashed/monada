@@ -202,10 +202,12 @@ pub trait HostBridge: Send {
     /// [`voxel_fill`](Self::voxel_fill). The default ignores it.
     fn voxel_clear(&mut self, _x: i64, _y: i64, _z: i64) {}
 
-    /// Spawn a new voxel grid at world-voxel position `(wx, wy, wz)` and
-    /// return its render-side grid id. Use `(0, 0, 0)` for the default world
-    /// origin. The id is render-side only — never put it into [`World`] state
-    /// or hashed `tick()` logic. Paint into the grid with
+    /// Spawn a new voxel grid offset by SIM cell `(wx, wy, wz)` from the world
+    /// origin and return its render-side grid id. Use `(0, 0, 0)` for the world
+    /// origin. The offset composes with the mirror/scale/z-down transform the
+    /// grid paints with, so `(wx, wy, wz)` lands on the same world voxel a
+    /// `voxel_set(wx, wy, wz)` would. The id is render-side only — never put it
+    /// into [`World`] state or hashed `tick()` logic. Paint into the grid with
     /// [`voxel_fill_in`](Self::voxel_fill_in). The default returns `-1`
     /// (no grid allocated).
     fn grid_spawn(&mut self, _wx: i64, _wy: i64, _wz: i64) -> i64 {

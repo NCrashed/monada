@@ -340,6 +340,28 @@ fn world_of(p: FixedVec3) -> DVec3 {
     )
 }
 
+/// Map an inclusive sim-cell region `(x0,y0,z0)..=(x1,y1,z1)` to its world
+/// voxel box `(lo, hi)` for `Grid::set_rect`. World X is mirrored (see
+/// `world_of`): sim cell x occupies world X `[-(x+1)·SCALE, -x·SCALE)`, so the
+/// box flips and swaps its X bounds. World z grows DOWN while sim z is height
+/// above the floor, so sim height z sits at world `GROUND_Z - z` — a taller
+/// fill (larger `z1`) reaches further up (smaller world z), hence `z1` feeds
+/// `lo.z` and `z0` feeds `hi.z`. `voxel_fill`/`voxel_fill_in`/`voxel_set`/
+/// `voxel_clear` all share this transform so it lives in exactly one place
+/// (`voxel_set` passes a degenerate 1-cell region; `voxel_clear` a 1-column,
+/// z-spanning one).
+fn sim_box_to_world(x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64) -> (IVec3, IVec3) {
+    let s = SCALE as i64;
+    let gz = GROUND_Z as i64;
+    let lo = IVec3::new((-(x1 + 1) * s) as i32, (y0 * s) as i32, (gz - z1) as i32);
+    let hi = IVec3::new(
+        (-x0 * s - 1) as i32,
+        ((y1 + 1) * s - 1) as i32,
+        (gz - z0) as i32,
+    );
+    (lo, hi)
+}
+
 /// The `Grid::z_clip` value that cuts everything ABOVE sim band top `z_hi` (a
 /// deck cutaway). CRITICAL: `z_clip` is in **grid-local voxel z** — where
 /// `voxel_fill`/`voxel_set` actually place voxels, `GROUND_Z - sim_z`,
@@ -1648,19 +1670,7 @@ impl HostBridge for MapRender {
     fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64) {
         // Mirror into the sim-space terrain store for collision queries.
         self.terrain.fill(x0, y0, z0, x1, y1, z1);
-        let s = SCALE as i64;
-        let gz = GROUND_Z as i64;
-        // World X is mirrored (see `world_of`): sim cell x occupies world X
-        // in [-(x+1)·s, -x·s), so the rect flips and swaps its X bounds.
-        // World z grows DOWN, but sim z is height ABOVE the floor (matching
-        // `world_of` and the terrain store), so height `z` sits at world
-        // `gz - z`: a taller fill (`z1 > z0`) reaches further up (smaller z).
-        let lo = IVec3::new((-(x1 + 1) * s) as i32, (y0 * s) as i32, (gz - z1) as i32);
-        let hi = IVec3::new(
-            (-x0 * s - 1) as i32,
-            ((y1 + 1) * s - 1) as i32,
-            (gz - z0) as i32,
-        );
+        let (lo, hi) = sim_box_to_world(x0, y0, z0, x1, y1, z1);
         let id = self.world_grid();
         if let Some(grid) = self.scene.grid_mut(id) {
             grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
@@ -1697,14 +1707,7 @@ impl HostBridge for MapRender {
         let Some(&id) = self.grids.get(grid as usize) else {
             return;
         };
-        let s = SCALE as i64;
-        let gz = GROUND_Z as i64;
-        let lo = IVec3::new((-(x1 + 1) * s) as i32, (y0 * s) as i32, (gz - z1) as i32);
-        let hi = IVec3::new(
-            (-x0 * s - 1) as i32,
-            ((y1 + 1) * s - 1) as i32,
-            (gz - z0) as i32,
-        );
+        let (lo, hi) = sim_box_to_world(x0, y0, z0, x1, y1, z1);
         if let Some(g) = self.scene.grid_mut(id) {
             g.set_rect(lo, hi, Some(VoxColor(color as u32)));
         }
@@ -1720,20 +1723,9 @@ impl HostBridge for MapRender {
         if prev_top < z {
             return; // already clear at and above z
         }
-        let s = SCALE as i64;
-        let gz = GROUND_Z as i64;
-        // Same cell→world mapping as voxel_fill (world X mirrored, world z
-        // grows down): sim heights z..=prev_top occupy world z gz-prev_top..=gz-z.
-        let lo = IVec3::new(
-            (-(x + 1) * s) as i32,
-            (y * s) as i32,
-            (gz - prev_top) as i32,
-        );
-        let hi = IVec3::new(
-            (-x * s - 1) as i32,
-            ((y + 1) * s - 1) as i32,
-            (gz - z) as i32,
-        );
+        // One column (x, y), clearing sim heights z..=prev_top — the same
+        // sim→world mapping as voxel_fill.
+        let (lo, hi) = sim_box_to_world(x, y, z, x, y, prev_top);
         // Only clears an existing world grid — a clear before any paint is a
         // no-op, no need to materialize an empty grid for it.
         if let Some(id) = self.world_grid {
@@ -1750,14 +1742,7 @@ impl HostBridge for MapRender {
         // world voxel at UNMIRRORED +x, i.e. a speck in the void on the
         // wrong side of the map, silently diverging from the collision
         // store's full-cell semantics.
-        let s = SCALE as i64;
-        let gz = GROUND_Z as i64;
-        let lo = IVec3::new((-(x + 1) * s) as i32, (y * s) as i32, (gz - z) as i32);
-        let hi = IVec3::new(
-            (-x * s - 1) as i32,
-            ((y + 1) * s - 1) as i32,
-            (gz - z) as i32,
-        );
+        let (lo, hi) = sim_box_to_world(x, y, z, x, y, z);
         let id = self.world_grid();
         if let Some(grid) = self.scene.grid_mut(id) {
             grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
