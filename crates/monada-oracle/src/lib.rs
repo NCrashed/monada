@@ -578,6 +578,36 @@ pub fn rts_checkpoints() -> Vec<Checkpoint> {
     out
 }
 
+/// The physics-crate golden: a bare [`PhysicsWorld`] at the engine-
+/// default 25 Hz, stepped through the standard checkpoints. Like
+/// `kernel@` it is pure Rust with no scripting — the P0 anchor that
+/// gates `monada-physics`'s state layout, canonical hash, and fixed-
+/// timestep arithmetic cross-platform before any body exists
+/// (docs/plans/voxel-physics.md §5). Later milestones grow this
+/// scenario (P1 adds a ballistic body, P3 a vehicle, P4 a destruction
+/// script), each growth re-blessed explicitly.
+///
+/// [`PhysicsWorld`]: monada_physics::PhysicsWorld
+#[must_use]
+pub fn phys_checkpoints() -> Vec<Checkpoint> {
+    let mut world = monada_physics::PhysicsWorld::new(25);
+
+    let mut prev = 0;
+    let mut out = Vec::with_capacity(TICK_CHECKPOINTS.len());
+    for &tick in TICK_CHECKPOINTS {
+        for _ in prev..tick {
+            world.step();
+        }
+        prev = tick;
+        out.push(Checkpoint {
+            scenario: "phys",
+            tick,
+            hash: world.state_hash(),
+        });
+    }
+    out
+}
+
 /// Every gated scenario's checkpoints, in a fixed order.
 #[must_use]
 pub fn all_checkpoints() -> Vec<Checkpoint> {
@@ -588,6 +618,7 @@ pub fn all_checkpoints() -> Vec<Checkpoint> {
     out.extend(rpg_checkpoints());
     out.extend(ship_checkpoints());
     out.extend(rts_checkpoints());
+    out.extend(phys_checkpoints());
     out
 }
 
@@ -614,7 +645,8 @@ pub fn render_goldens(checkpoints: &[Checkpoint]) -> String {
          rpg (real-time action-RPG: per-tick input + voxel-query + wave \
          RNG), ship (two-deck crew sim: deck-relative collision + stairwell \
          deck-flip), rts (1v1 strategy: nav-routed orders + economy + \
-         combat + voxel_clear tree felling); seed \"MONADA_0\".\n",
+         combat + voxel_clear tree felling), phys (pure-Rust physics-crate \
+         anchor: PhysicsWorld fixed-timestep shell); seed \"MONADA_0\".\n",
     );
     s.push_str("# Regenerate with `cargo run -p monada-oracle -- --bless`.\n");
     for c in checkpoints {

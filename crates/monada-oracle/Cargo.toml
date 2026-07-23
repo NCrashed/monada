@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 monada-fixed = { workspace = true }
 monada-sim = { workspace = true }
+monada-physics = { workspace = true }
 monada-script = { workspace = true }
 monada-net = { workspace = true }
 # SHA-256 map identity for the lockstep@ scenario's MatchInfo / replay

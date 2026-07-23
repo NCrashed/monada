@@ -10,7 +10,16 @@ readme.workspace = true
 description = "Voxel-native rigid-body solver: voxel-vs-voxel collision, edit-API destruction."
 
 [dependencies]
-monada-fixed = { workspace = true }
+monada-fixed = { workspace = true, features = ["serde"] }
+# `StateHash`/`StateHasher` — physics folds into the same FNV-1a desync
+# digest the rest of the sim uses (docs/plans/voxel-physics.md §5).
+monada-sim = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+# Snapshot round-trip test only; a human-readable format keeps replay
+# debugging legible. Not a runtime dependency (mirrors monada-sim).
+serde_json = "1"
 
 [lints]
 workspace = true

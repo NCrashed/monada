@@ -1623,6 +1623,7 @@ dependencies = [
  "monada-fixed",
  "monada-format",
  "monada-net",
+ "monada-physics",
  "monada-script",
  "monada-sim",
 ]
@@ -1632,6 +1633,9 @@ name = "monada-physics"
 version = "0.0.1"
 dependencies = [
  "monada-fixed",
+ "monada-sim",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
