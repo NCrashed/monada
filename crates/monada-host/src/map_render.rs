@@ -670,6 +670,12 @@ pub struct MapRender {
     /// Entity → public model id, set by `entity_set_model`. Render-side, not
     /// hashed. Despawned entities are skipped (positions read live).
     models: BTreeMap<EntityId, usize>,
+    /// Entity → the `grids` grid it rides, set by `entity_set_grid`. An entity
+    /// here has its sim `position` read as grid-local and composed through the
+    /// grid's transform (origin + rotation) when seated — so crew stay put on a
+    /// moving/rotating hull. Unbound entities render in the global frame
+    /// (`world_of` directly). Render-side, not hashed.
+    entity_grid: BTreeMap<EntityId, GridId>,
     /// Per-entity live actor state (only for entities bound to an actor
     /// model). Created on bind, driven by `entity_set_anim` / `_facing`.
     entity_actors: BTreeMap<EntityId, ActorInst>,
@@ -872,6 +878,7 @@ impl MapRender {
             model_refs: Vec::new(),
             actors: Vec::new(),
             models: BTreeMap::new(),
+            entity_grid: BTreeMap::new(),
             entity_actors: BTreeMap::new(),
             actor_targets: Vec::new(),
             clips_registered: false,
@@ -1185,6 +1192,34 @@ impl MapRender {
         w
     }
 
+    /// Seat sim position `p` in world space, composed through the grid the
+    /// entity rides (if any). [`Self::entity_world_of`] maps sim → the grid's
+    /// LOCAL world frame (the same frame `voxel_fill_in`'s voxels live in); a
+    /// bound grid's transform (rotation then origin) then carries it into the
+    /// world — so a crew member tracks its hull as it moves or turns. Unbound
+    /// entities have an identity transform, i.e. `entity_world_of(p)`
+    /// unchanged (chess/RPG/RTS).
+    fn place(&self, e: EntityId, p: FixedVec3) -> DVec3 {
+        let local = self.entity_world_of(p);
+        match self.entity_grid.get(&e).and_then(|&g| self.scene.grid(g)) {
+            Some(grid) => grid.transform.rotation * local + grid.transform.origin,
+            None => local,
+        }
+    }
+
+    /// The world-space yaw a bound entity's grid contributes about +z, added
+    /// to a billboard's own facing so the sprite turns with its hull. Zero for
+    /// unbound entities (and for an un-rotated grid).
+    fn grid_yaw(&self, e: EntityId) -> f64 {
+        self.entity_grid
+            .get(&e)
+            .and_then(|&g| self.scene.grid(g))
+            .map_or(0.0, |grid| {
+                let (axis, angle) = grid.transform.rotation.to_axis_angle();
+                angle * axis.z.signum()
+            })
+    }
+
     /// Rebuild the sprite instances from the live world: one sprite per
     /// entity that has a model binding, seated on the board, plus the
     /// highlight marker on the selected entity.
@@ -1196,7 +1231,7 @@ impl MapRender {
         self.observer_pose = self.vision_entity.and_then(|e| {
             let p = world.position(e)?;
             let yaw = self.entity_actors.get(&e).map_or(0.0, |a| a.facing);
-            Some((self.entity_world_of(p), yaw))
+            Some((self.place(e, p), yaw))
         });
         // Snapshot the bindings so the loop can mutate the disjoint sprite /
         // actor-target fields freely (the map is small — per-entity).
@@ -1205,7 +1240,7 @@ impl MapRender {
             let Some(p) = world.position(e) else {
                 continue; // despawned (e.g. captured / killed)
             };
-            let w = self.entity_world_of(p);
+            let w = self.place(e, p);
             match self.model_refs.get(model_id) {
                 Some(&ModelRef::Sprite(si)) => {
                     // roxlap anchors the kv6's stored pivot at the sprite
@@ -1228,7 +1263,8 @@ impl MapRender {
                     let yaw = self
                         .entity_actors
                         .get(&e)
-                        .map_or(0.0, |a| facing_to_world_yaw(a.facing));
+                        .map_or(0.0, |a| facing_to_world_yaw(a.facing))
+                        + self.grid_yaw(e);
                     let drop = self.actors.get(ai).map_or(0.0, |a| a.drop);
                     self.actor_targets.push((
                         e,
@@ -1244,9 +1280,12 @@ impl MapRender {
         // (killed / captured since selection) silently drop out of the set,
         // so `highlighted_all` never hands the map a stale id.
         self.highlighted.retain(|e| world.position(*e).is_some());
-        for &h in &self.highlighted {
+        // Snapshot so the loop can call `place` (whole `&self`) while pushing
+        // into the disjoint `self.sprites` field (the set is small — per pick).
+        let highlighted: Vec<EntityId> = self.highlighted.iter().copied().collect();
+        for h in highlighted {
             if let Some(p) = world.position(h) {
-                let w = self.entity_world_of(p);
+                let w = self.place(h, p);
                 self.sprites.instances.push(SpriteInstanceDesc {
                     // Seat the tile flush on the ground the entity stands
                     // on (its own w.z, not the z=0 board plane — a unit up
@@ -2057,6 +2096,15 @@ impl HostBridge for MapRender {
                     applied_tint: WHITE_TINT,
                 },
             );
+        }
+    }
+
+    fn entity_set_grid(&mut self, entity: i64, grid: i64) {
+        let e = EntityId(entity as u64);
+        // Resolve the script's grid handle (index into `grids`) to a GridId;
+        // an out-of-range handle is ignored, matching `voxel_fill_in`.
+        if let Some(&id) = usize::try_from(grid).ok().and_then(|i| self.grids.get(i)) {
+            self.entity_grid.insert(e, id);
         }
     }
 
@@ -2979,6 +3027,70 @@ mod tests {
             (hit.world.z - (GROUND_Z - wz as f64)).abs() < 1.0,
             "off-origin cell at world z GROUND_Z - wz, got {}",
             hit.world.z
+        );
+    }
+
+    /// An entity bound with `entity_set_grid` rides its grid's transform: its
+    /// sprite seats at `rotation · world_of(p) + origin`, NOT the bare global
+    /// `world_of(p)`. Spawn a grid off-origin AND turned 90° about z, bind an
+    /// entity to it, and prove the built instance lands at the composed column —
+    /// while a second, UNBOUND entity still seats in the global frame.
+    #[test]
+    fn bound_entity_rides_its_grids_transform() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let (wx, wy, wz) = (4_i64, 3_i64, 0_i64);
+        let g = r.grid_spawn(wx, wy, wz);
+        let gid = r.grids[g as usize];
+        // Turn the hull a quarter-turn about world +z (no `grid_rotate` API yet;
+        // poke the transform as a future one would — same as the fog test).
+        let grid_rot = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        r.scene.grid_mut(gid).expect("grid").transform.rotation = grid_rot;
+        let (origin, rotation) = {
+            let t = &r.scene.grid(gid).expect("grid").transform;
+            (t.origin, t.rotation)
+        };
+
+        // A box sprite model, bound to a crew-like entity that rides the grid.
+        let model = r.model_box(2, 2, 2, 0x8055_5555);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let bound = world.spawn(arch);
+        let unbound = world.spawn(arch);
+        let p = FixedVec3::new(Fixed::from_int(5), Fixed::from_int(2), Fixed::ZERO);
+        world.set_position(bound, p);
+        world.set_position(unbound, p);
+        r.entity_set_model(bound.0 as i64, model);
+        r.entity_set_model(unbound.0 as i64, model);
+        r.entity_set_grid(bound.0 as i64, g);
+
+        r.build_instances(&world);
+
+        // Two sprites (no highlights). The bound one sits at the composed column;
+        // the unbound one at the bare global column. x/y pin the rotation (z is
+        // seated by the model drop, so only x/y are asserted).
+        let composed = rotation * world_of(p) + origin;
+        let global = world_of(p);
+        let xy = |d: DVec3| (d.x as f32, d.y as f32);
+        let (cx, cy) = xy(composed);
+        let (gx, gy) = xy(global);
+        assert!(
+            (cx - gx).abs() > 1.0 || (cy - gy).abs() > 1.0,
+            "test is only decisive if the composed and global columns differ"
+        );
+        let has = |x: f32, y: f32| {
+            r.sprites.instances.iter().any(|i| {
+                i.model != HIGHLIGHT_MODEL
+                    && (i.pos[0] - x).abs() < 0.01
+                    && (i.pos[1] - y).abs() < 0.01
+            })
+        };
+        assert!(
+            has(cx, cy),
+            "bound entity seats at the grid-composed column"
+        );
+        assert!(
+            has(gx, gy),
+            "unbound entity seats at the bare global column"
         );
     }
 

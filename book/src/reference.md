@@ -132,6 +132,7 @@ to place in a command payload.
 | `model_actor(path, states, height)` | define an animated 8-direction billboard; returns a model id |
 | `model_drop(model, cells)` | nudge an actor model's sprites down/up by `cells` |
 | `entity_set_model(entity, model)` | bind an entity to a render model |
+| `entity_set_grid(entity, grid)` | bind an entity to a `grid_spawn` grid so it rides that grid's transform (its position is read as grid-local); unbound entities render in the global frame |
 | `entity_set_anim(entity, state)` | set an actor entity's animation state |
 | `entity_set_facing(entity, yaw)` | set an actor entity's facing yaw (radians) |
 | `entity_set_tint(entity, tint)` | multiply an actor's sprite by a `0xRRGGBB` tint |

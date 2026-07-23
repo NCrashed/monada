@@ -327,6 +327,10 @@ fn ensure_crew(player) {
         entity_set_position(c, vec3(fixed(5 + idx * 2), fixed(2), fixed(0)));
         entity_set_field(c, "deck", fixed(0));
         entity_set_model(c, 0); // crew actor model
+        // Ride the hull grid: the crew's sim position is grid-local, composed
+        // through the hull's transform when drawn, so they stay seated as it
+        // moves/turns (host_api 8). At (0,0,0) identity today this is a no-op.
+        entity_set_grid(c, hull_grid());
         entity_set_anim(c, "idle");
     }
 }

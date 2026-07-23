@@ -62,8 +62,10 @@ pub use volume::VolumeStore;
 /// first `phys_material` call is its ground material and must precede
 /// terrain contact (the material-0 contract on `register_physics_api`);
 /// 9 = `phys_drill_tool`/`phys_drill` (the one-call drill loop, digger
-/// D3); 10 = `atan2` + `phys_material_color` (digger D4 polish).
-pub const HOST_API_VERSION: u32 = 10;
+/// D3); 10 = `atan2` + `phys_material_color` (digger D4 polish);
+/// 11 = `entity_set_grid` (entities ride a grid's transform — crew stay
+/// put on a moving/rotating hull).
+pub const HOST_API_VERSION: u32 = 11;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -202,6 +204,13 @@ pub trait HostBridge: Send {
     fn model_kv6(&mut self, asset_path: &str, turns: i64) -> i64;
     /// Bind an entity to a base render model (render-side, not hashed).
     fn entity_set_model(&mut self, entity: i64, model: i64);
+    /// Bind an entity to a `grid_spawn` grid (by its handle), so it rides
+    /// that grid's transform: its sim `position` is read as grid-local and
+    /// composed through the grid's origin + rotation when rendered — a crew
+    /// stays seated on a hull that moves or turns. Render-side, not hashed;
+    /// an out-of-range handle is ignored. Unbound entities render in the
+    /// global frame as before (`host_api` 8).
+    fn entity_set_grid(&mut self, _entity: i64, _grid: i64) {}
     /// Paint a solid voxel box into the world grid, in sim coordinates.
     /// (Two corners + colour reads naturally as separate args for scripts.)
     /// `color` is roxlap-packed `0xBB_RR_GG_BB` — the HIGH byte is

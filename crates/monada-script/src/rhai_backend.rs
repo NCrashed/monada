@@ -417,6 +417,11 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").entity_set_model(e, model);
     });
 
+    let b = bridge.clone();
+    engine.register_fn("entity_set_grid", move |e: i64, grid: i64| {
+        b.lock().expect("bridge mutex").entity_set_grid(e, grid);
+    });
+
     // Animated 8-direction billboard actor: `model_actor(dir, [states])`,
     // then per-entity `entity_set_anim` / `entity_set_facing` (render-side).
     let b = bridge.clone();
