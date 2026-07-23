@@ -65,17 +65,47 @@ fn snapshot_restore_continue_matches_uninterrupted() {
     }
 }
 
-/// The hash covers every state field: stepping changes it, and worlds
-/// built at different tick rates differ from tick 0.
+/// The hash covers every state field — the local tripwire for a field
+/// forgotten in the fold, so a gap is caught here and not first by the
+/// oracle goldens. One `assert_ne` per `PhysicsWorld` field.
 #[test]
-fn hash_covers_tick_and_dt() {
+fn hash_covers_every_state_field() {
+    // tick
     let mut a = PhysicsWorld::new(25);
     let h0 = a.state_hash();
     a.step();
     assert_ne!(h0, a.state_hash(), "tick is hashed");
+    // dt
     assert_ne!(
         PhysicsWorld::new(25).state_hash(),
         PhysicsWorld::new(30).state_hash(),
         "dt is hashed"
+    );
+    // gravity
+    let mut with_gravity = PhysicsWorld::new(25);
+    with_gravity.set_gravity(FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::NEG_ONE));
+    assert_ne!(
+        with_gravity.state_hash(),
+        PhysicsWorld::new(25).state_hash(),
+        "gravity is hashed"
+    );
+    // next_body_id + bodies
+    let mut with_body = PhysicsWorld::new(25);
+    with_body.spawn(&BodyDef::default());
+    assert_ne!(
+        with_body.state_hash(),
+        PhysicsWorld::new(25).state_hash(),
+        "spawn (next_body_id + bodies) is hashed"
+    );
+    // body content, not just count
+    let mut moved = PhysicsWorld::new(25);
+    moved.spawn(&BodyDef {
+        position: FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO),
+        ..BodyDef::default()
+    });
+    assert_ne!(
+        moved.state_hash(),
+        with_body.state_hash(),
+        "body fields are hashed"
     );
 }

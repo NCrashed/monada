@@ -124,8 +124,9 @@ impl PhysicsWorld {
     /// concern alongside the solver. `checked_*` here would buy a
     /// branch per component per tick for a regime no scenario reaches.
     pub fn step(&mut self) {
+        let g_dt = self.gravity.scale(self.dt);
         for body in &mut self.bodies {
-            body.linear_velocity += self.gravity.scale(self.dt);
+            body.linear_velocity += g_dt;
             body.position += body.linear_velocity.scale(self.dt);
             body.orientation = (FixedQuat::from_scaled_axis(body.angular_velocity.scale(self.dt))
                 * body.orientation)
