@@ -1106,6 +1106,22 @@ impl MapRender {
         }
         let out = if twin.sync(&mut self.scene, &fow) {
             let id = twin.twin();
+            // The twin renders the hull (the real grid is `render_excluded`),
+            // but `sync` only mirrors the real grid's transform in its Phase 2 —
+            // which it SKIPS on a "quiet" frame (mask version + real mutation
+            // counter unchanged). A hull that merely ROTATES each tick bumps
+            // neither: `grid_orient` is not a voxel edit (no mutation) and turns
+            // no cell visible/dark (no mask change). So on an idle frame `sync`
+            // early-outs and the twin's transform freezes while the real grid
+            // keeps turning — the rendered hull stalls, and the crew (placed from
+            // the live real transform in `place`) visibly slides off it. Force
+            // the twin to track the real transform every frame so the hull turns
+            // smoothly regardless of fog activity.
+            if let Some(t) = self.scene.grid(main_grid).map(|g| g.transform) {
+                if let Some(tw) = self.scene.grid_mut(id) {
+                    tw.transform = t;
+                }
+            }
             self.fow_twin = Some(twin);
             Some(id)
         } else {
@@ -3355,6 +3371,86 @@ mod tests {
             mask.state(0, across).0,
             CellState::Unseen,
             "the perpendicular column {across:?} stays dark — the cone did not swing with the hull"
+        );
+    }
+
+    /// The rendered hull (the twin grid) must keep turning even on a frame where
+    /// the fog mask does not change. The twin — not the real grid, which is
+    /// `render_excluded` — draws the hull, and `FowTwin::sync` only mirrors the
+    /// real grid's transform on a NON-quiet frame (mask version or voxel mutation
+    /// changed). A hull that merely rotates bumps neither, so once the crew is
+    /// idle and the mask settles, `sync` early-outs and — without the host's
+    /// per-frame transform copy — the twin freezes while the real grid keeps
+    /// turning: the hull stalls on screen and the crew slides off it. Regression
+    /// for that: rotate the real grid on a settled (quiet) frame and confirm the
+    /// twin tracks it.
+    #[test]
+    fn fog_twin_tracks_hull_rotation_on_a_quiet_frame() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn(0, 0, 0);
+        r.voxel_fill_in(g, -40, -40, 0, 40, 40, 0, 0x8055_5f6b); // floor across the cone
+        r.vision_config(110, 6, 3);
+        r.deck_clip(0, 3);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let e = world.spawn(arch);
+        // Seat the observer a hair off the cell centre (sim +1/32) so its
+        // grid-local feet land mid-voxel, NOT on an integer cell boundary. Re-
+        // basing maps the world feet back to `world_of(p)` up to a ~1e-14 float
+        // round-trip error; on a boundary that error could tip `floor` to the
+        // next cell and (spuriously) move the observer, recomputing LOS. Mid-cell
+        // it can't, so rotating the hull leaves the mask provably untouched.
+        let off = Fixed::from_f64(1.0 / 32.0); // 1/32 cell: exact in fixed-point
+        world.set_position(e, FixedVec3::new(off, off, Fixed::ZERO));
+        // Bind the observer to the hull like the real crew (`entity_set_grid`):
+        // its world pose then rotates WITH the hull, and re-basing cancels that
+        // rotation, so the grid-local observer — and thus the mask — is invariant
+        // to how the hull is turned. An UNBOUND observer would instead slide
+        // across the grid as it spun, perturbing the mask and hiding the bug.
+        r.entity_set_grid(e.0 as i64, g);
+        r.vision_observer_in(e.0 as i64, g);
+
+        // Settle the mask over several static frames so `sync` reaches its
+        // quiet-frame early-out (nothing to copy). The observer never moves.
+        for _ in 0..4 {
+            r.build_instances(&world);
+            let _ = r.update_fow(0.016);
+        }
+        let settled_ver = r.fow.as_ref().expect("mask built").mask_version();
+
+        // Now TURN the hull a quarter-turn — a transform-only change. Re-basing
+        // makes the grid-local observer invariant to grid rotation, so the mask
+        // is unchanged and `sync` early-outs on this frame (the exact case the
+        // fix guards). The crew's grid-local pose is likewise unchanged.
+        let gid = r.grids[g as usize];
+        let turned = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        r.scene.grid_mut(gid).expect("real grid").transform.rotation = turned;
+        r.build_instances(&world);
+        let _ = r.update_fow(0.016);
+
+        // Guard the guard: this frame must actually be QUIET (the mask did not
+        // change), or the test wouldn't exercise the early-out it regresses —
+        // `sync` would mirror the transform in Phase 2 and pass even unfixed.
+        assert_eq!(
+            r.fow.as_ref().expect("mask built").mask_version(),
+            settled_ver,
+            "rotating the hull must not perturb the grid-local mask — otherwise \
+             this isn't the quiet-frame path the fix targets"
+        );
+
+        // The twin (which actually renders the hull) must now carry the same
+        // rotation. Before the fix it stayed at the identity it settled with,
+        // because `sync` skipped its transform mirror on this quiet frame.
+        let twin_id = r.fow_twin.as_ref().expect("twin armed").twin();
+        let twin_rot = r.scene.grid(twin_id).expect("twin grid").transform.rotation;
+        let probe = DVec3::new(1.0, 0.0, 0.0);
+        assert!(
+            (twin_rot * probe - turned * probe).length() < 1e-9,
+            "the twin hull must track the real grid's rotation on a quiet frame \
+             (twin rotated {probe:?} to {:?}, expected {:?})",
+            twin_rot * probe,
+            turned * probe,
         );
     }
 
