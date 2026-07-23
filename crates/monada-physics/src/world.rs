@@ -1,16 +1,31 @@
 //! [`PhysicsWorld`] — the physics state root (docs/plans/voxel-physics.md
 //! §3 `world`).
 //!
-//! P1 scope: free rigid bodies — semi-implicit Euler under uniform
-//! gravity, quaternion orientation integration, no collisions. The
-//! deterministic shell from P0 (fixed timestep, canonical hash, serde
-//! snapshot) carries over unchanged.
+//! P2 scope: voxel bodies against a terrain [`VoxelField`] — sphere-skin
+//! narrowphase, sequential-impulse velocity solve with Coulomb
+//! friction, full-K NGS position correction, persistent warm-start
+//! cache. P1's free-body integration and P0's deterministic shell
+//! carry over unchanged.
 
 use monada_fixed::{Fixed, FixedQuat, FixedVec3};
 use monada_sim::{StateHash, StateHasher};
 
-use crate::body::{BodyDef, RigidBody};
+use crate::body::{BodyDef, RigidBody, VoxelBodyDef};
+use crate::contact::{self, ContactCacheEntry};
+use crate::field::VoxelField;
 use crate::ids::BodyId;
+use crate::material::{Material, MaterialId};
+use crate::solver;
+
+/// Default speed ceiling: 2000 voxels/s = 80 voxels/tick at 25 Hz.
+const DEFAULT_MAX_SPEED: Fixed = Fixed::from_int(2000);
+
+/// Sim-side rest thresholds: a body whose speeds sit below these is
+/// "at rest" for acceptance purposes (actual sleeping arrives with
+/// islands in P5). Linear in voxels/s, angular in rad/s.
+pub const SLEEP_LINEAR: Fixed = Fixed::from_ratio(1, 8);
+/// See [`SLEEP_LINEAR`].
+pub const SLEEP_ANGULAR: Fixed = Fixed::from_ratio(1, 8);
 
 /// The physics state root. One instance per sim; stepped once per sim
 /// tick, hashed into the same desync digest as the rest of the sim.
@@ -25,12 +40,24 @@ pub struct PhysicsWorld {
     /// Uniform gravity, voxels/s² in sim space (z-up — so a falling
     /// world sets a negative z). Defaults to zero: the map opts in.
     gravity: FixedVec3,
+    /// Speed ceiling, applied right after gravity each tick. A hashed
+    /// config field (no setter until a demo needs one — plan, P2
+    /// amendments).
+    max_speed: Fixed,
     /// The next id [`spawn`](PhysicsWorld::spawn) hands out. Monotonic,
     /// hashed (rule 3: id allocation is simulation state).
     next_body_id: u64,
-    /// All live bodies, ascending by id. Spawn-only in P1, so a plain
-    /// push keeps the order; despawn/split (P4) must preserve it.
+    /// All live bodies, ascending by id. Spawn-only until P4, so a
+    /// plain push keeps the order; despawn/split must preserve it.
     bodies: Vec<RigidBody>,
+    /// Registered materials; `MaterialId` indexes this in registration
+    /// order (the cross-crate contract on [`VoxelField`]).
+    materials: Vec<Material>,
+    /// Warm-start impulse cache, sorted by contact key — canonical by
+    /// construction (generation order is lexicographic) and hashed:
+    /// accumulated impulses feed the next tick's solve (plan, P2
+    /// amendments).
+    impulse_cache: Vec<ContactCacheEntry>,
 }
 
 impl PhysicsWorld {
@@ -47,8 +74,11 @@ impl PhysicsWorld {
             // Lossless: manifest sim_hz is far below i32::MAX.
             dt: Fixed::from_ratio(1, i32::try_from(sim_hz).expect("sim_hz fits i32")),
             gravity: FixedVec3::ZERO,
+            max_speed: DEFAULT_MAX_SPEED,
             next_body_id: 0,
             bodies: Vec::new(),
+            materials: Vec::new(),
+            impulse_cache: Vec::new(),
         }
     }
 
@@ -76,16 +106,47 @@ impl PhysicsWorld {
         self.gravity = gravity;
     }
 
-    /// Spawn a rigid body. Ids are handed out monotonically, in call
-    /// order — which is therefore part of the determinism contract.
+    /// Register a material; ids are handed out in call order (which is
+    /// therefore part of the determinism contract, like body ids).
+    ///
+    /// # Panics
+    /// Panics past 65534 materials (65535 is the shape sentinel).
+    pub fn register_material(&mut self, material: Material) -> MaterialId {
+        let id = u16::try_from(self.materials.len()).expect("material table fits u16");
+        assert!(id != u16::MAX, "material id 65535 is reserved");
+        self.materials.push(material);
+        MaterialId(id)
+    }
+
+    /// Spawn a ghost body — explicit mass properties, **no collision
+    /// skin** (it falls through terrain by design; see `BodyDef`).
     ///
     /// # Panics
     /// Panics on an invalid [`BodyDef`] (non-positive mass, inertia
     /// tensor that is not positive-definite).
     pub fn spawn(&mut self, def: &BodyDef) -> BodyId {
+        let id = self.next_id();
+        self.bodies.push(RigidBody::from_def(id, def));
+        id
+    }
+
+    /// Spawn a voxel body: mass/CoM/inertia derived from the shape and
+    /// material densities (solid-cube convention), surface voxels as
+    /// the collision skin. `def.position` places the derived `CoM`.
+    ///
+    /// # Panics
+    /// Panics on an empty shape or a material id the world has not
+    /// registered.
+    pub fn spawn_voxels(&mut self, def: &VoxelBodyDef) -> BodyId {
+        let id = self.next_id();
+        self.bodies
+            .push(RigidBody::from_voxels(id, def, &self.materials));
+        id
+    }
+
+    fn next_id(&mut self) -> BodyId {
         let id = BodyId(self.next_body_id);
         self.next_body_id += 1;
-        self.bodies.push(RigidBody::from_def(id, def));
         id
     }
 
@@ -105,33 +166,118 @@ impl PhysicsWorld {
         &self.bodies
     }
 
-    /// Advance one fixed tick: semi-implicit Euler over every body.
+    /// Apply a world-frame impulse at the centre of mass: `Δv = J/m`.
     ///
-    /// Per body (plan §6 P1, amendments):
+    /// # Panics
+    /// Panics on an unknown body id.
+    pub fn apply_impulse(&mut self, id: BodyId, impulse: FixedVec3) {
+        let body = self.body_mut(id);
+        body.linear_velocity += impulse.scale(body.inv_mass);
+    }
+
+    /// Apply a world-frame impulse at a world-space `point`:
+    /// `Δv = J/m`, `Δω = I⁻¹_world·((point − com) × J)`.
+    ///
+    /// # Panics
+    /// Panics on an unknown body id.
+    pub fn apply_impulse_at(&mut self, id: BodyId, impulse: FixedVec3, point: FixedVec3) {
+        let index = self
+            .bodies
+            .binary_search_by_key(&id, RigidBody::id)
+            .unwrap_or_else(|_| panic!("apply_impulse_at: no body {id:?}"));
+        let inv_inertia = solver::inv_inertia_world(&self.bodies[index]);
+        let body = &mut self.bodies[index];
+        let r = point - body.position;
+        body.linear_velocity += impulse.scale(body.inv_mass);
+        body.angular_velocity += inv_inertia * r.cross(impulse);
+    }
+
+    fn body_mut(&mut self, id: BodyId) -> &mut RigidBody {
+        let index = self
+            .bodies
+            .binary_search_by_key(&id, RigidBody::id)
+            .unwrap_or_else(|_| panic!("no body {id:?}"));
+        &mut self.bodies[index]
+    }
+
+    /// Advance one fixed tick against the terrain `field` (a read-only
+    /// per-tick input — physics never owns terrain).
+    ///
+    /// Pipeline, in canonical order (plan §3, P2 amendments):
     ///
     /// ```text
-    /// v += g·dt                                   (velocity first —
-    /// p += v·dt                                    that is the "semi-
-    /// q  = (from_scaled_axis(ω·dt) * q).normalize  implicit" part)
-    /// ω  unchanged (no gyroscopic term in v1)
+    /// 1. v += g·dt; v clamped to max_speed
+    /// 2. narrowphase: bodies by id → skin spheres by index → cells
+    /// 3. warm start from the impulse cache
+    /// 4. velocity iterations: normal impulses + Coulomb friction
+    /// 5. integrate positions/orientations (P1 integrator, ω constant)
+    /// 6. full-K NGS position iterations
+    /// 7. rebuild the impulse cache from surviving contacts
     /// ```
     ///
-    /// **Overflow policy (rule 5)**: plain wrapping ops, deliberately.
-    /// In free fall `v` grows without bound, but the Q32.32 ceiling is
-    /// ±2³¹ ≈ 2.1e9 voxels/s — at |g| = 10 that is nearly seven years
-    /// of continuous falling, and position wraps on the same scale.
-    /// Real scenarios hit terrain (P2) first; a velocity clamp is P2's
-    /// concern alongside the solver. `checked_*` here would buy a
-    /// branch per component per tick for a regime no scenario reaches.
-    pub fn step(&mut self) {
+    /// **Overflow policy (rule 5)**: plain wrapping ops past the
+    /// clamp. The `max_speed` ceiling (80 voxels/tick at defaults) is
+    /// simultaneously the tunnelling bound — a step never moves a body
+    /// further than that, so terrain thinner than `max_speed·dt` can
+    /// be skipped over. Today's column terrain is solid to the bottom;
+    /// for future walls/overhangs the map must pick `max_speed` (or
+    /// wall thickness) accordingly. Fast projectiles stay engine-side
+    /// raycasts (non-goal).
+    pub fn step(&mut self, field: &dyn VoxelField) {
+        // 1. Integrate velocities.
         let g_dt = self.gravity.scale(self.dt);
         for body in &mut self.bodies {
-            body.linear_velocity += g_dt;
+            body.linear_velocity = (body.linear_velocity + g_dt).clamp_length_max(self.max_speed);
+        }
+
+        // 2. Narrowphase at pre-step poses.
+        let mut contacts = contact::generate(&self.bodies, field, &self.materials);
+
+        // Per-body world-frame inverse inertia for this tick's solve.
+        let inv_inertias: Vec<_> = self.bodies.iter().map(solver::inv_inertia_world).collect();
+
+        // 3. Load accumulated impulses from the previous tick's cache.
+        for c in &mut contacts {
+            if let Ok(i) = self.impulse_cache.binary_search_by_key(&c.key, |e| e.key) {
+                let e = &self.impulse_cache[i];
+                c.accumulated_normal = e.normal_impulse;
+                c.accumulated_tangent = e.tangent_impulse;
+            }
+        }
+        solver::prepare(&mut self.bodies, &inv_inertias, &mut contacts);
+
+        // 4. Velocity solve.
+        solver::solve_velocities(&mut self.bodies, &inv_inertias, &mut contacts);
+
+        // 5. Integrate poses (P1 integrator; no gyroscopic term).
+        for body in &mut self.bodies {
             body.position += body.linear_velocity.scale(self.dt);
             body.orientation = (FixedQuat::from_scaled_axis(body.angular_velocity.scale(self.dt))
                 * body.orientation)
                 .normalize();
         }
+
+        // 6. Position correction.
+        solver::solve_positions(&mut self.bodies, &contacts);
+
+        // 7. Persist accumulated impulses (contacts are in key order,
+        // so the rebuilt cache is sorted by construction).
+        self.impulse_cache.clear();
+        self.impulse_cache.extend(
+            contacts
+                .iter()
+                .filter(|c| {
+                    c.accumulated_normal != Fixed::ZERO
+                        || c.accumulated_tangent.0 != Fixed::ZERO
+                        || c.accumulated_tangent.1 != Fixed::ZERO
+                })
+                .map(|c| ContactCacheEntry {
+                    key: c.key,
+                    normal_impulse: c.accumulated_normal,
+                    tangent_impulse: c.accumulated_tangent,
+                }),
+        );
+
         self.tick += 1;
     }
 
@@ -146,18 +292,22 @@ impl PhysicsWorld {
 }
 
 impl StateHash for PhysicsWorld {
-    /// Canonical fold order: `tick`, `dt`, `gravity`, `next_body_id`,
-    /// then the bodies in id order (length-prefixed by the `Vec`
-    /// impl). Any change here — including appending a field — re-keys
-    /// every `phys@` golden and requires an explicit bless; keeping
-    /// the order append-only just makes the diff-time story legible
-    /// (old fields keep their positions, the bless commit points at
-    /// exactly what grew).
+    /// Canonical fold order: `tick`, `dt`, `gravity`, `max_speed`,
+    /// `next_body_id`, bodies in id order, materials in registration
+    /// order, the impulse cache in key order (each Vec length-prefixed
+    /// by the slice impl). Any change here — including appending a
+    /// field — re-keys every `phys@` golden and requires an explicit
+    /// bless; keeping the order append-only just makes the diff-time
+    /// story legible (old fields keep their positions, the bless
+    /// commit points at exactly what grew).
     fn hash(&self, h: &mut StateHasher) {
         self.tick.hash(h);
         self.dt.hash(h);
         self.gravity.hash(h);
+        self.max_speed.hash(h);
         self.next_body_id.hash(h);
         self.bodies.hash(h);
+        self.materials.hash(h);
+        self.impulse_cache.hash(h);
     }
 }

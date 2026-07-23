@@ -579,27 +579,49 @@ pub fn rts_checkpoints() -> Vec<Checkpoint> {
 }
 
 /// The physics-crate golden: a [`PhysicsWorld`] at the engine-default
-/// 25 Hz under gravity, with two free P1 bodies — a spinning ballistic
-/// one carrying a *rotated* (non-diagonal) inertia tensor so the
-/// `FixedMat3` hash fold is warmed by real data, and a drifting one —
-/// stepped through the standard checkpoints. Like `kernel@` it is pure
-/// Rust with no scripting: the anchor that gates `monada-physics`'s
-/// state layout, canonical hash, and integrator arithmetic
-/// cross-platform (docs/plans/voxel-physics.md §5). Later milestones
-/// grow this scenario (P2 adds contact, P3 a vehicle, P4 a destruction
-/// script), each growth re-blessed explicitly.
+/// 25 Hz under gravity, over a flat voxel floor (cells below z = 0
+/// solid). Bodies: the two free P1 ghosts — a spinning ballistic one
+/// carrying a *rotated* (non-diagonal) inertia tensor so the
+/// `FixedMat3` hash fold is warmed by real data, and a drifting one
+/// (ghosts have no skin, so they sail through the floor by design) —
+/// plus two P2 voxel bodies exercising the contact stack: a 3³ cube
+/// dropped from z = 30 (at rest well before tick 600, warm-start cache
+/// live) and a 4×4×2 slab shoved sideways at spawn, sliding to a
+/// frictional stop. Like `kernel@` it is pure Rust with no scripting:
+/// the anchor that gates `monada-physics`'s state layout, canonical
+/// hash, and solver arithmetic cross-platform
+/// (docs/plans/voxel-physics.md §5). Later milestones grow this
+/// scenario (P3 a vehicle, P4 a destruction script), each growth
+/// re-blessed explicitly.
 ///
 /// [`PhysicsWorld`]: monada_physics::PhysicsWorld
 #[must_use]
 pub fn phys_checkpoints() -> Vec<Checkpoint> {
     use monada_fixed::{FixedMat3, FixedQuat};
-    use monada_physics::{BodyDef, PhysicsWorld};
+    use monada_physics::{
+        BodyDef, Material, MaterialId, PhysicsWorld, VoxelBodyDef, VoxelField, VoxelShape,
+    };
+
+    struct Floor;
+    impl VoxelField for Floor {
+        fn occupied(&self, _x: i64, _y: i64, z: i64) -> bool {
+            z < 0
+        }
+        fn material(&self, _x: i64, _y: i64, _z: i64) -> MaterialId {
+            MaterialId(0)
+        }
+    }
 
     let fx = Fixed::from_int;
     let v3 = |x: i32, y: i32, z: i32| FixedVec3::new(fx(x), fx(y), fx(z));
 
     let mut world = PhysicsWorld::new(25);
     world.set_gravity(v3(0, 0, -10));
+    let mat = world.register_material(Material {
+        density: Fixed::ONE,
+        friction: Fixed::HALF,
+        restitution: Fixed::ZERO,
+    });
 
     // A box-ish inertia diag(2, 3, 4) rotated off-axis: R · D · Rᵀ.
     let r = FixedMat3::from_quat(FixedQuat::from_axis_angle(
@@ -621,11 +643,32 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
         ..BodyDef::default()
     });
 
+    // P2: a dropped cube (rests by ~tick 80)…
+    let mut cube = VoxelShape::new(3, 3, 3);
+    cube.fill_box((0, 0, 0), (2, 2, 2), mat);
+    world.spawn_voxels(&VoxelBodyDef {
+        shape: cube,
+        position: v3(20, 0, 30),
+        orientation: FixedQuat::IDENTITY,
+        linear_velocity: FixedVec3::ZERO,
+        angular_velocity: FixedVec3::ZERO,
+    });
+    // …and a shoved slab sliding to a frictional stop.
+    let mut slab = VoxelShape::new(4, 4, 2);
+    slab.fill_box((0, 0, 0), (3, 3, 1), mat);
+    world.spawn_voxels(&VoxelBodyDef {
+        shape: slab,
+        position: v3(-20, 0, 1),
+        orientation: FixedQuat::IDENTITY,
+        linear_velocity: v3(12, 0, 0),
+        angular_velocity: FixedVec3::ZERO,
+    });
+
     let mut prev = 0;
     let mut out = Vec::with_capacity(TICK_CHECKPOINTS.len());
     for &tick in TICK_CHECKPOINTS {
         for _ in prev..tick {
-            world.step();
+            world.step(&Floor);
         }
         prev = tick;
         out.push(Checkpoint {

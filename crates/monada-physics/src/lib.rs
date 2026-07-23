@@ -10,9 +10,10 @@
 //! render state — bodies are mirrored to roxlap grids by the engine.
 //!
 //! Built milestone by milestone (P0–P6, see the plan). Currently at
-//! **P1**: free rigid bodies — semi-implicit Euler under uniform
-//! gravity, quaternion orientation integration, no collisions — on top
-//! of P0's deterministic shell (fixed timestep, canonical
+//! **P2**: voxel bodies against a terrain [`VoxelField`] — sphere-skin
+//! narrowphase, sequential-impulse solver with Coulomb friction,
+//! full-K NGS position correction — on top of P1's free-body
+//! integration and P0's deterministic shell (fixed timestep, canonical
 //! [`state_hash`](PhysicsWorld::state_hash), serde snapshots, the
 //! `phys@` oracle golden gating it in CI).
 //!
@@ -30,9 +31,17 @@
 #![deny(clippy::float_arithmetic, clippy::disallowed_types)]
 
 mod body;
+mod contact;
+mod field;
 mod ids;
+mod material;
+mod shape;
+mod solver;
 mod world;
 
-pub use body::{BodyDef, RigidBody};
+pub use body::{BodyDef, RigidBody, VoxelBodyDef};
+pub use field::{EmptyField, VoxelField};
 pub use ids::BodyId;
-pub use world::PhysicsWorld;
+pub use material::{Material, MaterialId};
+pub use shape::VoxelShape;
+pub use world::{PhysicsWorld, SLEEP_ANGULAR, SLEEP_LINEAR};

@@ -1,10 +1,15 @@
 //! Rigid bodies (docs/plans/voxel-physics.md §3 `body`).
 //!
-//! P1 scope: a free body — pose, velocities, explicit mass properties.
-//! The voxel-derived constructor (mass/inertia summed from occupancy)
-//! arrives with `shape` in P2; the explicit [`BodyDef`] path stays as
-//! the tests' ground truth for P4's incremental-vs-full recompute
-//! check (plan, P1 amendments).
+//! Two spawn paths:
+//!
+//! - [`BodyDef`] — explicit mass properties, **NO COLLISION SKIN**: a
+//!   free-flying ghost that never touches terrain. For tests (P1/P4
+//!   ground truth) and future lumped functional modules. If you spawn
+//!   one and it falls through the floor — that is this, working as
+//!   documented.
+//! - [`VoxelBodyDef`] — a voxel shape; mass, centre of mass, and
+//!   inertia derive from the voxels and material densities, and the
+//!   surface voxels become the collision skin.
 //!
 //! ## Units
 //!
@@ -17,9 +22,13 @@ use monada_fixed::{Fixed, FixedMat3, FixedQuat, FixedVec3};
 use monada_sim::{StateHash, StateHasher};
 
 use crate::ids::BodyId;
+use crate::material::Material;
+use crate::shape::{derive_skin, mass_properties, SkinSphere, VoxelShape};
 
-/// Spawn-time description of a rigid body. Mass properties are
-/// explicit here; see the module docs for why.
+/// Spawn-time description of a ghost body (explicit mass properties,
+/// no collision skin — see the module docs). The explicit path stays
+/// as the tests' ground truth for P4's incremental-vs-full recompute
+/// check (plan, P1 amendments).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BodyDef {
     /// World-space position of the centre of mass, sim-space voxels.
@@ -54,17 +63,37 @@ impl Default for BodyDef {
     }
 }
 
+/// Spawn-time description of a voxel body. Mass properties derive
+/// from the shape and the world's material table.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VoxelBodyDef {
+    /// The body's voxels. Shape-local coordinates are rebased around
+    /// the *derived* centre of mass at spawn — so `position` places
+    /// the `CoM`, which for an uneven-density body is NOT the geometric
+    /// centre of the shape's AABB.
+    pub shape: VoxelShape,
+    /// World-space position of the (derived) centre of mass.
+    pub position: FixedVec3,
+    /// World-from-body rotation (normalised at spawn, like `BodyDef`).
+    pub orientation: FixedQuat,
+    /// Voxels per second.
+    pub linear_velocity: FixedVec3,
+    /// Radians per second, world frame.
+    pub angular_velocity: FixedVec3,
+}
+
 /// A simulated rigid body. Constructed only through
-/// [`PhysicsWorld::spawn`](crate::PhysicsWorld::spawn); read-only from
+/// [`PhysicsWorld::spawn`](crate::PhysicsWorld::spawn) /
+/// [`spawn_voxels`](crate::PhysicsWorld::spawn_voxels); read-only from
 /// outside the crate.
 ///
-/// **Cache policy** (plan, P1 amendments): `inv_mass` and
-/// `inv_inertia_body` are deterministic functions of `mass` /
-/// `inertia_body`, computed once at spawn. They ARE serialized (so
-/// snapshot → restore → step is bit-equal to step by construction) and
-/// are NOT hashed (pure functions of hashed fields). Any future code
-/// that mutates mass or inertia — P4 splits — must refresh the caches
-/// in the same breath.
+/// **Cache policy** (plan, P1/P2 amendments): `inv_mass`,
+/// `inv_inertia_body`, and `skin` are deterministic functions of the
+/// hashed fields (`mass`, `inertia_body`, `shape` + the material
+/// table), computed once at spawn. They ARE serialized (so snapshot →
+/// restore → step is bit-equal to step by construction) and are NOT
+/// hashed. Any future code that mutates mass, inertia, or shape — P4
+/// splits — must refresh all three in the same breath.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RigidBody {
     pub(crate) id: BodyId,
@@ -74,28 +103,40 @@ pub struct RigidBody {
     pub(crate) angular_velocity: FixedVec3,
     pub(crate) mass: Fixed,
     pub(crate) inertia_body: FixedMat3,
+    /// `None` for ghost bodies (no collision).
+    pub(crate) shape: Option<VoxelShape>,
     pub(crate) inv_mass: Fixed,
     pub(crate) inv_inertia_body: FixedMat3,
+    /// Derived cache: surface voxels as CoM-relative spheres.
+    pub(crate) skin: Vec<SkinSphere>,
 }
 
 impl RigidBody {
-    /// Validate `def` and build the body. See [`BodyDef`] field docs
-    /// for the asserted preconditions.
-    ///
-    /// # Panics
-    /// Panics on non-positive mass or a non-positive-definite inertia
-    /// tensor.
-    pub(crate) fn from_def(id: BodyId, def: &BodyDef) -> RigidBody {
+    /// Shared tail of both spawn paths: validate mass properties,
+    /// normalise the orientation, build the caches.
+    // A private constructor mirroring the struct's own field list; a
+    // params struct would just restate `RigidBody` a third time.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        id: BodyId,
+        position: FixedVec3,
+        orientation: FixedQuat,
+        linear_velocity: FixedVec3,
+        angular_velocity: FixedVec3,
+        mass: Fixed,
+        inertia_body: FixedMat3,
+        shape: Option<VoxelShape>,
+        skin: Vec<SkinSphere>,
+    ) -> RigidBody {
         assert!(
-            def.mass > Fixed::ZERO,
-            "RigidBody: mass must be positive, got {:?}",
-            def.mass
+            mass > Fixed::ZERO,
+            "RigidBody: mass must be positive, got {mass:?}"
         );
         // Sylvester's criterion: positive leading principal minors.
         // (Physical tensors are symmetric up to per-entry rounding —
         // e.g. an R·D·Rᵀ built in fixed point — so symmetry itself is
         // deliberately not asserted.)
-        let i = &def.inertia_body;
+        let i = &inertia_body;
         let minor1 = i.x_axis.x;
         let minor2 = i.x_axis.x * i.y_axis.y - i.y_axis.x * i.x_axis.y;
         let minor3 = i.determinant();
@@ -106,15 +147,58 @@ impl RigidBody {
         );
         RigidBody {
             id,
-            position: def.position,
-            orientation: def.orientation.normalize(),
-            linear_velocity: def.linear_velocity,
-            angular_velocity: def.angular_velocity,
-            mass: def.mass,
-            inertia_body: def.inertia_body,
-            inv_mass: Fixed::ONE / def.mass,
-            inv_inertia_body: def.inertia_body.inverse(),
+            position,
+            orientation: orientation.normalize(),
+            linear_velocity,
+            angular_velocity,
+            mass,
+            inertia_body,
+            shape,
+            inv_mass: Fixed::ONE / mass,
+            inv_inertia_body: inertia_body.inverse(),
+            skin,
         }
+    }
+
+    /// Ghost body from explicit mass properties (no collision skin).
+    ///
+    /// # Panics
+    /// Panics on non-positive mass or a non-positive-definite inertia
+    /// tensor.
+    pub(crate) fn from_def(id: BodyId, def: &BodyDef) -> RigidBody {
+        RigidBody::build(
+            id,
+            def.position,
+            def.orientation,
+            def.linear_velocity,
+            def.angular_velocity,
+            def.mass,
+            def.inertia_body,
+            None,
+            Vec::new(),
+        )
+    }
+
+    /// Voxel body: mass/CoM/inertia summed from the shape (solid-cube
+    /// convention, see `shape`), skin from the surface voxels.
+    ///
+    /// # Panics
+    /// Panics on an empty shape or a material id the world has not
+    /// registered.
+    pub(crate) fn from_voxels(id: BodyId, def: &VoxelBodyDef, materials: &[Material]) -> RigidBody {
+        let props = mass_properties(&def.shape, materials);
+        let skin = derive_skin(&def.shape, props.com);
+        RigidBody::build(
+            id,
+            def.position,
+            def.orientation,
+            def.linear_velocity,
+            def.angular_velocity,
+            props.mass,
+            props.inertia,
+            Some(def.shape.clone()),
+            skin,
+        )
     }
 
     #[must_use]
@@ -156,12 +240,27 @@ impl RigidBody {
     pub fn inertia_body(&self) -> FixedMat3 {
         self.inertia_body
     }
+
+    /// The body's voxels (`None` for ghost bodies). Read access for
+    /// the engine's render mirror; shape-local frame — remember the
+    /// `CoM` rebase (see [`VoxelBodyDef::shape`]).
+    #[must_use]
+    pub fn shape(&self) -> Option<&VoxelShape> {
+        self.shape.as_ref()
+    }
+
+    /// Number of collision-skin spheres (surface voxels); 0 for
+    /// ghosts.
+    #[must_use]
+    pub fn skin_len(&self) -> usize {
+        self.skin.len()
+    }
 }
 
 impl StateHash for RigidBody {
-    /// Canonical fold: `id`, pose, velocities, mass properties. The
-    /// `inv_*` caches are excluded — pure functions of hashed fields
-    /// (see the cache policy on [`RigidBody`]).
+    /// Canonical fold: `id`, pose, velocities, mass properties, shape.
+    /// The `inv_*` and `skin` caches are excluded — pure functions of
+    /// hashed fields (see the cache policy on [`RigidBody`]).
     fn hash(&self, h: &mut StateHasher) {
         self.id.hash(h);
         self.position.hash(h);
@@ -170,5 +269,12 @@ impl StateHash for RigidBody {
         self.angular_velocity.hash(h);
         self.mass.hash(h);
         self.inertia_body.hash(h);
+        match &self.shape {
+            None => h.write_u8(0),
+            Some(shape) => {
+                h.write_u8(1);
+                shape.hash(h);
+            }
+        }
     }
 }

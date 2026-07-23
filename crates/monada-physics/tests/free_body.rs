@@ -3,7 +3,7 @@
 //! slope, canonical spawn order.
 
 use monada_fixed::{trig, Fixed, FixedMat3, FixedQuat, FixedVec3};
-use monada_physics::{BodyDef, PhysicsWorld};
+use monada_physics::{BodyDef, EmptyField, PhysicsWorld};
 
 /// Assert two `Fixed` are within `eps` raw steps of each other.
 fn close(a: Fixed, b: Fixed, eps_bits: i64) {
@@ -43,14 +43,17 @@ fn ballistic_world() -> PhysicsWorld {
 /// Velocity against the discrete closed form — **bit-exact**: the sim
 /// adds the same rounded `g·dt` every tick and `Fixed` addition is
 /// exact, so `v_n = v0 + n·(g·dt)` with no tolerance at all (the
-/// `int × Fixed` product is exact too).
+/// `int × Fixed` product is exact too). Runs to 4000 ticks — well
+/// below the `max_speed` ceiling (2000 voxels/s ≈ tick 5050 here),
+/// where the P2 clamp starts rescaling; saturation itself is covered
+/// by `long_fall_saturates_at_max_speed`.
 #[test]
 fn ballistic_velocity_is_bit_exact() {
     let mut world = ballistic_world();
     let g_dt = GRAVITY.scale(world.dt());
     let v0 = world.bodies()[0].linear_velocity();
-    for n in 1..=10_000i32 {
-        world.step();
+    for n in 1..=4_000i32 {
+        world.step(&EmptyField);
         let expected = v0 + g_dt.scale(Fixed::from_int(n));
         assert_eq!(
             world.bodies()[0].linear_velocity(),
@@ -75,7 +78,7 @@ fn ballistic_position_matches_closed_form() {
     let p0 = world.bodies()[0].position();
     let v0 = world.bodies()[0].linear_velocity();
     for n in 1..=600i32 {
-        world.step();
+        world.step(&EmptyField);
         // n(n+1)/2 is exact in i32 for n ≤ 600.
         let tri = Fixed::from_int(n * (n + 1) / 2);
         let expected = p0 + v0.scale(dt * Fixed::from_int(n)) + g_dt.scale(dt * tri);
@@ -90,7 +93,7 @@ fn ballistic_position_matches_closed_form() {
 fn ballistic_tracks_continuous_parabola() {
     let mut world = ballistic_world();
     for _ in 0..100 {
-        world.step();
+        world.step(&EmptyField);
     }
     // t = 4 s: z = 100 + 20·4 − 5·16 = 100.
     let z = world.bodies()[0].position().z;
@@ -118,7 +121,7 @@ fn rotation_integration_matches_one_shot() {
     });
     let dt = world.dt();
     for n in 1..=250i32 {
-        world.step();
+        world.step(&EmptyField);
         let angle = omega_z * dt * Fixed::from_int(n);
         let expected = FixedQuat::from_axis_angle(vec3(0, 0, 1), angle);
         let got = world.bodies()[0].orientation();
@@ -149,7 +152,7 @@ fn rotation_norm_is_retained_over_10k_ticks() {
         ..BodyDef::default()
     });
     for _ in 0..10_000 {
-        world.step();
+        world.step(&EmptyField);
         let q = world.bodies()[0].orientation();
         close(q.length_squared(), Fixed::ONE, 1 << 12);
     }
@@ -159,7 +162,9 @@ fn rotation_norm_is_retained_over_10k_ticks() {
 /// field (plan, P1 amendments): `E_n − E_0 = −½·m·|g|²·dt²·n`,
 /// linear with a known slope — not a measured envelope. Specific
 /// energy is used (m = 1); tolerance `4n` ulps covers the per-tick
-/// rounding of the two dot products and the height fold.
+/// rounding of the two dot products and the height fold. Runs to
+/// 4000 ticks — below the `max_speed` ceiling, past which velocity
+/// saturates and drift becomes trivially bounded instead of linear.
 #[test]
 fn energy_drift_matches_exact_slope() {
     let mut world = ballistic_world();
@@ -174,8 +179,8 @@ fn energy_drift_matches_exact_slope() {
         v.dot(v) / Fixed::from_int(2) - GRAVITY.dot(b.position())
     };
     let e0 = energy(&world);
-    for n in 1..=10_000i32 {
-        world.step();
+    for n in 1..=4_000i32 {
+        world.step(&EmptyField);
         let drift = energy(&world) - e0;
         let expected = slope * Fixed::from_int(n);
         close(drift, expected, i64::from(4 * n));
@@ -196,7 +201,7 @@ fn kinetic_energy_is_exact_without_gravity() {
     let v0 = world.bodies()[0].linear_velocity();
     let w0 = world.bodies()[0].angular_velocity();
     for _ in 0..10_000 {
-        world.step();
+        world.step(&EmptyField);
     }
     assert_eq!(world.bodies()[0].linear_velocity(), v0);
     assert_eq!(world.bodies()[0].angular_velocity(), w0);
@@ -232,8 +237,8 @@ fn spawn_order_is_canonical() {
     );
     assert_eq!(w1.body(a).unwrap().position(), vec3(1, 0, 0));
     for _ in 0..100 {
-        w1.step();
-        w2.step();
+        w1.step(&EmptyField);
+        w2.step(&EmptyField);
     }
     assert_eq!(w1.state_hash(), w2.state_hash());
 }
