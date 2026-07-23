@@ -1207,17 +1207,23 @@ impl MapRender {
         }
     }
 
-    /// The world-space yaw a bound entity's grid contributes about +z, added
-    /// to a billboard's own facing so the sprite turns with its hull. Zero for
-    /// unbound entities (and for an un-rotated grid).
-    fn grid_yaw(&self, e: EntityId) -> f64 {
-        self.entity_grid
-            .get(&e)
-            .and_then(|&g| self.scene.grid(g))
-            .map_or(0.0, |grid| {
-                let (axis, angle) = grid.transform.rotation.to_axis_angle();
-                angle * axis.z.signum()
-            })
+    /// A bound entity's billboard facing turned by its grid's *full* 3D
+    /// rotation: the billboard's world facing direction rotated by the grid
+    /// quaternion, then re-projected onto the horizontal plane. Honest for any
+    /// orientation — a cylindrical billboard can only yaw, so a hull's pitch and
+    /// roll fold into the projected heading rather than being silently dropped
+    /// (the old `grid_yaw` collapsed the quaternion to a z-only scalar, which was
+    /// wrong the moment the hull left pure-yaw). Returns `world_yaw` unchanged
+    /// for an unbound entity or an un-rotated grid.
+    fn grid_facing_yaw(&self, e: EntityId, world_yaw: f64) -> f64 {
+        match self.entity_grid.get(&e).and_then(|&g| self.scene.grid(g)) {
+            Some(grid) => {
+                let dir =
+                    grid.transform.rotation * DVec3::new(world_yaw.cos(), world_yaw.sin(), 0.0);
+                dir.y.atan2(dir.x)
+            }
+            None => world_yaw,
+        }
     }
 
     /// Rebuild the sprite instances from the live world: one sprite per
@@ -1260,11 +1266,12 @@ impl MapRender {
                     // A directional billboard actor: seat its bottom-centre
                     // pivot on the surface (plus the model's `model_drop`
                     // offset, world +z = down); facing comes from the script.
-                    let yaw = self
-                        .entity_actors
-                        .get(&e)
-                        .map_or(0.0, |a| facing_to_world_yaw(a.facing))
-                        + self.grid_yaw(e);
+                    let yaw = self.grid_facing_yaw(
+                        e,
+                        self.entity_actors
+                            .get(&e)
+                            .map_or(0.0, |a| facing_to_world_yaw(a.facing)),
+                    );
                     let drop = self.actors.get(ai).map_or(0.0, |a| a.drop);
                     self.actor_targets.push((
                         e,
@@ -2105,6 +2112,27 @@ impl HostBridge for MapRender {
         // an out-of-range handle is ignored, matching `voxel_fill_in`.
         if let Some(&id) = usize::try_from(grid).ok().and_then(|i| self.grids.get(i)) {
             self.entity_grid.insert(e, id);
+        }
+    }
+
+    fn grid_orient(&mut self, grid: i64, axis: FixedVec3, angle: Fixed) {
+        // Resolve the handle as `voxel_fill_in`/`entity_set_grid` do.
+        let Some(&id) = usize::try_from(grid).ok().and_then(|i| self.grids.get(i)) else {
+            return;
+        };
+        // Build a full 3D rotation from axis + angle. The axis is in the grid's
+        // LOCAL frame (the same frame `voxel_fill_in` paints in); glam requires a
+        // unit axis, so normalise here and drop a zero-length one (leaves the
+        // pose unchanged). The whole pose is replaced each call, so the script
+        // drives orientation from hashed sim state and never accumulates float
+        // drift render-side. Origin is untouched — the grid still turns about its
+        // local origin (pivot compensation is a later concern).
+        let a = DVec3::new(axis.x.to_f64(), axis.y.to_f64(), axis.z.to_f64());
+        let Some(unit) = a.try_normalize() else {
+            return;
+        };
+        if let Some(g) = self.scene.grid_mut(id) {
+            g.transform.rotation = DQuat::from_axis_angle(unit, angle.to_f64());
         }
     }
 
@@ -3041,10 +3069,12 @@ mod tests {
         let (wx, wy, wz) = (4_i64, 3_i64, 0_i64);
         let g = r.grid_spawn(wx, wy, wz);
         let gid = r.grids[g as usize];
-        // Turn the hull a quarter-turn about world +z (no `grid_rotate` API yet;
-        // poke the transform as a future one would — same as the fog test).
-        let grid_rot = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
-        r.scene.grid_mut(gid).expect("grid").transform.rotation = grid_rot;
+        // Turn the hull a quarter-turn about local +z via the real API.
+        r.grid_orient(
+            g,
+            FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::from_int(1)),
+            Fixed::from_f64(std::f64::consts::FRAC_PI_2),
+        );
         let (origin, rotation) = {
             let t = &r.scene.grid(gid).expect("grid").transform;
             (t.origin, t.rotation)
@@ -3091,6 +3121,37 @@ mod tests {
         assert!(
             has(gx, gy),
             "unbound entity seats at the bare global column"
+        );
+    }
+
+    /// `grid_orient` sets a *full* 3D rotation, not a yaw: a quarter-turn about
+    /// the local +x axis (a pitch) lifts an in-plane point out of the horizontal
+    /// plane — something a z-only "yaw" scalar could never express. A zero-length
+    /// axis defines no rotation and is ignored (the pose is left untouched).
+    #[test]
+    fn grid_orient_is_a_full_3d_rotation() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn(0, 0, 0);
+        let gid = r.grids[g as usize];
+
+        // Pitch 90° about local +x: +y turns onto +z (out of the horizontal plane).
+        r.grid_orient(
+            g,
+            FixedVec3::new(Fixed::from_int(1), Fixed::ZERO, Fixed::ZERO),
+            Fixed::from_f64(std::f64::consts::FRAC_PI_2),
+        );
+        let turned = r.scene.grid(gid).expect("grid").transform.rotation * DVec3::Y;
+        assert!(
+            turned.z.abs() > 0.9,
+            "a pitch about +x lifts +y out of the horizontal plane, got {turned:?}"
+        );
+
+        // A zero-length axis can't define a rotation — leave the pose as it was.
+        r.grid_orient(g, FixedVec3::ZERO, Fixed::from_f64(1.0));
+        let after = r.scene.grid(gid).expect("grid").transform.rotation * DVec3::Y;
+        assert!(
+            (after - turned).length() < 1e-9,
+            "a zero-length axis is ignored — pose unchanged"
         );
     }
 

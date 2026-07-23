@@ -17,7 +17,7 @@
 //! Later slices bolt the roxlap-0.30 view/visibility seams onto this frame:
 //! wall cutout, deck clip, fog of war (docs/plans/ship-visibility.md).
 //!
-//! Archetypes register in order, so ids are fixed: CREW = 0.
+//! Archetypes register in order, so ids are fixed: CREW = 0, SHIP = 1.
 //! Model ids by `model_actor` order: crew = 0.
 
 // --- tuning (all fixed-point; no_float Rhai forbids IEEE) ---------------
@@ -209,12 +209,21 @@ fn try_move(e, vx, vy, cz) {
 }
 
 // --- setup --------------------------------------------------------------
-// Archetype id by registration order: CREW = 0. Model id by `model_actor`
-// order: crew = 0.
+// Archetype id by registration order: CREW = 0, SHIP = 1. Model id by
+// `model_actor` order: crew = 0.
 fn init() {
     // Crew: movement intent (ix/iy), last facing yaw, current deck (0 lower /
     // 1 upper — follows z on the stairwell ramp).
     archetype(["ix", "iy", "face", "deck"]);
+
+    // Ship: the hull's 3D orientation as a spin angle (radians) about a fixed
+    // tumble axis. HASHED sim state, so every peer turns the hull identically —
+    // the crew ride it via grid-local coords, so the hull's motion is real
+    // shared gameplay, not decoration. Archetype id 1 (after CREW = 0); one ship
+    // entity, created here and advanced each tick by `step_ship`.
+    archetype(["spin"]);
+    let ship = entity_create(1);
+    entity_set_field(ship, "spin", fixed(0));
 
     set_light(vec3(ratio(-4, 10), ratio(-3, 10), ratio(8, 10)), ratio(8, 10));
     // Space outside the hull: a starfield panorama behind the scene. Unpainted
@@ -328,8 +337,8 @@ fn ensure_crew(player) {
         entity_set_field(c, "deck", fixed(0));
         entity_set_model(c, 0); // crew actor model
         // Ride the hull grid: the crew's sim position is grid-local, composed
-        // through the hull's transform when drawn, so they stay seated as it
-        // moves/turns (host_api 8). At (0,0,0) identity today this is a no-op.
+        // through the hull's transform when drawn, so they stay seated as the
+        // hull turns (`step_ship` spins it in 3D; host_api 8).
         entity_set_grid(c, hull_grid());
         entity_set_anim(c, "idle");
     }
@@ -357,11 +366,37 @@ fn command(player, verb, target, arg) {
 
 // --- one simulation tick ------------------------------------------------
 fn tick() {
+    step_ship();
     for c in entities_of(0) {
         step_crew(c);
     }
     follow_camera();
     build_deck_hud();
+}
+
+/// Advance and apply the hull's 3D rotation. The spin angle is HASHED sim state
+/// (an entity field), so every peer turns the hull identically; the crew ride it
+/// via grid-local coords, so this is real shared motion, not decoration. The
+/// hull tumbles slowly about a TILTED axis (not pure yaw) to exercise full 3D
+/// orientation — pitch/roll, not merely a flat spin. It turns about the grid's
+/// local origin (a hull corner) for now; spinning about the hull centre is a
+/// later pivot-compensation pass (see docs/plans/ship-visibility.md).
+fn step_ship() {
+    let ships = entities_of(1);
+    if ships.is_empty() {
+        return;
+    }
+    let ship = ships[0];
+    let spin = entity_field(ship, "spin") + ratio(2, 100); // rad / tick (30 Hz)
+    // Wrap so the fixed-point angle never grows without bound.
+    if spin > tau() {
+        spin = spin - tau();
+    }
+    entity_set_field(ship, "spin", spin);
+    // Tilted tumble axis (host normalises it): mostly +z (yaw) with a +x lean,
+    // so the hull visibly rolls in 3D rather than spinning flat. The whole pose
+    // is replaced each tick from the hashed angle — no render-side accumulation.
+    grid_orient(hull_grid(), vec3(ratio(3, 10), fixed(0), fixed(1)), spin);
 }
 
 /// Always-on HUD readout of the LOCAL crew's current deck, so climbing the

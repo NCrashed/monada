@@ -520,6 +520,16 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     );
 
     let b = bridge.clone();
+    engine.register_fn(
+        "grid_orient",
+        move |grid: i64, axis: FixedVec3, angle: Fixed| {
+            b.lock()
+                .expect("bridge mutex")
+                .grid_orient(grid, axis, angle);
+        },
+    );
+
+    let b = bridge.clone();
     engine.register_fn("voxel_set", move |x: i64, y: i64, z: i64, color: i64| {
         b.lock().expect("bridge mutex").voxel_set(x, y, z, color);
     });

@@ -63,8 +63,9 @@ pub use volume::VolumeStore;
 /// terrain contact (the material-0 contract on `register_physics_api`);
 /// 9 = `phys_drill_tool`/`phys_drill` (the one-call drill loop, digger
 /// D3); 10 = `atan2` + `phys_material_color` (digger D4 polish);
-/// 11 = `entity_set_grid` (entities ride a grid's transform — crew stay
-/// put on a moving/rotating hull).
+/// 11 = `entity_set_grid` + `grid_orient` (entities ride a grid's
+/// transform, which can turn to any 3D orientation — crew stay put on a
+/// moving/rotating hull).
 pub const HOST_API_VERSION: u32 = 11;
 
 /// The oldest declared `host_api` requirement this build still fully
@@ -259,6 +260,15 @@ pub trait HostBridge: Send {
         _color: i64,
     ) {
     }
+
+    /// Turn a `grid_spawn` grid to a 3D orientation: `angle` radians about the
+    /// (unit-normalised) `axis`, replacing the grid's current rotation — so a
+    /// hull can pitch, roll and yaw, not merely spin about vertical. Entities
+    /// bound to the grid via [`entity_set_grid`](Self::entity_set_grid) and its
+    /// fog/`deck_clip` ride the new pose. Render-side, not hashed; a zero-length
+    /// axis or out-of-range handle is ignored. The default ignores it.
+    fn grid_orient(&mut self, _grid: i64, _axis: FixedVec3, _angle: Fixed) {}
+
     /// Mark `entity` as the locally selected one (a highlight overlay),
     /// REPLACING any current selection (single-select semantics — the
     /// chess-era contract).
