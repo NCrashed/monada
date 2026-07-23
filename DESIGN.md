@@ -355,30 +355,40 @@ and Unreal (Blueprints → BP VM) architectures.
 ships with hand-written Rhai; the editor is the first major
 deliverable after the engine itself proves out.
 
-### 3.6 Voxel physics (post-v0)
+### 3.6 Voxel physics
 
-Off the v0 critical path, but the architecture direction is
-committed now so M0's sim types and tick contracts do not
-foreclose it:
+Off the v0 critical path; implementation began post-v0 (the "M7+"
+slot of §7) and is planned in detail in
+`docs/plans/voxel-physics.md` (milestones P0–P6). The original
+sketch here predated the sim/render wall (§3.1, the M4 HostBridge
+seam) and has been amended to respect it — sim code never reads
+render state, so physics cannot lean on roxlap grids or chunk
+bitmaps as its source of truth:
 
-- **Rigid bodies** are voxel grids (their own `roxlap_scene::Grid`)
-  with a fixed-point centre-of-mass, mass tensor (precomputed from
-  the voxel volume at load), linear velocity, and angular velocity.
-  Translation and rotation update at sim tick rate.
-- **Collision** is voxel-vs-voxel grid intersection. roxlap-scene's
-  chunked storage supplies broadphase via chunk occupancy bitmaps;
-  narrowphase marches one grid's voxels through the other's chunks.
-  All arithmetic is fixed-point.
-- **Destruction** carves voxels from the impacted grid at the
-  contact patch via `roxlap_formats::edit::*`. Connected-component
-  analysis spawns new grids for separated chunks.
-- Fluids, soft bodies, and cloth are not in scope at any milestone
-  before M7. A voxel-cellular-automaton approach is the planned
-  vehicle if and when those land (same fixed-point grid + tick
-  loop, no new arithmetic regime).
-
-Implementation begins no earlier than M7; the architecture appears
-here so the v0 type contracts do not accidentally exclude it.
+- **Rigid bodies** own a sim-side voxel occupancy (dense bitset +
+  per-voxel materials over the body-local AABB) with a fixed-point
+  centre-of-mass, inertia tensor (derived from the voxel volume,
+  updated incrementally on edits), linear velocity, and angular
+  velocity. Translation and rotation update at sim tick rate. Each
+  body is mirrored render-side as its own grid (the multi-grid
+  `grid_spawn` seam); the mirror is pose-updated per frame and is
+  never read back.
+- **Collision** is voxel-native and fixed-point throughout:
+  broadphase is a uniform spatial hash on integer cell coords with
+  sorted-key iteration; narrowphase runs each body's cached
+  surface-voxel sphere skin against the terrain's `VoxelField` (and
+  skin-vs-skin for body pairs), with contact normals from the local
+  occupancy gradient.
+- **Destruction** removes voxels from the body's sim-side occupancy
+  at the contact patch; connected-component analysis splits
+  separated clusters into new bodies (sub-threshold clusters become
+  debris events). The engine carves the render mirror via
+  `roxlap_formats::edit::*` in response — render is a consumer of
+  destruction events, not a participant.
+- Fluids, soft bodies, and cloth stay out of scope. A
+  voxel-cellular-automaton approach is the planned vehicle if and
+  when those land (same fixed-point grid + tick loop, no new
+  arithmetic regime).
 
 ## 4. Workspace layout
 
@@ -393,7 +403,7 @@ crates:
 | `monada-net` | Lockstep transport. Per-tick input bundling, command-delay scheduling, desync hash exchange, reconnect, spectators. `tokio` + `quinn` (QUIC) on native, WebTransport (or WebSocket fallback) on wasm. |
 | `monada-render` | Sim → roxlap-scene translator. Per-frame interpolation, picking, egui HUD compositor. Depends on `roxlap-core`, `roxlap-scene`, `roxlap-formats`. |
 | `monada-voxvideo` | Voxel-video format — codec + decoder for the KV6-delta frame-stream described in §3.2. Standalone, reusable outside the engine (e.g. for an offline FX renderer). |
-| `monada-physics` | Voxel-rigid-body solver (§3.6). Post-v0; lives in the workspace from M0 as an empty crate so the API contracts are visible to `monada-sim`'s archetype design. |
+| `monada-physics` | Voxel-rigid-body solver (§3.6). In progress per `docs/plans/voxel-physics.md` (P0–P6); lived in the workspace from M0 as an empty crate so the API contracts stayed visible to `monada-sim`'s archetype design. |
 | `monada-host` | Native binary. winit + softbuffer + monada-render + monada-net glue. Mirrors `roxlap-host` / `roxlap-cave-demo`. |
 | `monada-web` | wasm32 binary. Same as `monada-host` but with web transport. Mirrors `roxlap-web`. |
 | `monada-format` | Map archive read/write (tar.zst), manifest schema, asset bundling, integrity hashing. |
