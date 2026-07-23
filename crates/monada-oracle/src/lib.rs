@@ -578,19 +578,48 @@ pub fn rts_checkpoints() -> Vec<Checkpoint> {
     out
 }
 
-/// The physics-crate golden: a bare [`PhysicsWorld`] at the engine-
-/// default 25 Hz, stepped through the standard checkpoints. Like
-/// `kernel@` it is pure Rust with no scripting — the P0 anchor that
-/// gates `monada-physics`'s state layout, canonical hash, and fixed-
-/// timestep arithmetic cross-platform before any body exists
-/// (docs/plans/voxel-physics.md §5). Later milestones grow this
-/// scenario (P1 adds a ballistic body, P3 a vehicle, P4 a destruction
+/// The physics-crate golden: a [`PhysicsWorld`] at the engine-default
+/// 25 Hz under gravity, with two free P1 bodies — a spinning ballistic
+/// one carrying a *rotated* (non-diagonal) inertia tensor so the
+/// `FixedMat3` hash fold is warmed by real data, and a drifting one —
+/// stepped through the standard checkpoints. Like `kernel@` it is pure
+/// Rust with no scripting: the anchor that gates `monada-physics`'s
+/// state layout, canonical hash, and integrator arithmetic
+/// cross-platform (docs/plans/voxel-physics.md §5). Later milestones
+/// grow this scenario (P2 adds contact, P3 a vehicle, P4 a destruction
 /// script), each growth re-blessed explicitly.
 ///
 /// [`PhysicsWorld`]: monada_physics::PhysicsWorld
 #[must_use]
 pub fn phys_checkpoints() -> Vec<Checkpoint> {
-    let mut world = monada_physics::PhysicsWorld::new(25);
+    use monada_fixed::{FixedMat3, FixedQuat};
+    use monada_physics::{BodyDef, PhysicsWorld};
+
+    let fx = Fixed::from_int;
+    let v3 = |x: i32, y: i32, z: i32| FixedVec3::new(fx(x), fx(y), fx(z));
+
+    let mut world = PhysicsWorld::new(25);
+    world.set_gravity(v3(0, 0, -10));
+
+    // A box-ish inertia diag(2, 3, 4) rotated off-axis: R · D · Rᵀ.
+    let r = FixedMat3::from_quat(FixedQuat::from_axis_angle(
+        v3(1, 1, 0),
+        Fixed::from_ratio(1, 2),
+    ));
+    let rotated_inertia = r * FixedMat3::from_diagonal(v3(2, 3, 4)) * r.transpose();
+    world.spawn(&BodyDef {
+        position: v3(0, 0, 100),
+        linear_velocity: v3(5, 3, 20),
+        angular_velocity: v3(1, 2, -1),
+        mass: fx(3),
+        inertia_body: rotated_inertia,
+        orientation: FixedQuat::IDENTITY,
+    });
+    world.spawn(&BodyDef {
+        position: v3(-40, 25, 200),
+        linear_velocity: v3(-1, 1, 0),
+        ..BodyDef::default()
+    });
 
     let mut prev = 0;
     let mut out = Vec::with_capacity(TICK_CHECKPOINTS.len());

@@ -2,13 +2,47 @@
 //! property and hash sanity. Cross-platform bit-identity is the
 //! oracle's job (`phys@` goldens); these run in the plain test matrix.
 
-use monada_physics::PhysicsWorld;
+use monada_fixed::{Fixed, FixedMat3, FixedQuat, FixedVec3};
+use monada_physics::{BodyDef, PhysicsWorld};
+
+/// A world with real P1 content: gravity, a spinning ballistic body,
+/// a drifting one — so the snapshot covers every serialized field,
+/// including the `inv_*` caches.
+fn populated_world() -> PhysicsWorld {
+    let mut world = PhysicsWorld::new(25);
+    world.set_gravity(FixedVec3::new(
+        Fixed::ZERO,
+        Fixed::ZERO,
+        Fixed::from_int(-10),
+    ));
+    world.spawn(&BodyDef {
+        position: FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::from_int(100)),
+        linear_velocity: FixedVec3::new(
+            Fixed::from_int(5),
+            Fixed::from_int(3),
+            Fixed::from_int(20),
+        ),
+        angular_velocity: FixedVec3::new(Fixed::ONE, Fixed::from_int(2), Fixed::NEG_ONE),
+        mass: Fixed::from_int(3),
+        inertia_body: FixedMat3::from_diagonal(FixedVec3::new(
+            Fixed::from_int(2),
+            Fixed::from_int(3),
+            Fixed::from_int(4),
+        )),
+        orientation: FixedQuat::IDENTITY,
+    });
+    world.spawn(&BodyDef {
+        linear_velocity: FixedVec3::new(Fixed::NEG_ONE, Fixed::ONE, Fixed::ZERO),
+        ..BodyDef::default()
+    });
+    world
+}
 
 /// Snapshot → restore → continue must match the uninterrupted run,
 /// bit-for-bit, from any tick.
 #[test]
 fn snapshot_restore_continue_matches_uninterrupted() {
-    let mut world = PhysicsWorld::new(25);
+    let mut world = populated_world();
     for tick in 0..300u64 {
         if tick % 37 == 0 {
             let json = serde_json::to_string(&world).expect("serialize");

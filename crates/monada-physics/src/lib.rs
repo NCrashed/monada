@@ -10,9 +10,18 @@
 //! render state — bodies are mirrored to roxlap grids by the engine.
 //!
 //! Built milestone by milestone (P0–P6, see the plan). Currently at
-//! **P0**: the deterministic shell — [`PhysicsWorld`] with a fixed
-//! timestep, canonical [`state_hash`](PhysicsWorld::state_hash), serde
-//! snapshots, and the `phys@` oracle golden gating it in CI.
+//! **P1**: free rigid bodies — semi-implicit Euler under uniform
+//! gravity, quaternion orientation integration, no collisions — on top
+//! of P0's deterministic shell (fixed timestep, canonical
+//! [`state_hash`](PhysicsWorld::state_hash), serde snapshots, the
+//! `phys@` oracle golden gating it in CI).
+//!
+//! ## Units
+//!
+//! Sim space throughout: positions in voxels (z-up), linear velocity
+//! voxels/s, angular velocity radians/s (world frame), gravity
+//! voxels/s², `dt` seconds. Mass units are map-defined — only ratios
+//! reach the dynamics.
 
 #![forbid(unsafe_code)]
 // The same determinism guardrails as monada-sim (DESIGN.md §3.1):
@@ -20,6 +29,10 @@
 // simulation code, not just workspace warnings.
 #![deny(clippy::float_arithmetic, clippy::disallowed_types)]
 
+mod body;
+mod ids;
 mod world;
 
+pub use body::{BodyDef, RigidBody};
+pub use ids::BodyId;
 pub use world::PhysicsWorld;

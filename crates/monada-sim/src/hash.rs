@@ -128,6 +128,27 @@ impl StateHash for monada_fixed::FixedVec2 {
     }
 }
 
+impl StateHash for monada_fixed::FixedQuat {
+    /// Field order `(x, y, z, w)` — the type's storage order.
+    #[inline]
+    fn hash(&self, h: &mut StateHasher) {
+        self.x.hash(h);
+        self.y.hash(h);
+        self.z.hash(h);
+        self.w.hash(h);
+    }
+}
+
+impl StateHash for monada_fixed::FixedMat3 {
+    /// Columns in storage order.
+    #[inline]
+    fn hash(&self, h: &mut StateHasher) {
+        self.x_axis.hash(h);
+        self.y_axis.hash(h);
+        self.z_axis.hash(h);
+    }
+}
+
 impl<T: StateHash> StateHash for [T] {
     /// Length-prefixed so `[a]` and `[a, a]` cannot collide.
     fn hash(&self, h: &mut StateHasher) {
