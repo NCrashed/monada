@@ -586,6 +586,14 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").vision_observer(entity);
     });
 
+    // 2-arg overload (host_api 7): fog rides the named grid_spawn grid.
+    let b = bridge.clone();
+    engine.register_fn("vision_observer", move |entity: i64, grid: i64| {
+        b.lock()
+            .expect("bridge mutex")
+            .vision_observer_in(entity, grid);
+    });
+
     let b = bridge.clone();
     engine.register_fn(
         "vision_config",

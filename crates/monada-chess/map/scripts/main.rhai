@@ -41,8 +41,6 @@
 //   submit_command(verb, target, arg)             queue a move
 
 fn init() {
-    grid_spawn(0, 0, 0); // world grid for board painting
-
     let piece = archetype(["kind", "color"]); // id 0
     let game = archetype(["to_move", "winner", "castle", "ep_x", "ep_y", "halfmove"]); // id 1
 

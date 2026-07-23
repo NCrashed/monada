@@ -46,7 +46,8 @@ pub use rhai_backend::RhaiBackend;
 /// `vision_hear` (ship demo, docs/plans/ship-visibility.md); 5 =
 /// `highlight_add`/`highlighted_all`/`drag_begin`/`drag_end` (RTS
 /// multi-select); 6 = `voxel_clear` (destructibles — RTS tree felling,
-/// ship doors); 7 = `grid_spawn`/`voxel_fill_in` (multi-grid ships).
+/// ship doors); 7 = `grid_spawn`/`voxel_fill_in` + `vision_observer`'s
+/// grid overload (multi-grid ships).
 pub const HOST_API_VERSION: u32 = 7;
 
 /// The oldest declared `host_api` requirement this build still fully
@@ -300,8 +301,10 @@ pub trait HostBridge: Send {
     /// block collision + vision. Render-side only; the default ignores it.
     fn camera_cutout(&mut self, _radius: Fixed, _feather: Fixed) {}
 
-    /// Show only the deck band `z_lo..=z_hi` (sim z) of the world grid, cutting
-    /// away everything ABOVE it (a ceiling / upper-deck cutaway) so the camera
+    /// Show only the deck band `z_lo..=z_hi` (sim z) of the vision grid (the
+    /// grid named by [`vision_observer`](Self::vision_observer), else the world
+    /// grid), cutting away everything ABOVE it (a ceiling / upper-deck cutaway)
+    /// so the camera
     /// sees into the deck the crew stands on. Maps to roxlap's `Grid::z_clip`
     /// (the engine clips one side — the top of the band). Call it with the
     /// local crew's deck band; a band whose top is the tallest thing in the
@@ -316,6 +319,14 @@ pub trait HostBridge: Send {
     /// — declare the LOCAL crew member (`local_player()`'s entity), so each peer
     /// sees its own line of sight. Render-side only; the default ignores it.
     fn vision_observer(&mut self, _entity: i64) {}
+    /// Like [`vision_observer`](Self::vision_observer) but against a specific
+    /// [`grid_spawn`](Self::grid_spawn) grid (`grid` handle) instead of the world
+    /// grid — the ship demo's hull, so fog + `deck_clip` ride the crew's own
+    /// (movable) grid. The mask is grid-local. `host_api` 7. Render-side only;
+    /// the default delegates to [`vision_observer`](Self::vision_observer).
+    fn vision_observer_in(&mut self, entity: i64, _grid: i64) {
+        self.vision_observer(entity);
+    }
     /// Tune the observer's vision: facing-cone half-angle (`cone_deg` degrees),
     /// cone reach and 360° peripheral reach (`range`/`peripheral` cells). Sets
     /// roxlap's `VisionConfig`. Render-side only; the default ignores it.

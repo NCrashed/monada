@@ -153,12 +153,13 @@ collision queries above.
 
 ## Dynamic grids — *presentation*
 
-Spawn and paint additional voxel grids independent of the world grid (e.g. ships, moving platforms). Render-only: dynamic grids do not feed collision.
+Spawn and paint additional voxel grids independent of the world grid (e.g. ships, moving platforms). Render-only: dynamic grids do not feed collision. A grid handle is render-side — never store it in `World` state or hashed `tick()` logic. A `< 0` handle means the host lacks multi-grid support (requires `host_api` 7).
 
 | Function | Result |
 |---|---|
-| `grid_spawn(wx, wy, wz)` | spawn a new grid at world position `(wx, wy, wz)`; returns an opaque grid handle (i64) |
-| `voxel_fill_in(grid, x0, y0, z0, x1, y1, z1, color)` | fill a solid box of voxels in the given dynamic grid |
+| `grid_spawn(wx, wy, wz)` | spawn a grid offset by sim cell `(wx, wy, wz)` from the world origin (`(0,0,0)` = world origin); returns a grid handle (i64), or `< 0` if unsupported |
+| `voxel_fill_in(grid, x0, y0, z0, x1, y1, z1, color)` | fill a solid box of voxels in the given dynamic grid (same coords as `voxel_fill`) |
+| `vision_observer(entity, grid)` | fog/`deck_clip` overload that rides the given dynamic grid instead of the world grid (movable hull) |
 
 ## Camera, lighting, sky — *presentation*
 

@@ -27,6 +27,11 @@
 
 fn crew_speed() { ratio(16, 100) } // sim cells / tick (30 Hz)
 
+// The hull's grid_spawn handle. It is the first (and only) grid the map spawns,
+// so its handle is 0 — written as a literal here the same way CREW = 0 is, since
+// pure functions can't see top-level consts. Fog + deck_clip ride this grid.
+fn hull_grid() { 0 }
+
 fn absf(x) { if x < fixed(0) { -x } else { x } }
 
 fn nonzero(x) { x > fixed(0) || x < fixed(0) }
@@ -216,10 +221,17 @@ fn init() {
     // cells (outside the hull) show it. Render-side (headless no-op).
     set_sky("assets/starfield.png");
 
-    // Spawn the ship's own voxel grid (separate from the world grid) so the
-    // hull can later be moved/rotated as a unit. grid_spawn returns a
-    // render-side handle; (0, 0, 0) places it at the world voxel origin.
+    // Spawn the ship's own voxel grid (separate from any world grid) so the
+    // hull can later be moved/rotated as a unit, and so the fog/deck cutaway
+    // ride the crew's own grid. grid_spawn returns a render-side handle; (0,0,0)
+    // places it at the world voxel origin. As the first (only) grid_spawn its
+    // handle is `hull_grid()` (== 0); a `< 0` return means a host without
+    // multi-grid support (host_api < 7) — the manifest requires 7, so bail loud.
     let ship_grid = grid_spawn(0, 0, 0);
+    if ship_grid < 0 {
+        status("this host lacks multi-grid support (host_api 7 required)");
+        return;
+    }
     build_hull(ship_grid);
 
     // The animated billboard crew actor (id 0 by call order). The 3rd arg is
@@ -411,8 +423,9 @@ fn follow_camera() {
     if idx < crew.len() {
         let c = crew[idx];
         camera_focus(entity_position(c));
-        // See the world through this crew member's eyes (fog of war).
-        vision_observer(c);
+        // See the world through this crew member's eyes (fog of war), against
+        // the hull's own grid so the mask stays grid-local (movable hull).
+        vision_observer(c, hull_grid());
         // Show the crew's deck band (floor..deck_top): deck 0 cuts the upper
         // deck away; deck 1 is the top band and cuts nothing.
         let d = to_int(entity_field(c, "deck"));
