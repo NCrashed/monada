@@ -252,7 +252,8 @@ fn harvest_loop_banks_gold_and_conserves_it() {
     // on the ring), mine for the visit time, carry home, bank, repeat.
     let (world, mut b) = fresh();
     let u = units(&world)[0];
-    b.on_command(P0, &harvest_cmd(&world, u, 0)).expect("harvest order");
+    b.on_command(P0, &harvest_cmd(&world, u, 0))
+        .expect("harvest order");
     ticks(&mut b, 1500);
 
     let banked = gold(&world, 0) - 100;
@@ -274,7 +275,8 @@ fn harvest_loop_banks_gold_and_conserves_it() {
 fn move_order_interrupts_the_harvest() {
     let (world, mut b) = fresh();
     let u = units(&world)[0];
-    b.on_command(P0, &harvest_cmd(&world, u, 0)).expect("harvest");
+    b.on_command(P0, &harvest_cmd(&world, u, 0))
+        .expect("harvest");
     ticks(&mut b, 400); // deep in the loop by now
     b.on_command(P0, &move_cmd(u, 20, 24)).expect("countermand");
     ticks(&mut b, 400);
@@ -308,9 +310,7 @@ fn training_costs_gold_and_stops_at_an_empty_purse() {
         guard
             .entities(UNIT)
             .iter()
-            .filter(|&&e| {
-                guard.field(e, "owner").expect("owner").to_f64() as i64 == 0
-            })
+            .filter(|&&e| guard.field(e, "owner").expect("owner").to_f64() as i64 == 0)
             .count()
     };
     assert_eq!(p0_units(&world), 4, "trained worker delivered");
@@ -336,8 +336,11 @@ fn attack_cmd(unit: EntityId, victim: EntityId) -> Command {
 /// Train one soldier for `player` and hand back its id (the newest unit).
 fn train_soldier(world: &SharedWorld, b: &mut RhaiBackend, player: PlayerId) -> EntityId {
     let before = units(world).len();
-    b.on_command(player, &Command::on(VERB_TRAIN_SOLDIER, EntityId(0), FixedVec3::ZERO))
-        .expect("train soldier");
+    b.on_command(
+        player,
+        &Command::on(VERB_TRAIN_SOLDIER, EntityId(0), FixedVec3::ZERO),
+    )
+    .expect("train soldier");
     ticks(b, 120);
     let after = units(world);
     assert_eq!(after.len(), before + 1, "soldier delivered");
@@ -356,9 +359,11 @@ fn soldier_hunts_down_an_ordered_victim() {
 
     // March both toward the middle; then the kill order.
     b.on_command(P0, &move_cmd(soldier, 24, 24)).expect("march");
-    b.on_command(P1, &move_cmd(victim, 26, 30)).expect("victim walks");
+    b.on_command(P1, &move_cmd(victim, 26, 30))
+        .expect("victim walks");
     ticks(&mut b, 450);
-    b.on_command(P0, &attack_cmd(soldier, victim)).expect("attack order");
+    b.on_command(P0, &attack_cmd(soldier, victim))
+        .expect("attack order");
     ticks(&mut b, 600);
     assert!(
         !units(&world).contains(&victim),
@@ -373,9 +378,11 @@ fn idle_soldier_auto_acquires() {
     let (world, mut b) = fresh();
     let wanderer = units(&world)[3]; // P1 worker
     let soldier = train_soldier(&world, &mut b, P0);
-    b.on_command(P0, &move_cmd(soldier, 24, 24)).expect("post the guard");
+    b.on_command(P0, &move_cmd(soldier, 24, 24))
+        .expect("post the guard");
     ticks(&mut b, 450);
-    b.on_command(P1, &move_cmd(wanderer, 22, 22)).expect("wander past");
+    b.on_command(P1, &move_cmd(wanderer, 22, 22))
+        .expect("wander past");
     ticks(&mut b, 700);
     assert!(
         !units(&world).contains(&wanderer),
@@ -398,17 +405,15 @@ fn felling_a_tree_opens_its_cell() {
             .expect("the (24,14) tree stands")
     };
     let soldier = train_soldier(&world, &mut b, P0);
-    b.on_command(P0, &attack_cmd(soldier, tree)).expect("chop order");
+    b.on_command(P0, &attack_cmd(soldier, tree))
+        .expect("chop order");
     ticks(&mut b, 800); // march + 3 swings (30 hp / 10 dmg)
-    assert_eq!(
-        world.lock().unwrap().count(TREE),
-        9,
-        "the tree fell"
-    );
+    assert_eq!(world.lock().unwrap().count(TREE), 9, "the tree fell");
 
     // The cell is open now: an order INTO it arrives (R-B's parking test
     // proves the same order used to stop adjacent).
-    b.on_command(P0, &move_cmd(soldier, 24, 14)).expect("walk the stump");
+    b.on_command(P0, &move_cmd(soldier, 24, 14))
+        .expect("walk the stump");
     ticks(&mut b, 300);
     let p = pos(&world, soldier);
     assert!(
@@ -433,7 +438,8 @@ fn razing_the_hall_wins_the_game() {
             .expect("P1 hall stands")
     };
     let soldier = train_soldier(&world, &mut b, P0);
-    b.on_command(P0, &attack_cmd(soldier, p1_hall)).expect("siege order");
+    b.on_command(P0, &attack_cmd(soldier, p1_hall))
+        .expect("siege order");
     // March across the map + 30 swings (300 hp / 10 dmg / 1 s cd) ≈ 1900 ticks.
     ticks(&mut b, 2600);
     let w = world.lock().unwrap();
@@ -459,9 +465,7 @@ fn a_group_arrives_as_a_crowd_not_a_stack() {
     ticks(&mut b, 800);
     for (i, &u) in us[0..3].iter().enumerate() {
         let p = pos(&world, u);
-        let d = (p.x.to_f64() - 24.0)
-            .abs()
-            .max((p.y.to_f64() - 24.0).abs());
+        let d = (p.x.to_f64() - 24.0).abs().max((p.y.to_f64() - 24.0).abs());
         assert!(d < 2.5, "unit {i} settled near the rally (off by {d:.2})");
         assert_eq!(field(&world, u, "has_dest"), 0, "unit {i} settled");
     }

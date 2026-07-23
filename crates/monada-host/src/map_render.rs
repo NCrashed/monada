@@ -21,7 +21,7 @@ use image::AnimationDecoder;
 
 use crate::autotile;
 use crate::bindings::{MapActionStates, MapActionValue, Part};
-use glam::{DVec3, IVec3, IVec2, Vec2};
+use glam::{DQuat, DVec3, IVec2, IVec3, Vec2};
 use monada_fixed::{Fixed, FixedVec3};
 use monada_format::ActionDecl;
 use monada_render::OrbitCamera;
@@ -340,6 +340,28 @@ fn world_of(p: FixedVec3) -> DVec3 {
     )
 }
 
+/// Map an inclusive sim-cell region `(x0,y0,z0)..=(x1,y1,z1)` to its world
+/// voxel box `(lo, hi)` for `Grid::set_rect`. World X is mirrored (see
+/// `world_of`): sim cell x occupies world X `[-(x+1)·SCALE, -x·SCALE)`, so the
+/// box flips and swaps its X bounds. World z grows DOWN while sim z is height
+/// above the floor, so sim height z sits at world `GROUND_Z - z` — a taller
+/// fill (larger `z1`) reaches further up (smaller world z), hence `z1` feeds
+/// `lo.z` and `z0` feeds `hi.z`. `voxel_fill`/`voxel_fill_in`/`voxel_set`/
+/// `voxel_clear` all share this transform so it lives in exactly one place
+/// (`voxel_set` passes a degenerate 1-cell region; `voxel_clear` a 1-column,
+/// z-spanning one).
+fn sim_box_to_world(x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64) -> (IVec3, IVec3) {
+    let s = SCALE as i64;
+    let gz = GROUND_Z as i64;
+    let lo = IVec3::new((-(x1 + 1) * s) as i32, (y0 * s) as i32, (gz - z1) as i32);
+    let hi = IVec3::new(
+        (-x0 * s - 1) as i32,
+        ((y1 + 1) * s - 1) as i32,
+        (gz - z0) as i32,
+    );
+    (lo, hi)
+}
+
 /// The `Grid::z_clip` value that cuts everything ABOVE sim band top `z_hi` (a
 /// deck cutaway). CRITICAL: `z_clip` is in **grid-local voxel z** — where
 /// `voxel_fill`/`voxel_set` actually place voxels, `GROUND_Z - sim_z`,
@@ -398,8 +420,21 @@ fn ground_hit(origin: DVec3, dir: DVec3) -> Option<DVec3> {
 /// [`SharedBridge`](monada_script::SharedBridge) for the Rhai engine.
 pub struct MapRender {
     scene: Scene,
-    /// The world grid the map paints (board / terrain).
-    grid: GridId,
+    /// The world / terrain grid, painted by `voxel_fill`/`voxel_set`/`tile_fill`/
+    /// autotile. Lazily created at the world origin on the first paint call (see
+    /// [`world_grid`](Self::world_grid)) so a map that paints terrain never needs
+    /// to spawn a grid explicitly, and old maps keep working. `None` until then.
+    world_grid: Option<GridId>,
+    /// Grids spawned by the script via `grid_spawn` (e.g. the ship demo's hull).
+    /// The script's i64 handle is the index into this Vec; never reordered or
+    /// compacted so handles stay stable. Painted by `voxel_fill_in`. Kept
+    /// separate from [`world_grid`](Self::world_grid) so terrain/fog never attach
+    /// to a decorative grid.
+    grids: Vec<GridId>,
+    /// The grid the fog of war and `deck_clip` cutaway attach to — the local
+    /// observer's hull (a `grids` entry the ship names via `vision_observer`), or
+    /// `world_grid` for the legacy single-grid maps. `None` ⇒ no fog / no clip.
+    vision_grid: Option<GridId>,
     /// Sprite model registry (index 0 = highlight marker) + per-frame
     /// instances. Holds the box/kv6 models; actor models live in `actors`.
     sprites: SpriteSet,
@@ -566,17 +601,15 @@ pub struct UiGif {
 }
 
 impl MapRender {
-    /// A fresh bridge: one identity world grid + the reserved highlight
-    /// marker model. (Identity grid so the GPU sprite pass projects the
-    /// world camera correctly — see `monada_render`'s circle ground.)
+    /// A fresh bridge: no grids yet (scripts spawn them via `grid_spawn`) +
+    /// the reserved highlight marker model.
     #[must_use]
     pub fn new(
         assets: BTreeMap<String, Vec<u8>>,
         local_player: Option<i64>,
         actions: &[ActionDecl],
     ) -> MapRender {
-        let mut scene = Scene::new();
-        let grid = scene.add_grid(GridTransform::identity());
+        let scene = Scene::new();
         // Model 0: a flat amber selection RING circling the selected
         // entity's footprint on the ground under the sprite — the classic
         // RTS read (a multi-selected squad shows one ring per unit). Same
@@ -603,7 +636,9 @@ impl MapRender {
         };
         MapRender {
             scene,
-            grid,
+            world_grid: None,
+            grids: Vec::new(),
+            vision_grid: None,
             sprites,
             model_refs: Vec::new(),
             actors: Vec::new(),
@@ -656,12 +691,46 @@ impl MapRender {
         }
     }
 
-    /// Push the current deck cutaway onto the grid's `z_clip` (the render + the
-    /// unit test share this one apply path, so the test exercises exactly what
-    /// `render_into` does). `None` clears the clip (whole grid shown).
+    /// The world / terrain grid, creating it at the world origin on first use.
+    /// Terrain paints (`voxel_fill`/`voxel_set`/`tile_fill`/autotile) go through
+    /// here so a map never has to spawn a grid to paint a board, and old maps
+    /// keep working (an identity grid so the GPU sprite pass projects the world
+    /// camera correctly — see `monada_render`'s circle ground).
+    fn world_grid(&mut self) -> GridId {
+        *self
+            .world_grid
+            .get_or_insert_with(|| self.scene.add_grid(GridTransform::identity()))
+    }
+
+    /// The grid the fog / deck cutaway attach to: the observer's hull if the map
+    /// named one via `vision_observer`, else the world grid. `None` only when a
+    /// map has neither — i.e. never painted terrain nor named a vision grid.
+    fn vision_grid(&self) -> Option<GridId> {
+        self.vision_grid.or(self.world_grid)
+    }
+
+    /// Set the fog observer entity and the grid its mask rides. Rebuilds the mask
+    /// (drops it, so it re-arms next frame) whenever either changes — a new
+    /// observer or a switch to another hull grid both invalidate the old mask.
+    fn set_observer(&mut self, entity: i64, grid: Option<GridId>) {
+        let e = (entity >= 0).then_some(EntityId(entity as u64));
+        if e != self.vision_entity || grid != self.vision_grid {
+            self.vision_entity = e;
+            self.vision_grid = grid;
+            self.drop_fow();
+        }
+    }
+
+    /// Push the current deck cutaway onto the vision grid's `z_clip` (the render
+    /// and the unit test share this one apply path, so the test exercises exactly
+    /// what `render_into` does). `None` clears the clip (whole grid shown). Only
+    /// the vision grid is clipped, because the band is grid-local and applying it
+    /// to a grid at another origin would cut that grid at the wrong world height.
     fn apply_deck_clip(&mut self) {
-        if let Some(grid) = self.scene.grid_mut(self.grid) {
-            grid.z_clip = self.deck_clip;
+        if let Some(id) = self.vision_grid() {
+            if let Some(grid) = self.scene.grid_mut(id) {
+                grid.z_clip = self.deck_clip;
+            }
         }
     }
 
@@ -683,6 +752,24 @@ impl MapRender {
         self.vision_entity?; // no observer ⇒ no fog (guards a stale pose)
         let (feet, yaw) = self.observer_pose?;
         self.deck_band?; // a deck was declared (deck_clip ran) ⇒ vision is ready
+        let main_grid = self.vision_grid()?; // no grid yet ⇒ no fog
+                                             // Re-base the world-space observer into the vision grid's local voxel
+                                             // space: the fog mask is grid-local, so a grid spawned off the world
+                                             // origin (or a moving/turning hull) must have its viewpoint expressed
+                                             // in the grid's own frame. This is roxlap's world→grid-local map,
+                                             // `rotation.inverse() * (world - origin) / voxel_world_size`. Every
+                                             // grid we make has voxel_world_size 1, so the scale drops out; we read
+                                             // the live origin AND rotation each frame, so a hull that translates or
+                                             // yaws is tracked automatically. The identity world grid has origin 0
+                                             // and no rotation, so this is a no-op there.
+        let (grid_origin, grid_rot) = self
+            .scene
+            .grid(main_grid)
+            .map_or((DVec3::ZERO, DQuat::IDENTITY), |g| {
+                (g.transform.origin, g.transform.rotation)
+            });
+        let grid_rot_inv = grid_rot.inverse();
+        let feet = grid_rot_inv * (feet - grid_origin);
         // Build the mask once. The fog rides ONE fixed grid-local band spanning
         // the whole hull, NOT the crew's current `deck_clip` band. A staircase
         // BRIDGES two decks — its columns run from the lower floor up past the
@@ -708,15 +795,19 @@ impl MapRender {
             cfg.peripheral_range = peripheral as f32 * SCALE as f32;
             cfg.memory_decay = 2.0;
             self.fow = Some(FogOfWar::new(cfg));
-            self.fow_twin = Some(FowTwin::attach(&mut self.scene, self.grid));
+            self.fow_twin = Some(FowTwin::attach(&mut self.scene, main_grid));
             self.fow_band = self.deck_band;
         }
-        // The observer, grid-local (identity grid ⇒ grid-local == world). Facing
-        // is the crew's yaw in world xy (world_of mirrors sim +x → world -x); the
-        // eye rides a hair above the feet (z-down ⇒ a smaller grid-z).
+        // The observer, in the vision grid's local voxels (`feet` was re-based
+        // above). Facing is the crew's yaw in world xy (world_of mirrors sim +x →
+        // world -x), rotated into the grid's frame by the same `grid_rot_inv` so
+        // the cone turns with a yawing hull; the eye rides a hair above the feet
+        // (z-down ⇒ a smaller grid-z).
+        let facing_world = DVec3::new(-(yaw.cos()), yaw.sin(), 0.0);
+        let facing_local = grid_rot_inv * facing_world;
         let observer = FowObserver {
             cell: IVec2::new(feet.x.floor() as i32, feet.y.floor() as i32),
-            facing: Vec2::new(-(yaw.cos() as f32), yaw.sin() as f32),
+            facing: Vec2::new(facing_local.x as f32, facing_local.y as f32),
             deck: 0,
             // Eye near HEAD height above the feet (z-down ⇒ a smaller grid-z).
             // Two forces set this:
@@ -736,15 +827,18 @@ impl MapRender {
         // Take the mask + twin out to keep `self.scene` borrows disjoint.
         let mut fow = self.fow.take()?;
         let mut twin = self.fow_twin.take()?;
-        if let Some(grid) = self.scene.grid(self.grid) {
+        if let Some(grid) = self.scene.grid(main_grid) {
             fow.update(grid, &observer, dt as f32);
         }
         for (hx, hy, _hz, loud) in std::mem::take(&mut self.vision_hears) {
-            let w = world_of(FixedVec3::new(
-                Fixed::from_int(hx as i32),
-                Fixed::from_int(hy as i32),
-                Fixed::ZERO,
-            ));
+            // Same world→grid-local re-basing as the observer above (heard
+            // cells are grid-local too).
+            let w = grid_rot_inv
+                * (world_of(FixedVec3::new(
+                    Fixed::from_int(hx as i32),
+                    Fixed::from_int(hy as i32),
+                    Fixed::ZERO,
+                )) - grid_origin);
             fow.hear(0, IVec2::new(w.x.floor() as i32, w.y.floor() as i32), loud);
         }
         let out = if twin.sync(&mut self.scene, &fow) {
@@ -753,7 +847,7 @@ impl MapRender {
             Some(id)
         } else {
             // Twin lost (snapshot / rollback) — re-arm for next frame.
-            self.fow_twin = Some(FowTwin::attach(&mut self.scene, self.grid));
+            self.fow_twin = Some(FowTwin::attach(&mut self.scene, main_grid));
             None
         };
         self.fow = Some(fow);
@@ -1576,21 +1670,46 @@ impl HostBridge for MapRender {
     fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64) {
         // Mirror into the sim-space terrain store for collision queries.
         self.terrain.fill(x0, y0, z0, x1, y1, z1);
-        let s = SCALE as i64;
-        let g = GROUND_Z as i64;
-        // World X is mirrored (see `world_of`): sim cell x occupies world X
-        // in [-(x+1)·s, -x·s), so the rect flips and swaps its X bounds.
-        // World z grows DOWN, but sim z is height ABOVE the floor (matching
-        // `world_of` and the terrain store), so height `z` sits at world
-        // `g - z`: a taller fill (`z1 > z0`) reaches further up (smaller z).
-        let lo = IVec3::new((-(x1 + 1) * s) as i32, (y0 * s) as i32, (g - z1) as i32);
-        let hi = IVec3::new(
-            (-x0 * s - 1) as i32,
-            ((y1 + 1) * s - 1) as i32,
-            (g - z0) as i32,
-        );
-        if let Some(grid) = self.scene.grid_mut(self.grid) {
+        let (lo, hi) = sim_box_to_world(x0, y0, z0, x1, y1, z1);
+        let id = self.world_grid();
+        if let Some(grid) = self.scene.grid_mut(id) {
             grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
+        }
+    }
+
+    fn grid_spawn(&mut self, wx: i64, wy: i64, wz: i64) -> i64 {
+        // `(wx, wy, wz)` is a SIM cell offset, so the grid composes with the
+        // mirrored/scaled voxels `voxel_fill_in` paints inside it: a spawn at
+        // sim cell `wx` shifts world X by `-wx·SCALE` (world X is mirrored — see
+        // `world_of`), Y by `+wy·SCALE`, and z by `-wz` (z unscaled, z-down). At
+        // `(0, 0, 0)` this is the identity, the common world-origin case.
+        let pos = glam::DVec3::new(-(wx as f64) * SCALE, wy as f64 * SCALE, -(wz as f64));
+        let id = self.scene.add_grid(GridTransform::at(pos));
+        let idx = self.grids.len() as i64;
+        self.grids.push(id);
+        idx
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn voxel_fill_in(
+        &mut self,
+        grid: i64,
+        x0: i64,
+        y0: i64,
+        z0: i64,
+        x1: i64,
+        y1: i64,
+        z1: i64,
+        color: i64,
+    ) {
+        // Render-side only — does NOT update self.terrain. Same sim→world
+        // coordinate transform as voxel_fill (world X mirrored, z unscaled).
+        let Some(&id) = self.grids.get(grid as usize) else {
+            return;
+        };
+        let (lo, hi) = sim_box_to_world(x0, y0, z0, x1, y1, z1);
+        if let Some(g) = self.scene.grid_mut(id) {
+            g.set_rect(lo, hi, Some(VoxColor(color as u32)));
         }
     }
 
@@ -1604,14 +1723,15 @@ impl HostBridge for MapRender {
         if prev_top < z {
             return; // already clear at and above z
         }
-        let s = SCALE as i64;
-        let g = GROUND_Z as i64;
-        // Same cell→world mapping as voxel_fill (world X mirrored, world z
-        // grows down): sim heights z..=prev_top occupy world z g-prev_top..=g-z.
-        let lo = IVec3::new((-(x + 1) * s) as i32, (y * s) as i32, (g - prev_top) as i32);
-        let hi = IVec3::new((-x * s - 1) as i32, ((y + 1) * s - 1) as i32, (g - z) as i32);
-        if let Some(grid) = self.scene.grid_mut(self.grid) {
-            grid.set_rect(lo, hi, None);
+        // One column (x, y), clearing sim heights z..=prev_top — the same
+        // sim→world mapping as voxel_fill.
+        let (lo, hi) = sim_box_to_world(x, y, z, x, y, prev_top);
+        // Only clears an existing world grid — a clear before any paint is a
+        // no-op, no need to materialize an empty grid for it.
+        if let Some(id) = self.world_grid {
+            if let Some(grid) = self.scene.grid_mut(id) {
+                grid.set_rect(lo, hi, None);
+            }
         }
     }
 
@@ -1622,11 +1742,9 @@ impl HostBridge for MapRender {
         // world voxel at UNMIRRORED +x, i.e. a speck in the void on the
         // wrong side of the map, silently diverging from the collision
         // store's full-cell semantics.
-        let s = SCALE as i64;
-        let g = GROUND_Z as i64;
-        let lo = IVec3::new((-(x + 1) * s) as i32, (y * s) as i32, (g - z) as i32);
-        let hi = IVec3::new((-x * s - 1) as i32, ((y + 1) * s - 1) as i32, (g - z) as i32);
-        if let Some(grid) = self.scene.grid_mut(self.grid) {
+        let (lo, hi) = sim_box_to_world(x, y, z, x, y, z);
+        let id = self.world_grid();
+        if let Some(grid) = self.scene.grid_mut(id) {
             grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
         }
     }
@@ -1674,7 +1792,8 @@ impl HostBridge for MapRender {
         };
         let s = SCALE as i64;
         let g = GROUND_Z as i64;
-        let Some(grid) = self.scene.grid_mut(self.grid) else {
+        let world = self.world_grid();
+        let Some(grid) = self.scene.grid_mut(world) else {
             return;
         };
         for cy in y0.min(y1)..=y0.max(y1) {
@@ -1736,8 +1855,9 @@ impl HostBridge for MapRender {
             return; // no terrain set
         }
         let g = GROUND_Z as i64;
+        let world = self.world_grid(); // before the `autotiler` borrow below
         let autotiler = &self.autotiler;
-        let Some(grid) = self.scene.grid_mut(self.grid) else {
+        let Some(grid) = self.scene.grid_mut(world) else {
             return;
         };
         // Floor pixel (fx, fy) is sim-aligned; world X is mirrored (`-fx - 1`,
@@ -1919,7 +2039,8 @@ impl HostBridge for MapRender {
         // The screen-aligned quad (matches what `draw_drag_rect` drew): four
         // corners wound around the rect, so the map can point-test units in the
         // rotated box instead of a world-axis bbox.
-        let corner = |x: f64, y: f64| FixedVec3::new(Fixed::from_f64(x), Fixed::from_f64(y), Fixed::ZERO);
+        let corner =
+            |x: f64, y: f64| FixedVec3::new(Fixed::from_f64(x), Fixed::from_f64(y), Fixed::ZERO);
         drag_quad_sim(self.camera.yaw, (ax, ay), (bx, by))
             .iter()
             .map(|&(x, y)| corner(x, y))
@@ -1972,13 +2093,15 @@ impl HostBridge for MapRender {
     }
 
     fn vision_observer(&mut self, entity: i64) {
-        let e = (entity >= 0).then_some(EntityId(entity as u64));
-        if e != self.vision_entity {
-            // Changing (or clearing) the observer drops the mask; it rebuilds
-            // for the new observer on the next frame.
-            self.vision_entity = e;
-            self.drop_fow();
-        }
+        // Legacy 1-arg form: fog rides the world grid.
+        self.set_observer(entity, None);
+    }
+
+    fn vision_observer_in(&mut self, entity: i64, grid: i64) {
+        // Fog rides the named `grid_spawn` grid (the crew's hull); an out-of-range
+        // handle leaves it on the world grid rather than blindly picking one.
+        let g = self.grids.get(grid as usize).copied();
+        self.set_observer(entity, g);
     }
 
     fn vision_config(&mut self, cone_deg: i64, range: i64, peripheral: i64) {
@@ -2135,17 +2258,13 @@ mod tests {
     fn deck_clip_cuts_the_deck_above_via_a_real_grid() {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
         let (cx, cy) = (2_i64, 2_i64);
-        r.voxel_set(cx, cy, 0, 0x80AA_AAAA); // lower deck floor (sim-z 0)
+        r.voxel_set(cx, cy, 0, 0x80AA_AAAA); // lower deck floor (sim-z 0) — auto world grid
         r.voxel_set(cx, cy, 4, 0x8055_5555); // upper deck floor (sim-z 4)
 
         // `voxel_set` places cell (x, y) with the same world-X mirror as
         // `voxel_fill` (world x ∈ [-(x+1)·S, -x·S)); ray straight down the
         // mirrored cell centre (+z is "down", world z-down) from above both.
-        let col = DVec3::new(
-            -(cx as f64 + 0.5) * SCALE,
-            (cy as f64 + 0.5) * SCALE,
-            0.0,
-        );
+        let col = DVec3::new(-(cx as f64 + 0.5) * SCALE, (cy as f64 + 0.5) * SCALE, 0.0);
         let down = DVec3::new(0.0, 0.0, 1.0);
         let hit_z = |r: &MapRender| {
             r.scene
@@ -2181,6 +2300,182 @@ mod tests {
         );
     }
 
+    /// An off-origin `grid_spawn` composes its offset with the mirror + SCALE +
+    /// z-down transform `voxel_fill_in` paints inside it: the grid's LOCAL origin
+    /// cell must land on the exact world voxel of the sim cell it was spawned at,
+    /// not a raw-unit, unmirrored offset (the pre-fix bug rendered it elsewhere).
+    #[test]
+    fn grid_spawn_off_origin_composes_the_mirror_transform() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let (wx, wy, wz) = (3_i64, 2_i64, 5_i64);
+        // A grid offset by sim cell (wx, wy, wz), painting only its local origin
+        // cell (0,0,0). No world grid painted — the ray can only hit this grid.
+        let g = r.grid_spawn(wx, wy, wz);
+        assert!(g >= 0, "grid handle allocated");
+        r.voxel_fill_in(g, 0, 0, 0, 0, 0, 0, 0x8055_5555);
+
+        // Ray straight down (+z, z-down) the MIRRORED centre of world cell
+        // (wx, wy). It reaches the voxel only if the offset was mirrored/scaled
+        // like `voxel_set(wx, wy, wz)` would place it.
+        let col = DVec3::new(-(wx as f64 + 0.5) * SCALE, (wy as f64 + 0.5) * SCALE, 0.0);
+        let down = DVec3::new(0.0, 0.0, 1.0);
+        let hit = r
+            .scene
+            .raycast_clipped(col, down, 4096.0)
+            .expect("ray hits the off-origin grid at the mirrored column");
+        assert_eq!(hit.grid, r.grids[g as usize], "hit the spawned grid");
+        // World z-down: sim height wz sits at world z GROUND_Z - wz (unscaled).
+        assert!(
+            (hit.world.z - (GROUND_Z - wz as f64)).abs() < 1.0,
+            "off-origin cell at world z GROUND_Z - wz, got {}",
+            hit.world.z
+        );
+    }
+
+    /// Fog rides an OFF-ORIGIN `grid_spawn` hull: the observer's world pose and
+    /// any heard cell must be re-based into the grid's LOCAL voxels, or the mask
+    /// stamps empty space at the grid's world offset instead of on the hull. A
+    /// heard blob is deterministic (no LOS / lighting), so it pins the re-basing
+    /// exactly — the live Heard cell lands on the grid-local column of the sound,
+    /// not the world column (which the grid origin shifts `wx·SCALE` cells away).
+    #[test]
+    fn fog_rides_off_origin_grid_in_grid_local_space() {
+        use roxlap_scene::fow::CellState;
+
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        // A large offset so the un-rebased world column is far outside the
+        // observer's vision range — the decisive assert below can't pass by a
+        // coincidental cone/blob overlap.
+        let (wx, wy, wz) = (20_i64, 12_i64, 2_i64);
+        let g = r.grid_spawn(wx, wy, wz);
+        // A floor inside the hull (grid-local sim cells). The heard path needs no
+        // geometry, but this mirrors a real hull the observer stands on.
+        r.voxel_fill_in(g, 0, 0, 0, 8, 8, 0, 0x8055_5f6b);
+        r.vision_config(110, 6, 3);
+        r.deck_clip(0, 3); // sets the deck band the mask needs
+
+        // Observer entity at WORLD sim (wx+4, wy+4, wz) — grid-local sim (4, 4, 0).
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let e = world.spawn(arch);
+        world.set_position(
+            e,
+            FixedVec3::new(
+                Fixed::from_int((wx + 4) as i32),
+                Fixed::from_int((wy + 4) as i32),
+                Fixed::from_int(wz as i32),
+            ),
+        );
+        r.vision_observer_in(e.0 as i64, g);
+
+        // A sound at WORLD sim (wx+2, wy+6): its grid-local column is sim (2, 6).
+        let (hx, hy) = (wx + 2, wy + 6);
+        // Frame 1 captures the pose + queues the blob; frame 2's `update` applies
+        // the blob into the mask (hear is queued after update within a frame).
+        r.build_instances(&world);
+        r.vision_hear(hx, hy, wz, Fixed::from_int(1));
+        let _ = r.update_fow(0.016);
+        r.build_instances(&world);
+        let _ = r.update_fow(0.016);
+
+        let mask = r.fow.as_ref().expect("mask built");
+        // The blob is centred on the GRID-LOCAL column of the sound —
+        // `world_of(local sim (2, 6))`, deck 0.
+        let local = world_of(FixedVec3::new(
+            Fixed::from_int((hx - wx) as i32),
+            Fixed::from_int((hy - wy) as i32),
+            Fixed::ZERO,
+        ));
+        let local_cell = IVec2::new(local.x.floor() as i32, local.y.floor() as i32);
+        let (state, intensity) = mask.state(0, local_cell);
+        assert!(
+            matches!(state, CellState::Visible | CellState::Heard) && intensity > 0,
+            "heard cell live at the grid-local column {local_cell:?}, got {state:?}/{intensity}"
+        );
+
+        // Decisive: the WORLD column (grid origin NOT subtracted) is far off the
+        // hull and must stay Unseen — proves the re-basing, not a stray overlap.
+        let world_pt = world_of(FixedVec3::new(
+            Fixed::from_int(hx as i32),
+            Fixed::from_int(hy as i32),
+            Fixed::ZERO,
+        ));
+        let world_cell = IVec2::new(world_pt.x.floor() as i32, world_pt.y.floor() as i32);
+        assert_eq!(
+            mask.state(0, world_cell).0,
+            CellState::Unseen,
+            "un-rebased world column {world_cell:?} must stay Unseen"
+        );
+    }
+
+    /// A yawing hull: the fog viewpoint must be expressed in the grid's rotated
+    /// frame, not just translated. Spawn a grid at the world origin, turn it 90°
+    /// about z, then hear a sound. The blob must land at the grid-local column
+    /// `rotation.inverse() * world_of(sound)`, NOT at the un-rotated world column
+    /// — proving the rotation term, not merely the origin subtraction, is applied.
+    #[test]
+    fn fog_rides_a_rotated_grid_in_grid_local_space() {
+        use roxlap_scene::fow::CellState;
+
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn(0, 0, 0); // at the world origin ⇒ pure rotation below
+        let gid = r.grids[g as usize];
+        // Turn the hull a quarter-turn about world +z. `grid_spawn` only sets a
+        // translation, so there is no host API for this yet — poke the transform
+        // directly, exactly as a future `grid_rotate` would.
+        let grid_rot = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        r.scene.grid_mut(gid).expect("grid").transform.rotation = grid_rot;
+
+        r.voxel_fill_in(g, 0, 0, 0, 8, 8, 0, 0x8055_5f6b);
+        r.vision_config(110, 6, 3);
+        r.deck_clip(0, 3);
+
+        // Observer at the world origin; a sound far out along sim +x so the
+        // rotated and un-rotated columns are far apart (a small heard blob can't
+        // cover both, and the cone can't reach either).
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let e = world.spawn(arch);
+        world.set_position(e, FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ZERO));
+        r.vision_observer_in(e.0 as i64, g);
+
+        let (hx, hy) = (10_i64, 0_i64);
+        r.build_instances(&world);
+        r.vision_hear(hx, hy, 0, Fixed::from_int(1));
+        let _ = r.update_fow(0.016);
+        r.build_instances(&world);
+        let _ = r.update_fow(0.016);
+
+        let mask = r.fow.as_ref().expect("mask built");
+        let origin = r.scene.grid(gid).expect("grid").transform.origin;
+        let sound = world_of(FixedVec3::new(
+            Fixed::from_int(hx as i32),
+            Fixed::from_int(hy as i32),
+            Fixed::ZERO,
+        ));
+        // Where the code should place the blob: rotate the origin-relative world
+        // point into the grid frame.
+        let local = grid_rot.inverse() * (sound - origin);
+        let local_cell = IVec2::new(local.x.floor() as i32, local.y.floor() as i32);
+        let (state, intensity) = mask.state(0, local_cell);
+        assert!(
+            matches!(state, CellState::Visible | CellState::Heard) && intensity > 0,
+            "heard cell live at the rotated grid-local column {local_cell:?}, got {state:?}/{intensity}"
+        );
+
+        // Decisive: the un-rotated column (origin subtracted but rotation NOT
+        // applied) is a quarter-turn away and must stay Unseen.
+        let flat_cell = IVec2::new(
+            (sound.x - origin.x).floor() as i32,
+            (sound.y - origin.y).floor() as i32,
+        );
+        assert_eq!(
+            mask.state(0, flat_cell).0,
+            CellState::Unseen,
+            "un-rotated column {flat_cell:?} must stay Unseen"
+        );
+    }
+
     /// The fog-of-war path runs headlessly (no window): paint a floor, declare
     /// an observer + a deck band, capture its pose, and update the mask. Catches
     /// panics in `FowTwin::attach` / `FogOfWar::update` / `sync` and confirms a
@@ -2188,7 +2483,7 @@ mod tests {
     #[test]
     fn fog_of_war_updates_without_a_renderer() {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
-        r.voxel_fill(0, 0, 0, 8, 8, 0, 0x8055_5f6b); // a floor slab to see across
+        r.voxel_fill(0, 0, 0, 8, 8, 0, 0x8055_5f6b); // floor slab (auto world grid) to see across
         r.vision_config(110, 6, 3);
         r.deck_clip(0, 3); // sets the deck band the mask needs
 
@@ -2242,7 +2537,10 @@ mod tests {
         let e1 = (q[1].0 - q[0].0, q[1].1 - q[0].1);
         let e2 = (q[3].0 - q[0].0, q[3].1 - q[0].1);
         let dot = e1.0 * e2.0 + e1.1 * e2.1;
-        assert!(dot.abs() < 1e-9, "adjacent edges are perpendicular (dot {dot})");
+        assert!(
+            dot.abs() < 1e-9,
+            "adjacent edges are perpendicular (dot {dot})"
+        );
         // …and it isn't the world-axis box: the corners moved off N/S/E/W.
         assert!(
             (q[1].0 - a.0).abs() > 1e-6,

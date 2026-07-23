@@ -492,7 +492,11 @@ pub fn rts_checkpoints() -> Vec<Checkpoint> {
     let world = driver.world().clone();
     let (units, mines, tree) = {
         let w = world.lock().expect("world mutex");
-        let units: Vec<i64> = w.entities(ArchetypeId(0)).iter().map(|e| e.0 as i64).collect();
+        let units: Vec<i64> = w
+            .entities(ArchetypeId(0))
+            .iter()
+            .map(|e| e.0 as i64)
+            .collect();
         let mines: Vec<(i64, i64, i64)> = w
             .entities(ArchetypeId(3))
             .iter()

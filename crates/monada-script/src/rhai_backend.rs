@@ -480,6 +480,21 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     );
 
     let b = bridge.clone();
+    engine.register_fn("grid_spawn", move |wx: i64, wy: i64, wz: i64| -> i64 {
+        b.lock().expect("bridge mutex").grid_spawn(wx, wy, wz)
+    });
+
+    let b = bridge.clone();
+    engine.register_fn(
+        "voxel_fill_in",
+        move |grid: i64, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .voxel_fill_in(grid, x0, y0, z0, x1, y1, z1, color);
+        },
+    );
+
+    let b = bridge.clone();
     engine.register_fn("voxel_set", move |x: i64, y: i64, z: i64, color: i64| {
         b.lock().expect("bridge mutex").voxel_set(x, y, z, color);
     });
@@ -571,17 +586,33 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").vision_observer(entity);
     });
 
+    // 2-arg overload (host_api 7): fog rides the named grid_spawn grid.
     let b = bridge.clone();
-    engine.register_fn("vision_config", move |cone_deg: i64, range: i64, peripheral: i64| {
+    engine.register_fn("vision_observer", move |entity: i64, grid: i64| {
         b.lock()
             .expect("bridge mutex")
-            .vision_config(cone_deg, range, peripheral);
+            .vision_observer_in(entity, grid);
     });
 
     let b = bridge.clone();
-    engine.register_fn("vision_hear", move |x: i64, y: i64, z: i64, loudness: Fixed| {
-        b.lock().expect("bridge mutex").vision_hear(x, y, z, loudness);
-    });
+    engine.register_fn(
+        "vision_config",
+        move |cone_deg: i64, range: i64, peripheral: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .vision_config(cone_deg, range, peripheral);
+        },
+    );
+
+    let b = bridge.clone();
+    engine.register_fn(
+        "vision_hear",
+        move |x: i64, y: i64, z: i64, loudness: Fixed| {
+            b.lock()
+                .expect("bridge mutex")
+                .vision_hear(x, y, z, loudness);
+        },
+    );
 
     let b = bridge.clone();
     engine.register_fn(
@@ -803,7 +834,8 @@ mod tests {
             ("fixed(3) > fixed(2)", true),
         ] {
             assert_eq!(
-                e.eval::<bool>(expr).unwrap_or_else(|err| panic!("{expr}: {err}")),
+                e.eval::<bool>(expr)
+                    .unwrap_or_else(|err| panic!("{expr}: {err}")),
                 want,
                 "{expr}"
             );

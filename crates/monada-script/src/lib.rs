@@ -46,8 +46,9 @@ pub use rhai_backend::RhaiBackend;
 /// `vision_hear` (ship demo, docs/plans/ship-visibility.md); 5 =
 /// `highlight_add`/`highlighted_all`/`drag_begin`/`drag_end` (RTS
 /// multi-select); 6 = `voxel_clear` (destructibles — RTS tree felling,
-/// ship doors).
-pub const HOST_API_VERSION: u32 = 6;
+/// ship doors); 7 = `grid_spawn`/`voxel_fill_in` + `vision_observer`'s
+/// grid overload (multi-grid ships).
+pub const HOST_API_VERSION: u32 = 7;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -200,6 +201,37 @@ pub trait HostBridge: Send {
     /// if the clear reached ground level. Same determinism contract as
     /// [`voxel_fill`](Self::voxel_fill). The default ignores it.
     fn voxel_clear(&mut self, _x: i64, _y: i64, _z: i64) {}
+
+    /// Spawn a new voxel grid offset by SIM cell `(wx, wy, wz)` from the world
+    /// origin and return its render-side grid id. Use `(0, 0, 0)` for the world
+    /// origin. The offset composes with the mirror/scale/z-down transform the
+    /// grid paints with, so `(wx, wy, wz)` lands on the same world voxel a
+    /// `voxel_set(wx, wy, wz)` would. The id is render-side only — never put it
+    /// into [`World`] state or hashed `tick()` logic. Paint into the grid with
+    /// [`voxel_fill_in`](Self::voxel_fill_in). The default returns `-1`
+    /// (no grid allocated).
+    fn grid_spawn(&mut self, _wx: i64, _wy: i64, _wz: i64) -> i64 {
+        -1
+    }
+
+    /// Paint a solid voxel box into a specific grid (by id from
+    /// [`grid_spawn`](Self::grid_spawn)), in sim coordinates. Same
+    /// coordinate convention as [`voxel_fill`](Self::voxel_fill) but
+    /// render-side only — does NOT update the collision store. The default
+    /// ignores it.
+    #[allow(clippy::too_many_arguments)]
+    fn voxel_fill_in(
+        &mut self,
+        _grid: i64,
+        _x0: i64,
+        _y0: i64,
+        _z0: i64,
+        _x1: i64,
+        _y1: i64,
+        _z1: i64,
+        _color: i64,
+    ) {
+    }
     /// Mark `entity` as the locally selected one (a highlight overlay),
     /// REPLACING any current selection (single-select semantics — the
     /// chess-era contract).
@@ -271,8 +303,10 @@ pub trait HostBridge: Send {
     /// block collision + vision. Render-side only; the default ignores it.
     fn camera_cutout(&mut self, _radius: Fixed, _feather: Fixed) {}
 
-    /// Show only the deck band `z_lo..=z_hi` (sim z) of the world grid, cutting
-    /// away everything ABOVE it (a ceiling / upper-deck cutaway) so the camera
+    /// Show only the deck band `z_lo..=z_hi` (sim z) of the vision grid (the
+    /// grid named by [`vision_observer`](Self::vision_observer), else the world
+    /// grid), cutting away everything ABOVE it (a ceiling / upper-deck cutaway)
+    /// so the camera
     /// sees into the deck the crew stands on. Maps to roxlap's `Grid::z_clip`
     /// (the engine clips one side — the top of the band). Call it with the
     /// local crew's deck band; a band whose top is the tallest thing in the
@@ -287,6 +321,14 @@ pub trait HostBridge: Send {
     /// — declare the LOCAL crew member (`local_player()`'s entity), so each peer
     /// sees its own line of sight. Render-side only; the default ignores it.
     fn vision_observer(&mut self, _entity: i64) {}
+    /// Like [`vision_observer`](Self::vision_observer) but against a specific
+    /// [`grid_spawn`](Self::grid_spawn) grid (`grid` handle) instead of the world
+    /// grid — the ship demo's hull, so fog + `deck_clip` ride the crew's own
+    /// (movable) grid. The mask is grid-local. `host_api` 7. Render-side only;
+    /// the default delegates to [`vision_observer`](Self::vision_observer).
+    fn vision_observer_in(&mut self, entity: i64, _grid: i64) {
+        self.vision_observer(entity);
+    }
     /// Tune the observer's vision: facing-cone half-angle (`cone_deg` degrees),
     /// cone reach and 360° peripheral reach (`range`/`peripheral` cells). Sets
     /// roxlap's `VisionConfig`. Render-side only; the default ignores it.
