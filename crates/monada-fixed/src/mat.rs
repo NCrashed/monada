@@ -120,7 +120,12 @@ impl FixedMat3 {
         let r0 = self.y_axis.cross(self.z_axis);
         let r1 = self.z_axis.cross(self.x_axis);
         let r2 = self.x_axis.cross(self.y_axis);
-        let inv_det = Fixed::ONE / self.x_axis.dot(r0);
+        let det = self.x_axis.dot(r0);
+        assert!(
+            det != Fixed::ZERO,
+            "FixedMat3::inverse: singular matrix (determinant is zero)"
+        );
+        let inv_det = Fixed::ONE / det;
         FixedMat3 {
             x_axis: FixedVec3::new(r0.x, r1.x, r2.x).scale(inv_det),
             y_axis: FixedVec3::new(r0.y, r1.y, r2.y).scale(inv_det),

@@ -45,6 +45,8 @@ impl FixedVec2 {
     }
 
     /// Squared length (no `sqrt`; exact and cheap for comparisons).
+    /// Exact for Euclidean length up to `⌊√(2^31)⌋ = 46340`, like
+    /// [`FixedVec3::length_squared`].
     #[inline]
     #[must_use]
     pub fn length_squared(self) -> Fixed {
@@ -83,6 +85,12 @@ impl FixedVec3 {
     }
 
     /// Dot product.
+    ///
+    /// **Range**: each product and the running sum wrap past `±2^31`
+    /// like any [`Fixed`] chain; exact when `|self|·|rhs| < 2^31`
+    /// (Cauchy–Schwarz bounds every term by that). See
+    /// [`length_squared`](FixedVec3::length_squared) for the squared-
+    /// norm consequence.
     #[inline]
     #[must_use]
     pub fn dot(self, rhs: FixedVec3) -> Fixed {
@@ -101,13 +109,23 @@ impl FixedVec3 {
     }
 
     /// Squared length (no `sqrt`).
+    ///
+    /// **Safe input domain**: exact for Euclidean length up to
+    /// `⌊√(2^31)⌋ = 46340` (≈ `2^15.5`); past that the Q32.32 square
+    /// wraps. Note this bounds the *norm*, not the components: a fully
+    /// diagonal `(2^16, 2^16, 2^16)` offset is already out of range.
+    /// Physics' relative-offset rule (docs/plans/voxel-physics.md §1)
+    /// exists to keep inputs inside this domain — broadphase locality
+    /// must keep relative offsets under ~46 000 voxels, which it does
+    /// by orders of magnitude.
     #[inline]
     #[must_use]
     pub fn length_squared(self) -> Fixed {
         self.dot(self)
     }
 
-    /// Euclidean length.
+    /// Euclidean length. Same safe input domain as
+    /// [`length_squared`](FixedVec3::length_squared).
     #[inline]
     #[must_use]
     pub fn length(self) -> Fixed {

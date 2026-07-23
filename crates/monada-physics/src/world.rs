@@ -67,9 +67,11 @@ impl PhysicsWorld {
 }
 
 impl StateHash for PhysicsWorld {
-    /// Canonical fold order: `tick`, then `dt`. Extend-only — new state
-    /// appends after existing fields so unrelated additions do not
-    /// silently re-key old goldens without a bless.
+    /// Canonical fold order: `tick`, then `dt`. Any change here —
+    /// including appending a field — re-keys every `phys@` golden and
+    /// requires an explicit bless; keeping the order append-only just
+    /// makes the diff-time story legible (old fields keep their
+    /// positions, the bless commit points at exactly what grew).
     fn hash(&self, h: &mut StateHasher) {
         self.tick.hash(h);
         self.dt.hash(h);

@@ -120,8 +120,12 @@ To add, in `monada-fixed` (each with randomized accuracy tests against an
 - Quaternion integration helper if not expressible cleanly at call sites:
   `q.integrate(omega: FixedVec3, dt: Fixed)` =
   `(FixedQuat::from_scaled_axis(omega.scale(dt)) * q).normalize()`.
-- Audit: `FixedVec3::length_squared` on typical relative offsets (≤ ~2^16
-  voxels) must not saturate; document the safe input domain.
+- Audit (done, P0): `FixedVec3::length_squared`/`dot` are exact for
+  Euclidean norms up to `⌊√(2^31)⌋ = 46340 ≈ 2^15.5` — note this bounds the
+  *norm*, so a fully diagonal `2^16`-per-axis offset is already out of
+  range. Documented on the methods; broadphase locality (P2/P5) must keep
+  relative offsets under ~46 000 voxels, which it does by orders of
+  magnitude.
 
 Determinism of all of the above is inherited from the existing "integer-only
 at runtime, reproducible tables at build time" contract; the cross-platform

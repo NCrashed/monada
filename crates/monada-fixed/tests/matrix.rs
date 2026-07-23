@@ -25,12 +25,14 @@ fn close_mat(a: FixedMat3, b: FixedMat3, eps_bits: i64) {
 }
 
 /// A tiny deterministic LCG so sampling tests need no `rand` dep and
-/// stay reproducible.
+/// stay reproducible. Unlike `arithmetic.rs`'s helper this keeps the
+/// sign bit (`>> 32`, reinterpreted as `i32`) — the matrix tests must
+/// sample all octants, not just the positive one.
 fn lcg(state: &mut u64) -> i32 {
     *state = state
         .wrapping_mul(6_364_136_223_846_793_005)
         .wrapping_add(1);
-    (*state >> 33) as i32
+    (*state >> 32) as i32
 }
 
 /// A random `Fixed` in roughly `(-8, 8)` — the well-conditioned regime
@@ -189,7 +191,7 @@ fn inverse_of_inertia_shape() {
 }
 
 #[test]
-#[should_panic(expected = "division by zero")]
+#[should_panic(expected = "singular matrix")]
 fn inverse_of_singular_panics() {
     let _ = FixedMat3::ZERO.inverse();
 }
