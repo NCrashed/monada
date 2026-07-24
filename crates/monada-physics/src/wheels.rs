@@ -173,7 +173,7 @@ pub(crate) fn wheel_pass(
     // both passes and mutated only at the bulk-apply tail.
     #[allow(clippy::needless_range_loop)]
     for body_index in 0..bodies.len() {
-        if bodies[body_index].wheels.is_empty() {
+        if bodies[body_index].wheels.is_empty() || bodies[body_index].asleep {
             continue;
         }
         let body = &bodies[body_index];

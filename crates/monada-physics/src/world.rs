@@ -9,11 +9,13 @@ use monada_fixed::{Fixed, FixedMat3, FixedQuat, FixedVec3};
 use monada_sim::{StateHash, StateHasher};
 
 use crate::body::{BodyDef, RigidBody, VoxelBodyDef};
+use crate::broadphase;
 use crate::contact::{self, ContactCacheEntry};
 use crate::destruct::{self, DebrisCluster, Removal};
 use crate::field::VoxelField;
 use crate::ids::BodyId;
 use crate::material::{Material, MaterialId};
+use crate::raycast;
 use crate::shape::VoxelShape;
 use crate::solver;
 use crate::wheels::{self, Wheel, WheelDef, WheelId, WheelInput};
@@ -27,6 +29,8 @@ const DEFAULT_MAX_SPEED: Fixed = Fixed::from_int(2000);
 pub const SLEEP_LINEAR: Fixed = Fixed::from_ratio(1, 8);
 /// See [`SLEEP_LINEAR`].
 pub const SLEEP_ANGULAR: Fixed = Fixed::from_ratio(1, 8);
+/// Consecutive still ticks (1 s at 25 Hz) before an island may sleep.
+pub const SLEEP_TICKS: u32 = 25;
 
 /// The physics state root. One instance per sim; stepped once per sim
 /// tick, hashed into the same desync digest as the rest of the sim.
@@ -115,8 +119,15 @@ impl PhysicsWorld {
     }
 
     /// Set uniform gravity (hashed state — a mid-run change re-keys
-    /// the stream, as it must).
+    /// the stream, as it must). Wakes EVERY sleeping body: a gravity
+    /// flip must not leave sleepers hanging mid-air (P5 amendments).
     pub fn set_gravity(&mut self, gravity: FixedVec3) {
+        if gravity != self.gravity {
+            for body in &mut self.bodies {
+                body.asleep = false;
+                body.sleep_timer = 0;
+            }
+        }
         self.gravity = gravity;
     }
 
@@ -201,17 +212,26 @@ impl PhysicsWorld {
             .unwrap_or_else(|_| panic!("apply_impulse_at: no body {id:?}"));
         let inv_inertia = solver::inv_inertia_world(&self.bodies[index]);
         let body = &mut self.bodies[index];
+        body.asleep = false;
+        body.sleep_timer = 0;
         let r = point - body.position;
         body.linear_velocity += impulse.scale(body.inv_mass);
         body.angular_velocity += inv_inertia * r.cross(impulse);
     }
 
+    /// The external mutation surface funnels through here — and every
+    /// external mutation wakes (P5): impulses, wheel attach/detach,
+    /// wheel input. `remove_voxels` and `set_gravity` wake on their
+    /// own paths.
     fn body_mut(&mut self, id: BodyId) -> &mut RigidBody {
         let index = self
             .bodies
             .binary_search_by_key(&id, RigidBody::id)
             .unwrap_or_else(|_| panic!("no body {id:?}"));
-        &mut self.bodies[index]
+        let body = &mut self.bodies[index];
+        body.asleep = false;
+        body.sleep_timer = 0;
+        body
     }
 
     /// Attach a raycast wheel to `body` (see the `wheels` module for
@@ -481,6 +501,16 @@ impl PhysicsWorld {
             body_ref.com_local = com_new;
             body_ref.skin =
                 crate::shape::derive_skin(body_ref.shape.as_ref().expect("survivor"), com_new);
+            body_ref.bounding_radius = body_ref
+                .skin
+                .iter()
+                .map(|s| s.offset.length())
+                .max()
+                .map_or(Fixed::ZERO, |m| m + crate::shape::SKIN_RADIUS);
+            // Whatever carved it certainly wakes it (P5): the woken
+            // body re-settles with correct fresh bookkeeping.
+            body_ref.asleep = false;
+            body_ref.sleep_timer = 0;
             // No-teleport: the shape stays put in the world; the CoM
             // bookkeeping moves around it — including each voxel's
             // point VELOCITY (the new CoM point moved at v + ω×Δ).
@@ -561,18 +591,61 @@ impl PhysicsWorld {
     /// wall thickness) accordingly. Fast projectiles stay engine-side
     /// raycasts (non-goal).
     pub fn step(&mut self, field: &dyn VoxelField) {
-        // 1. Integrate velocities.
+        // 1. Integrate velocities (awake bodies only — sleepers are
+        // frozen).
         let g_dt = self.gravity.scale(self.dt);
         for body in &mut self.bodies {
-            body.linear_velocity = (body.linear_velocity + g_dt).clamp_length_max(self.max_speed);
+            if !body.asleep {
+                body.linear_velocity =
+                    (body.linear_velocity + g_dt).clamp_length_max(self.max_speed);
+            }
         }
 
         // 1½. Wheel pass — before the contact solver, so a chassis
         // bottoming out on a step is still corrected by NGS.
         wheels::wheel_pass(&mut self.bodies, field, &self.materials, g_dt, self.dt);
 
-        // 2. Narrowphase at pre-step poses.
-        let mut contacts = contact::generate(&self.bodies, field, &self.materials);
+        // 2. Narrowphase at pre-step poses — PAIRS FIRST, so a sleeper
+        // woken by a real contact gets its terrain contacts in the
+        // same tick (terrain-first left a struck sleeper floorless for
+        // one tick: the impact drove it into the ground and NGS heaved
+        // it back — a flicker-and-pump cycle). A MIXED pair (awake +
+        // asleep) runs narrowphase, and only a real contact wakes the
+        // sleeper — broadphase adjacency alone never does (no
+        // sleep-thrash from drive-bys). Sleeping-sleeping pairs are
+        // skipped whole.
+        let mut contacts = Vec::new();
+        for (a, b) in broadphase::candidate_pairs(&self.bodies) {
+            if self.bodies[a].asleep && self.bodies[b].asleep {
+                continue;
+            }
+            let pair = contact::generate_pair(&self.bodies, &self.materials, a, b);
+            if !pair.is_empty() {
+                for index in [a, b] {
+                    let body = &mut self.bodies[index];
+                    if body.asleep {
+                        // Woken by a real contact: participates fully
+                        // in this tick's solve, terrain included (it
+                        // skipped gravity at phase 1 — invisible for
+                        // one tick). A stack wakes as a wave, one
+                        // layer per tick: sleeping neighbours make no
+                        // contacts until awake.
+                        body.asleep = false;
+                        body.sleep_timer = 0;
+                    }
+                }
+                contacts.extend(pair);
+            }
+        }
+        contacts.extend(contact::generate_terrain(
+            &self.bodies,
+            field,
+            &self.materials,
+        ));
+        // Canonical order: with pair contacts the generation order is
+        // no longer globally lexicographic — one deterministic sort
+        // restores it (P5 revision of "sorted by construction").
+        contacts.sort_unstable_by_key(|x| x.key);
 
         // Per-body world-frame inverse inertia for this tick's solve.
         let inv_inertias: Vec<_> = self.bodies.iter().map(solver::inv_inertia_world).collect();
@@ -585,13 +658,16 @@ impl PhysicsWorld {
                 c.accumulated_tangent = e.tangent_impulse;
             }
         }
-        solver::prepare(&mut self.bodies, &inv_inertias, &mut contacts);
+        solver::prepare(&mut self.bodies, &inv_inertias, &mut contacts, self.dt);
 
         // 4. Velocity solve.
         solver::solve_velocities(&mut self.bodies, &inv_inertias, &mut contacts);
 
         // 5. Integrate poses (P1 integrator; no gyroscopic term).
         for body in &mut self.bodies {
+            if body.asleep {
+                continue;
+            }
             body.position += body.linear_velocity.scale(self.dt);
             body.orientation = (FixedQuat::from_scaled_axis(body.angular_velocity.scale(self.dt))
                 * body.orientation)
@@ -601,10 +677,7 @@ impl PhysicsWorld {
         // 6. Position correction.
         solver::solve_positions(&mut self.bodies, &contacts);
 
-        // 7. Persist accumulated impulses (contacts are in key order —
-        // the generation loops iterate x→y→z outermost-first to match
-        // `ContactKey`'s derived `Ord` — so the rebuilt cache is
-        // sorted by construction).
+        // 7. Persist accumulated impulses.
         self.impulse_cache.clear();
         self.impulse_cache.extend(
             contacts
@@ -620,16 +693,168 @@ impl PhysicsWorld {
                     tangent_impulse: c.accumulated_tangent,
                 }),
         );
-        // Tripwire for the loop-order ↔ Ord pairing above: the
-        // binary_search warm-start lookup silently degrades if this
-        // ever breaks (strictly ascending — duplicates are impossible
-        // by key construction).
+        // Tripwire for the post-generation sort: the binary_search
+        // warm-start lookup silently degrades if this ever breaks
+        // (strictly ascending — duplicate keys are impossible by
+        // construction).
         debug_assert!(
             self.impulse_cache.windows(2).all(|w| w[0].key < w[1].key),
-            "impulse cache no longer sorted — generation order diverged from ContactKey::Ord"
+            "impulse cache not sorted — the contact sort lost canonical order"
         );
 
+        // 8. Sleep bookkeeping (P5): per-body low-motion timers, then
+        // island-wide sleep — a contact island (union-find over this
+        // tick's pair contacts) sleeps only when EVERY member has been
+        // still for SLEEP_TICKS; velocities zero on the way down
+        // (kills micro-drift in the hashed state).
+        self.update_sleep(&contacts);
+
         self.tick += 1;
+    }
+
+    /// Union-find islands over this tick's pair contacts, then the
+    /// all-still rule per island. See `step` phase 8.
+    fn update_sleep(&mut self, contacts: &[contact::Contact]) {
+        fn find(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+
+        for body in &mut self.bodies {
+            if body.asleep {
+                continue;
+            }
+            if body.linear_velocity.length() < SLEEP_LINEAR
+                && body.angular_velocity.length() < SLEEP_ANGULAR
+            {
+                body.sleep_timer = body.sleep_timer.saturating_add(1);
+            } else {
+                body.sleep_timer = 0;
+            }
+        }
+
+        // Union-find (transient, index-based, deterministic).
+        let mut parent: Vec<usize> = (0..self.bodies.len()).collect();
+        for c in contacts {
+            if let Some(other) = c.other_index {
+                let (ra, rb) = (find(&mut parent, c.body_index), find(&mut parent, other));
+                parent[ra.max(rb)] = ra.min(rb);
+            }
+        }
+        // A root's island may sleep only if every member is eligible.
+        let mut island_ready = vec![true; self.bodies.len()];
+        for i in 0..self.bodies.len() {
+            let root = find(&mut parent, i);
+            let body = &self.bodies[i];
+            if !body.asleep && (body.sleep_timer < SLEEP_TICKS || body.skin.is_empty()) {
+                island_ready[root] = false;
+            }
+        }
+        for i in 0..self.bodies.len() {
+            let root = find(&mut parent, i);
+            let body = &mut self.bodies[i];
+            if !body.asleep && island_ready[root] && body.sleep_timer >= SLEEP_TICKS {
+                body.asleep = true;
+                body.linear_velocity = FixedVec3::ZERO;
+                body.angular_velocity = FixedVec3::ZERO;
+            }
+        }
+    }
+
+    /// Wake sleeping bodies whose bounding sphere
+    /// (`position ± bounding_radius`) overlaps the INCLUSIVE cell box
+    /// `[min, max]` of a terrain edit. The engine calls this after
+    /// `voxel_clear`-style changes; the ground may have vanished from
+    /// under a sleeper. P6 hangs cached-contact invalidation on this
+    /// same seam.
+    pub fn notify_terrain_edit(&mut self, min: (i64, i64, i64), max: (i64, i64, i64)) {
+        for body in &mut self.bodies {
+            if !body.asleep {
+                continue;
+            }
+            let r = body.bounding_radius;
+            let clamp = |v: Fixed, lo: i64, hi: i64| {
+                v.clamp(Fixed::from_bits(lo << 32), Fixed::from_bits((hi + 1) << 32))
+            };
+            let closest = FixedVec3::new(
+                clamp(body.position.x, min.0, max.0),
+                clamp(body.position.y, min.1, max.1),
+                clamp(body.position.z, min.2, max.2),
+            );
+            let d = body.position - closest;
+            if d.dot(d) <= r * r {
+                body.asleep = false;
+                body.sleep_timer = 0;
+            }
+        }
+    }
+
+    /// Cast a ray against terrain and every voxel body (P5): the
+    /// engine-side seam for fast projectiles (plan §8 — no CCD).
+    ///
+    /// Contract:
+    /// - `dir` must be unit length; `t` is in voxels along it.
+    /// - Nearest hit wins; exact ties go to terrain, then to the
+    ///   lowest body id (bodies are scanned ascending).
+    /// - Ghost bodies are invisible to rays (no shape — consistent
+    ///   with having no skin).
+    /// - Sleeping bodies ARE visible (read-only query, wakes nothing).
+    /// - `cell` is a terrain cell for `body: None`, otherwise the hit
+    ///   body's SHAPE cell (its own grid coordinates).
+    #[must_use]
+    pub fn raycast(
+        &self,
+        field: &dyn VoxelField,
+        origin: FixedVec3,
+        dir: FixedVec3,
+        max_t: Fixed,
+    ) -> Option<WorldRayHit> {
+        let mut best = raycast::cast(field, origin, dir, max_t).map(|hit| WorldRayHit {
+            body: None,
+            cell: hit.cell,
+            t: hit.t,
+            normal: hit.normal,
+            position: origin + dir.scale(hit.t),
+        });
+
+        for body in &self.bodies {
+            let Some(shape) = body.shape.as_ref() else {
+                continue; // ghosts are invisible to rays
+            };
+            let limit = best.as_ref().map_or(max_t, |b| b.t);
+            // Prune: closest approach of the ray to the bounding
+            // sphere (relative offsets only — rule 6).
+            let to_body = body.position - origin;
+            let along = to_body.dot(dir).clamp(Fixed::ZERO, limit);
+            let off = to_body - dir.scale(along);
+            let reach = body.bounding_radius;
+            if off.dot(off) > reach * reach {
+                continue;
+            }
+            // Into the body's shape frame (lengths preserved, so t
+            // carries over unchanged).
+            let inv_rot = body.orientation.inverse();
+            let origin_s = inv_rot * (origin - body.position) + body.com_local;
+            let dir_s = inv_rot * dir;
+            let grid = crate::raycast::ShapeOccupancy(shape);
+            if let Some(hit) = raycast::cast(&grid, origin_s, dir_s, limit) {
+                // Strictly closer only: ties keep terrain / the lower
+                // id (scanned first).
+                if best.as_ref().map_or(true, |b| hit.t < b.t) {
+                    best = Some(WorldRayHit {
+                        body: Some(body.id),
+                        cell: hit.cell,
+                        t: hit.t,
+                        normal: body.orientation * hit.normal,
+                        position: origin + dir.scale(hit.t),
+                    });
+                }
+            }
+        }
+        best
     }
 
     /// The canonical FNV-1a digest of the full physics state, for the
@@ -640,6 +865,18 @@ impl PhysicsWorld {
         self.hash(&mut h);
         h.finish()
     }
+}
+
+/// One [`PhysicsWorld::raycast`] hit. `position` and `normal` are
+/// world frame; `cell` is a terrain cell for `body: None`, otherwise
+/// the hit body's shape cell.
+#[derive(Clone, Copy, Debug)]
+pub struct WorldRayHit {
+    pub body: Option<BodyId>,
+    pub cell: (i64, i64, i64),
+    pub t: Fixed,
+    pub normal: FixedVec3,
+    pub position: FixedVec3,
 }
 
 impl StateHash for PhysicsWorld {

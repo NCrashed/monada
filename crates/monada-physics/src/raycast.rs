@@ -7,6 +7,8 @@
 use monada_fixed::{Fixed, FixedVec3};
 
 use crate::field::VoxelField;
+use crate::material::MaterialId;
+use crate::shape::VoxelShape;
 
 /// A direction component at or below this is treated as exactly axial:
 /// that axis is never crossed (explicit branch — no `1/ε` blowing up
@@ -125,6 +127,27 @@ pub(crate) fn cast(
         }
     }
     None
+}
+
+/// A body's voxel grid viewed as a [`VoxelField`], for shape-frame
+/// raycasts (`World::raycast`): occupied ⇔ the shape cell is set;
+/// everything outside the grid is empty.
+pub(crate) struct ShapeOccupancy<'a>(pub &'a VoxelShape);
+
+impl VoxelField for ShapeOccupancy<'_> {
+    fn occupied(&self, x: i64, y: i64, z: i64) -> bool {
+        let (Ok(x), Ok(y), Ok(z)) = (i32::try_from(x), i32::try_from(y), i32::try_from(z)) else {
+            return false;
+        };
+        self.0.get(x, y, z).is_some()
+    }
+
+    fn material(&self, x: i64, y: i64, z: i64) -> MaterialId {
+        let (Ok(x), Ok(y), Ok(z)) = (i32::try_from(x), i32::try_from(y), i32::try_from(z)) else {
+            return MaterialId(0);
+        };
+        self.0.get(x, y, z).unwrap_or(MaterialId(0))
+    }
 }
 
 #[cfg(test)]

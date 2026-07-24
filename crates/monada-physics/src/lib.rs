@@ -10,15 +10,14 @@
 //! render state — bodies are mirrored to roxlap grids by the engine.
 //!
 //! Built milestone by milestone (P0–P6, see the plan). Currently at
-//! **P4**: destruction — `remove_voxels` carves bodies, updates mass
-//! properties incrementally, flood-fills connectivity, splits
-//! fragments into new bodies, degrades sub-threshold clusters to
-//! debris, and re-anchors or auto-detaches wheels — on top of P3's
-//! raycast wheels, P2's voxel bodies vs terrain (sphere-skin
-//! narrowphase, sequential-impulse solver, full-K NGS), P1's free-body
-//! integration, and P0's deterministic shell (fixed timestep,
-//! canonical [`state_hash`](PhysicsWorld::state_hash), serde
-//! snapshots, the `phys@` oracle golden gating it in CI).
+//! **P5**: scale — body-vs-body contacts through a transient spatial
+//! hash, speculative persistent manifolds, island sleeping with a
+//! full wake-source contract, and [`PhysicsWorld::raycast`] for
+//! engine-side projectiles — on top of P4 destruction, P3 raycast
+//! wheels, P2 voxel bodies vs terrain, P1 free-body integration, and
+//! P0.s deterministic shell (fixed timestep, canonical
+//! [`state_hash`](PhysicsWorld::state_hash), serde snapshots, the
+//! `phys@` oracle golden gating it in CI).
 //!
 //! ## Units
 //!
@@ -34,6 +33,7 @@
 #![deny(clippy::float_arithmetic, clippy::disallowed_types)]
 
 mod body;
+mod broadphase;
 mod contact;
 mod destruct;
 mod field;
@@ -52,4 +52,4 @@ pub use ids::BodyId;
 pub use material::{Material, MaterialId};
 pub use shape::VoxelShape;
 pub use wheels::{Wheel, WheelDef, WheelId, WheelInput};
-pub use world::{PhysicsWorld, SLEEP_ANGULAR, SLEEP_LINEAR};
+pub use world::{PhysicsWorld, WorldRayHit, SLEEP_ANGULAR, SLEEP_LINEAR, SLEEP_TICKS};

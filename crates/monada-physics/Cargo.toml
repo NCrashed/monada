@@ -20,6 +20,13 @@ serde = { workspace = true, features = ["std"] }
 # Snapshot round-trip test only; a human-readable format keeps replay
 # debugging legible. Not a runtime dependency (mirrors monada-sim).
 serde_json = "1"
+# The P5 scale benchmark (32 vehicles + 256 wrecks vs the 4 ms budget).
+# Pre-approved dev-dep (docs/plans/voxel-physics.md §1 rule 8).
+criterion = "0.5"
+
+[[bench]]
+name = "scale"
+harness = false
 
 [lints]
 workspace = true

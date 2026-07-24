@@ -119,6 +119,16 @@ pub struct RigidBody {
     /// Next wheel id this body hands out — monotonic, never reused,
     /// hashed (rule 3: id allocation is simulation state).
     pub(crate) next_wheel_id: u32,
+    /// Consecutive ticks below the sleep thresholds (P5). Hashed.
+    pub(crate) sleep_timer: u32,
+    /// Asleep: frozen — skipped by gravity, wheels, integration, and
+    /// terrain narrowphase; still present in broadphase so awake
+    /// bodies can find (and wake) it through a real contact. Hashed.
+    pub(crate) asleep: bool,
+    /// Derived cache: max skin-sphere reach from the `CoM`
+    /// (`max |offset| + ½`; ZERO for ghosts). Broadphase and
+    /// `notify_terrain_edit` bound the body by `position ± this`.
+    pub(crate) bounding_radius: Fixed,
 }
 
 impl RigidBody {
@@ -163,10 +173,17 @@ impl RigidBody {
             shape,
             inv_mass: Fixed::ONE / mass,
             inv_inertia_body: inertia_body.inverse(),
+            bounding_radius: skin
+                .iter()
+                .map(|s| s.offset.length())
+                .max()
+                .map_or(Fixed::ZERO, |m| m + crate::shape::SKIN_RADIUS),
             skin,
             com_local,
             wheels: Vec::new(),
             next_wheel_id: 0,
+            sleep_timer: 0,
+            asleep: false,
         }
     }
 
@@ -283,6 +300,13 @@ impl RigidBody {
         self.com_local
     }
 
+    /// Asleep (P5): frozen until a real contact, an external mutation,
+    /// a gravity change, or a nearby terrain edit wakes it.
+    #[must_use]
+    pub fn asleep(&self) -> bool {
+        self.asleep
+    }
+
     /// Index of `wheel` in the sorted wheel Vec, if attached.
     pub(crate) fn wheel_index(&self, wheel: WheelId) -> Option<usize> {
         self.wheels.binary_search_by_key(&wheel, |w| w.id).ok()
@@ -311,5 +335,7 @@ impl StateHash for RigidBody {
         }
         self.wheels.hash(h);
         h.write_u64(u64::from(self.next_wheel_id));
+        h.write_u64(u64::from(self.sleep_timer));
+        self.asleep.hash(h);
     }
 }
