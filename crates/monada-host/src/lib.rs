@@ -40,12 +40,12 @@ use std::time::Instant;
 
 use glam::DVec3;
 use monada_fixed::{Fixed, FixedVec3};
-use monada_format::{Map, SimHz};
+use monada_format::{Map, SimHz, Terrain};
 use monada_net::{LockstepSession, MatchInfo, QuicTransport, Replay, SessionConfig, SimDriver};
 use monada_render::CircleScene;
 use monada_script::{
-    shared_world, LocalBackend, RhaiBackend, RhaiDriver, ScriptBackend, SharedBridge, SharedWorld,
-    COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
+    shared_physics, shared_world, LocalBackend, PhysicsSim, RhaiBackend, RhaiDriver, ScriptBackend,
+    SharedBridge, SharedPhysics, SharedWorld, COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
@@ -245,6 +245,20 @@ fn tick_dt(hz: SimHz) -> Option<f64> {
     }
 }
 
+/// The embedded physics sim a `terrain = "volume"` map runs on, at the
+/// manifest's fixed tick rate; `None` for column maps (every map before
+/// the digger demo). Manifest validation already refused a volume map
+/// without a fixed `sim_hz`.
+fn volume_physics(manifest: &monada_format::Manifest) -> Option<SharedPhysics> {
+    if manifest.terrain != Terrain::Volume {
+        return None;
+    }
+    let SimHz::Fixed(hz) = manifest.sim_hz else {
+        unreachable!("Manifest::validate: volume terrain requires a fixed sim_hz");
+    };
+    Some(shared_physics(hz))
+}
+
 /// A live networked lockstep match.
 struct Net {
     session: LockstepSession<QuicTransport, RhaiDriver>,
@@ -275,6 +289,10 @@ struct MapSim {
     accumulator: f64,
     /// Player id attributed to this peer's input commands (hotseat = 0).
     local: PlayerId,
+    /// The embedded physics sim of a `terrain = "volume"` map, stepped
+    /// after each script `tick` — the same per-tick order as
+    /// [`RhaiDriver::step`] (docs/plans/digger-demo.md §1b).
+    phys: Option<SharedPhysics>,
 }
 
 impl MapSim {
@@ -317,6 +335,11 @@ impl MapSim {
                     .expect("map input command");
             }
             self.backend.on_tick().expect("map tick");
+            if let Some(phys) = &self.phys {
+                let mut sim = phys.lock().expect("physics mutex");
+                let PhysicsSim { world, terrain } = &mut *sim;
+                world.step(terrain);
+            }
             let commands = self.render.lock().expect("render mutex").drain_commands();
             for command in commands {
                 self.backend
@@ -878,6 +901,12 @@ impl App {
         // Bridge must be set before `init` calls model_box / voxel_fill / …
         let bridge: SharedBridge = render.clone();
         backend.set_bridge(&bridge);
+        // …and physics after the bridge (its `voxel_*` re-registrations
+        // dual-write store + render) but still before `init`.
+        let phys = volume_physics(&run.map.manifest);
+        if let Some(phys) = &phys {
+            backend.set_physics(phys);
+        }
         if let SimHz::Fixed(hz) = run.map.manifest.sim_hz {
             backend.set_tick_hz(hz);
         }
@@ -900,6 +929,7 @@ impl App {
             accumulator: 0.0,
             // Hotseat: one local player drives the real-time input.
             local: PlayerId(0),
+            phys,
         }))
     }
 
@@ -941,8 +971,11 @@ impl App {
             &run.map.manifest.actions,
         )));
         let bridge: SharedBridge = render.clone();
-        let mut driver = RhaiDriver::with_bridge(shared_world(SEED), &script, &bridge)
-            .expect("compile map script");
+        let mut driver = match volume_physics(&run.map.manifest) {
+            Some(phys) => RhaiDriver::with_physics(shared_world(SEED), &script, &bridge, &phys),
+            None => RhaiDriver::with_bridge(shared_world(SEED), &script, &bridge),
+        }
+        .expect("compile map script");
         if let SimHz::Fixed(hz) = run.map.manifest.sim_hz {
             driver.set_tick_hz(hz);
         }
@@ -1005,8 +1038,13 @@ impl App {
             &run.map.manifest.actions,
         )));
         let bridge: SharedBridge = render.clone();
-        let mut driver = RhaiDriver::with_bridge(shared_world(replay.seed), &script, &bridge)
-            .expect("compile map script");
+        let mut driver = match volume_physics(&run.map.manifest) {
+            Some(phys) => {
+                RhaiDriver::with_physics(shared_world(replay.seed), &script, &bridge, &phys)
+            }
+            None => RhaiDriver::with_bridge(shared_world(replay.seed), &script, &bridge),
+        }
+        .expect("compile map script");
         if let SimHz::Fixed(hz) = run.map.manifest.sim_hz {
             driver.set_tick_hz(hz);
         }

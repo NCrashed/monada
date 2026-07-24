@@ -17,6 +17,7 @@ members = [
     "crates/monada-rpg",
     "crates/monada-rts",
     "crates/monada-ship",
+    "crates/monada-digger",
 ]
 resolver = "2"
 

@@ -1,5 +1,5 @@
 # monada determinism goldens — @generated, do not hand-edit.
-# scenarios: walk (scripted circle), kernel (pure-Rust anchor), lockstep (two-session command demo), chess (turn-based rules), rpg (real-time action-RPG: per-tick input + voxel-query + wave RNG), ship (two-deck crew sim: deck-relative collision + stairwell deck-flip), rts (1v1 strategy: nav-routed orders + economy + combat + voxel_clear tree felling), phys (pure-Rust physics-crate anchor: PhysicsWorld fixed-timestep shell); seed "MONADA_0".
+# scenarios: walk (scripted circle), kernel (pure-Rust anchor), lockstep (two-session command demo), chess (turn-based rules), rpg (real-time action-RPG: per-tick input + voxel-query + wave RNG), ship (two-deck crew sim: deck-relative collision + stairwell deck-flip), rts (1v1 strategy: nav-routed orders + economy + combat + voxel_clear tree felling), phys (pure-Rust physics-crate anchor: PhysicsWorld fixed-timestep shell), digger (volume-terrain demo: physics-in-sim drive-train + chunk-hashed VolumeStore + combined digest); seed "MONADA_0".
 # Regenerate with `cargo run -p monada-oracle -- --bless`.
 walk@0 = 9082980244576976004
 walk@1 = 8427201372180398837
@@ -39,3 +39,8 @@ phys@1 = 4858980505362090139
 phys@30 = 14303127517825455207
 phys@150 = 16143216551385561881
 phys@600 = 7548639871792741744
+digger@0 = 8017098914716095842
+digger@1 = 16667351953155756591
+digger@30 = 10919706113375011411
+digger@150 = 2715012553624197260
+digger@600 = 12298108544170960150

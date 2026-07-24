@@ -29,8 +29,9 @@ use std::sync::{Arc, Mutex};
 
 use monada_format::{pack_dir, Map, SimHz};
 use monada_script::{
-    run_script, shared_world, LocalBackend, NullBridge, RhaiBackend, RhaiDriver, ScriptBackend,
-    SharedBridge, SharedWorld, TerrainBridge, COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
+    run_script, shared_physics, shared_world, LocalBackend, NullBridge, RhaiBackend, RhaiDriver,
+    ScriptBackend, SharedBridge, SharedWorld, TerrainBridge, COMMAND_DEMO_SCRIPT,
+    WALK_CIRCLE_SCRIPT,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId, World};
 use std::path::Path;
@@ -808,6 +809,81 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
     out
 }
 
+/// The digger demo map, embedded for the golden (read straight from the
+/// map's script file). Runs headless under a [`NullBridge`] with the
+/// embedded physics sim — the FULL `terrain = "volume"` driver stack:
+/// script `tick` → `PhysicsWorld::step` against the [`VolumeStore`]
+/// (docs/plans/digger-demo.md §1b) → the combined entity ⊕ physics ⊕
+/// terrain digest.
+///
+/// [`VolumeStore`]: monada_script::VolumeStore
+const DIGGER_SCRIPT: &str = include_str!("../../monada-digger/map/scripts/main.rhai");
+/// The digger map's fixed tick rate (its manifest's `sim_hz`).
+const DIGGER_HZ: u32 = 30;
+/// Hash the demo run at these tick counts (`digger@0` = post-init: apron
+/// painted, vehicle spawned, suspension not yet settled).
+const DIGGER_CHECKPOINTS: &[usize] = &[0, 1, 30, 150, 600];
+
+/// The fixed drive schedule (docs/plans/digger-demo.md §4): settle →
+/// straight run → steered arc → straighten → brake to a stop. Verb 0,
+/// `arg.x` = drive, `arg.y` = steer, `target` bit 0 = brake — one packed
+/// command per tick, the rpg pattern. KEPT IN SYNC with the behaviour
+/// test in `crates/monada-digger/tests/gameplay.rs`.
+fn digger_input(t: usize) -> Command {
+    // Identical arm bodies are distinct BEATS (straight run vs
+    // straighten-after-the-arc) — merging them would scramble the
+    // schedule's story.
+    #[allow(clippy::match_same_arms)]
+    let (drive, steer, brake) = match t {
+        0..=29 => (0, 0, 0),
+        30..=119 => (1, 0, 0),
+        120..=299 => (1, -1, 0),
+        300..=419 => (1, 0, 0),
+        _ => (0, 0, 1),
+    };
+    Command::on(
+        0,
+        EntityId(brake),
+        FixedVec3::new(Fixed::from_int(drive), Fixed::from_int(steer), Fixed::ZERO),
+    )
+}
+
+/// The digger golden: the volume-terrain demo driven through its own
+/// script with physics embedded in the sim, one input command per tick,
+/// hashed at fixed tick counts. Gates cross-platform determinism of the
+/// physics-in-sim seam: the chunk-hash-cached volume store, the wheel
+/// drive-train through the `phys_*` verbs, and the combined digest.
+///
+/// # Panics
+/// Panics on a script compile/run failure (a bug, not a data condition).
+#[must_use]
+pub fn digger_checkpoints() -> Vec<Checkpoint> {
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
+    let phys = shared_physics(DIGGER_HZ);
+    let mut driver = RhaiDriver::with_physics(shared_world(SEED), DIGGER_SCRIPT, &bridge, &phys)
+        .expect("compile digger");
+    driver.set_tick_hz(DIGGER_HZ);
+
+    let mut out = Vec::new();
+    let mut record = |driver: &RhaiDriver, n: usize| {
+        if DIGGER_CHECKPOINTS.contains(&n) {
+            out.push(Checkpoint {
+                scenario: "digger",
+                tick: n as u64,
+                hash: driver.state_hash(),
+            });
+        }
+    };
+
+    record(&driver, 0);
+    for t in 1..=600usize {
+        driver.apply_command(P0, &digger_input(t));
+        driver.step();
+        record(&driver, t);
+    }
+    out
+}
+
 /// Every gated scenario's checkpoints, in a fixed order.
 #[must_use]
 pub fn all_checkpoints() -> Vec<Checkpoint> {
@@ -819,6 +895,7 @@ pub fn all_checkpoints() -> Vec<Checkpoint> {
     out.extend(ship_checkpoints());
     out.extend(rts_checkpoints());
     out.extend(phys_checkpoints());
+    out.extend(digger_checkpoints());
     out
 }
 
@@ -846,7 +923,9 @@ pub fn render_goldens(checkpoints: &[Checkpoint]) -> String {
          RNG), ship (two-deck crew sim: deck-relative collision + stairwell \
          deck-flip), rts (1v1 strategy: nav-routed orders + economy + \
          combat + voxel_clear tree felling), phys (pure-Rust physics-crate \
-         anchor: PhysicsWorld fixed-timestep shell); seed \"MONADA_0\".\n",
+         anchor: PhysicsWorld fixed-timestep shell), digger (volume-terrain \
+         demo: physics-in-sim drive-train + chunk-hashed VolumeStore + \
+         combined digest); seed \"MONADA_0\".\n",
     );
     s.push_str("# Regenerate with `cargo run -p monada-oracle -- --bless`.\n");
     for c in checkpoints {

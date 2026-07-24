@@ -1,0 +1,37 @@
+# The physics demo map (docs/plans/digger-demo.md): a drill-nosed
+# vehicle in a voxel arena — drive it, jump it off ramps, and bore
+# tunnels through walls and floor. Manifest schema: monada_format::Manifest.
+name = "monada digger demo"
+engine_version = "0.0.1"
+# Requires the phys_* sim-physics verbs + volume terrain routing.
+host_api = 8
+# Single-player sandbox. The lockstep command stream keeps the LAN door
+# open (plan §6), but the demo ships solo.
+players = 1
+# Real-time 30 Hz; physics dt = the sim tick.
+sim_hz = "30hz"
+# The chunked 3D volume store: tunnels and overhangs are the whole
+# point — the column heightmap cannot represent them (plan §1a).
+terrain = "volume"
+script_runtime = "rhai"
+entry = "scripts/main.rhai"
+
+# Rebindable input actions (docs/plans/input-bindings.md). D1 wires the
+# drive train; the drill actions land with slice D3.
+[[action]]
+id = "drive"
+kind = "axis"
+default = { pos = "KeyW", neg = "KeyS" }
+label = { en = "Drive" }
+
+[[action]]
+id = "steer"
+kind = "axis"
+default = { pos = "KeyD", neg = "KeyA" }
+label = { en = "Steer" }
+
+[[action]]
+id = "brake"
+kind = "button"
+default = ["Space"]
+label = { en = "Brake" }

@@ -1681,6 +1681,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "monada-digger"
+version = "0.0.1"
+dependencies = [
+ "monada-fixed",
+ "monada-format",
+ "monada-host",
+ "monada-net",
+ "monada-physics",
+ "monada-script",
+ "monada-sim",
+ "serde_json",
+]
+
+[[package]]
 name = "monada-editor"
 version = "0.0.1"
 
@@ -1810,8 +1824,11 @@ dependencies = [
  "monada-fixed",
  "monada-nav",
  "monada-net",
+ "monada-physics",
  "monada-sim",
  "rhai",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

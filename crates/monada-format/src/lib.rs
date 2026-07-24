@@ -89,6 +89,21 @@ impl<'de> Deserialize<'de> for SimHz {
     }
 }
 
+/// The map's terrain model, declared as `terrain` in the manifest
+/// (docs/plans/digger-demo.md §1a).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Terrain {
+    /// The per-column heightmap collision store (the default — every map
+    /// that predates the declaration).
+    #[default]
+    Column,
+    /// The chunked 3D volume store: true tunnels and overhangs, plus an
+    /// embedded physics sim hashed alongside the entity world. Requires
+    /// a fixed `sim_hz` (physics `dt` is the tick).
+    Volume,
+}
+
 /// Kind of a map-declared input action (docs/plans/input-bindings.md §2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -203,6 +218,10 @@ pub struct Manifest {
     pub players: u32,
     /// Tick model (`"on_command"` or a Hz number).
     pub sim_hz: SimHz,
+    /// Terrain model (`"column"` or `"volume"`). Absent = column, the
+    /// store every pre-volume map was written against.
+    #[serde(default)]
+    pub terrain: Terrain,
     /// Script runtime the entry targets (`"rhai"` for v0).
     pub script_runtime: String,
     /// Archive-relative path to the entry script.
@@ -230,6 +249,11 @@ impl Manifest {
     pub fn validate(&self) -> Result<(), String> {
         if self.host_api == 0 {
             return Err("host_api 0 is invalid (versions start at 1)".into());
+        }
+        if self.terrain == Terrain::Volume && !matches!(self.sim_hz, SimHz::Fixed(_)) {
+            return Err(
+                "terrain = \"volume\" requires a fixed sim_hz (physics dt is the tick)".into(),
+            );
         }
         for (i, action) in self.actions.iter().enumerate() {
             action.validate()?;

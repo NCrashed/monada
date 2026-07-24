@@ -1,0 +1,47 @@
+[package]
+name = "monada-digger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "The physics demo map (docs/plans/digger-demo.md): a drill-nosed vehicle on volume terrain — drive, jump, drill — with a thin `cargo run` launcher."
+publish = false
+
+[[bin]]
+name = "monada-digger"
+path = "src/main.rs"
+
+[dependencies]
+# The host event loop + shared map CLI + archive loader (the RPG/RTS
+# launcher pattern). `default-features = false` + this crate's own
+# `audio` feature lets a headless build drop cpal/ALSA.
+monada-host = { path = "../monada-host", default-features = false }
+monada-format = { workspace = true }
+
+[features]
+default = ["audio"]
+# Forwards to the host's real sound playback (on by default).
+audio = ["monada-host/audio"]
+
+[build-dependencies]
+# build.rs packs `map/` into a deterministic `digger.monada` in OUT_DIR.
+monada-format = { workspace = true }
+
+[dev-dependencies]
+# Headless determinism tests drive the Rhai backend directly (no host,
+# no window), mirroring monada-rpg.
+monada-format = { workspace = true }
+monada-script = { workspace = true }
+monada-sim = { workspace = true }
+monada-fixed = { workspace = true }
+monada-net = { workspace = true }
+# The snapshot-tripwire test spawns a ghost body straight through the
+# physics handle.
+monada-physics = { workspace = true }
+# Snapshot round-trip test only.
+serde_json = "1"
+
+[lints]
+workspace = true

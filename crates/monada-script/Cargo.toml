@@ -15,6 +15,10 @@ monada-fixed = { workspace = true }
 # The deterministic grid pathfinder behind `nav_path`/`nav_block`
 # (docs/plans/rts-demo.md §1a); VoxelStore implements its NavWorld.
 monada-nav = { workspace = true }
+# Deterministic voxel rigid bodies for `terrain = "volume"` maps: the
+# driver embeds a PhysicsWorld + VolumeStore beside the entity World and
+# folds all three into one state_hash (docs/plans/digger-demo.md §1b).
+monada-physics = { workspace = true }
 # The lockstep session's SimDriver seam. monada-script is the only crate
 # that links both rhai and net: RhaiDriver adapts the Rhai backend to the
 # transport-agnostic session (DESIGN.md §3.1, M3). net never links rhai.
@@ -23,6 +27,13 @@ monada-net = { workspace = true }
 # (DESIGN.md §5.2) — sim math goes through monada-fixed. `sync` makes
 # the engine Send+Sync, so the shared world handle is Arc<Mutex<World>>.
 rhai = { version = "1", default-features = false, features = ["std", "sync", "no_float"] }
+# Snapshot serialisation for the volume terrain store (format-agnostic,
+# like monada-sim's World).
+serde = { workspace = true }
+
+[dev-dependencies]
+# Snapshot round-trip test only; production stays format-agnostic.
+serde_json = "1"
 
 [lints]
 workspace = true

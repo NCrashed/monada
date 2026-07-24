@@ -22,11 +22,15 @@ use monada_sim::{Command, PlayerId, World};
 
 mod driver;
 mod local_backend;
+mod physics;
 mod rhai_backend;
+mod volume;
 
 pub use driver::RhaiDriver;
 pub use local_backend::LocalBackend;
+pub use physics::{shared_physics, PhysicsSim, SharedPhysics};
 pub use rhai_backend::RhaiBackend;
+pub use volume::VolumeStore;
 
 /// The host script-API version this crate registers: the set of
 /// functions, their names, and their semantics that map scripts see
@@ -47,8 +51,10 @@ pub use rhai_backend::RhaiBackend;
 /// `highlight_add`/`highlighted_all`/`drag_begin`/`drag_end` (RTS
 /// multi-select); 6 = `voxel_clear` (destructibles — RTS tree felling,
 /// ship doors); 7 = `grid_spawn`/`voxel_fill_in` + `vision_observer`'s
-/// grid overload (multi-grid ships).
-pub const HOST_API_VERSION: u32 = 7;
+/// grid overload (multi-grid ships); 8 = the `phys_*` sim-physics verbs
+/// and the material-id overloads of `voxel_fill`/`voxel_set` on volume
+/// maps (digger demo, docs/plans/digger-demo.md §1c).
+pub const HOST_API_VERSION: u32 = 8;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a

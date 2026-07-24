@@ -16,7 +16,8 @@ use monada_fixed::{trig, Fixed, FixedVec3};
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 use rhai::{Array, Dynamic, Engine, ImmutableString, Scope, AST};
 
-use crate::{ScriptBackend, ScriptError, SharedBridge, SharedWorld, UiEvent};
+use crate::physics::register_physics_api;
+use crate::{ScriptBackend, ScriptError, SharedBridge, SharedPhysics, SharedWorld, UiEvent};
 
 /// The buffer `ui_emit_event` pushes into and [`drain_ui_events`] empties.
 /// Shared (`Arc<Mutex<_>>`) for the same reason as [`SharedWorld`]:
@@ -63,6 +64,10 @@ pub struct RhaiBackend {
     /// [`drain_ui_events`](ScriptBackend::drain_ui_events) by the host.
     /// Render-side only — never part of [`World`](monada_sim::World) state.
     events: UiEventBuffer,
+    /// The bridge handle [`set_bridge`](RhaiBackend::set_bridge) registered,
+    /// kept so [`set_physics`](RhaiBackend::set_physics) can dual-write the
+    /// volume-routed terrain verbs (store + render).
+    bridge: Option<SharedBridge>,
 }
 
 impl RhaiBackend {
@@ -89,6 +94,7 @@ impl RhaiBackend {
             has_tick_with_dt: false,
             tick_dt: None,
             events,
+            bridge: None,
         }
     }
 
@@ -108,6 +114,17 @@ impl RhaiBackend {
     /// construction is fine.
     pub fn set_bridge(&mut self, bridge: &SharedBridge) {
         register_bridge_api(&mut self.engine, bridge);
+        self.bridge = Some(bridge.clone());
+    }
+
+    /// Register the sim-physics host API (`phys_*`, docs/plans/digger-demo.md
+    /// §1c) and re-route the terrain paint verbs through the shared volume
+    /// store. Call **once, before** [`on_init`](ScriptBackend::on_init) and
+    /// **after** [`set_bridge`](RhaiBackend::set_bridge) (the volume-routed
+    /// `voxel_*` registrations shadow the bridge-only ones and forward to
+    /// whatever bridge is set at this moment).
+    pub fn set_physics(&mut self, phys: &SharedPhysics) {
+        register_physics_api(&mut self.engine, phys, self.bridge.as_ref());
     }
 
     fn call<A: rhai::FuncArgs>(&mut self, name: &str, args: A) -> Result<(), ScriptError> {
