@@ -532,8 +532,47 @@ intake refreshing contacts, cached-contact invalidation on terrain edits.
 penetration rates; vehicle drilling into a wall decelerates by hardness;
 tunnel-scenario golden hash-stable while terrain edits stream in.
 
-After P6: demo map (new `monada-*` demo crate + map script + oracle
-scenario) is planned as its own document, like the RTS and ship demos.
+**P6 amendments (approved 2026-07-24).** Surfaced per §7 and folded in:
+
+- **The drill tool is an oriented box riding the body** (body-frame,
+  CoM-relative anchor, like a wheel); overlap tests CELL CENTRES with an
+  INCLUSIVE boundary (a centre exactly on a face counts — and at voxel
+  granularity a ±½ box centred on an integer touches both neighbours'
+  centres on that axis; tested). Half-voxel rim allowance, deliberate.
+  Degenerate boxes (non-positive half-extents) panic — a map-author bug,
+  not a data condition.
+- **The reaction opposes the TOOL POINT's velocity and is clamped through
+  the point's effective mass** — the P3 brake-clamp math reused verbatim
+  (`solver::effective_mass`): a naive `m·|v|` clamp would reverse an
+  off-CoM nose (the angular term makes `m_eff < m` exactly where drills
+  live). It can stop the point, never reverse it; a still point takes no
+  reaction (deterministic branch, like the degenerate steer); the body
+  wakes unconditionally, zero-impulse branches included. The impulse
+  applies at the box centre regardless of which overlapped cells were
+  cut — an asymmetric cut exerts no side torque (another documented
+  chunky allowance). Returns the applied magnitude for engine feedback.
+- **`drill_query` is terrain-only**: body-vs-body drilling is engine
+  composition over `raycast` → `remove_voxels` → `apply_impulse_at`, all
+  already tested — no second API.
+- **`Material` grew `hardness`** (fold append, re-bless): the reaction
+  force one voxel exerts while being cut. Rustdoc keeps the intuition
+  over the formula: 100 stops a light vehicle dead, 10 barely slows it.
+- **`notify_terrain_edit` now also purges warm-start entries** against
+  terrain cells inside the (inclusive) edited box: a stale entry is inert
+  while the cell stays empty, but a rebuilt cell would warm-start a fresh
+  contact with another era's impulse. Only awake bodies hold cache
+  entries at all (a sleeper's drop at the first rebuild after it sleeps —
+  P5 mechanics), so the wake half and the purge half concern the same
+  boundary.
+- The tunnel scenario put wheels next to vertical walls for the first
+  time; the shelved `N_eff = N·cos` riser-grip note did NOT manifest (no
+  anomalous wall-pull in the layered runs) — the shelf survives the final
+  milestone, honestly still in the plan.
+
+**The plan is complete: P0–P6 all landed** (P0/P1 2026-07-23, P2–P6
+2026-07-24). Next: the demo map — a new `monada-*` demo crate + map
+script + oracle scenario, planned as its own document like the RTS and
+ship demos.
 
 ---
 
