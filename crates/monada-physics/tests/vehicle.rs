@@ -550,3 +550,56 @@ fn snapshot_round_trip_mid_drive() {
     }
     assert_eq!(restored.state_hash(), world.state_hash());
 }
+
+/// The hover-cart contract (plan, P3 amendments): wheels on a ghost
+/// body are legal — the suspension raycasts terrain and needs no
+/// collision skin. Guards the contract through P4's `RigidBody`
+/// surgery: a ghost with four wheels hovers at its suspension ride
+/// height instead of falling through the floor.
+#[test]
+fn ghost_body_hovers_on_wheels() {
+    let mut world = PhysicsWorld::new(25);
+    world.set_gravity(vec3(0, 0, GRAVITY_Z));
+    world.register_material(Material {
+        density: Fixed::ONE,
+        friction: fx(1, 2),
+        restitution: Fixed::ZERO,
+    });
+    // mass 4, unit inertia — spawn well above ride height.
+    let body = world.spawn(&monada_physics::BodyDef {
+        position: vec3(0, 0, 4),
+        mass: Fixed::from_int(4),
+        ..monada_physics::BodyDef::default()
+    });
+    assert_eq!(
+        world.body(body).unwrap().skin_len(),
+        0,
+        "a ghost has no skin"
+    );
+    for (sx, sy) in [(1, 1), (1, -1), (-1, 1), (-1, -1)] {
+        world.attach_wheel(
+            body,
+            &WheelDef {
+                anchor: vec3(sx, sy, 0),
+                rest_length: fx(3, 2),
+                radius: Fixed::HALF,
+                // Per-wheel load m·g/4 = 10 → compression 0.25.
+                stiffness: Fixed::from_int(40),
+                damping: Fixed::from_int(10),
+                friction: fx(4, 5),
+            },
+        );
+    }
+    for _ in 0..300 {
+        world.step(&Floor);
+    }
+    let b = world.body(body).unwrap();
+    // Ride height: contact 0 + radius 0.5 + suspension (1.5 − 0.25)
+    // + anchor→CoM 0 = 1.75, within contact tolerance.
+    close(b.position().z, fx(7, 4), 1 << 27);
+    assert!(
+        b.linear_velocity().length() < fx(1, 10),
+        "hover not settled: |v| = {:?}",
+        b.linear_velocity().length()
+    );
+}

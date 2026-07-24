@@ -399,6 +399,12 @@ flood-fill, split into new bodies, debris-spawn events, collision-skin update.
 match the original minus removed voxels (verified against full recompute);
 sub-threshold fragments emit debris events; hash-stable destruction golden.
 
+P3 leaves one noted rough edge for P5/P6: the tire friction budget and
+the slip-kill load weights use the raw ray-compression `N`, so a wheel
+whose ray hits a vertical face (riser, wall) claims grip and load share
+with zero suspension push behind it. Harmless on stair treads; revisit
+as `N_eff = N·cos` when walls/3D terrain arrive.
+
 **P5 — Scale: broadphase, islands, sleeping, raycast.**
 Spatial hash broadphase, union-find islands, sleeping/waking, body-vs-body
 contacts (vehicle collisions, wreck piles), `PhysicsWorld::raycast` (for

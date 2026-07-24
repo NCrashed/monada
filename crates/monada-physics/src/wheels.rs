@@ -269,6 +269,14 @@ pub(crate) fn wheel_pass(
                 let v_hit = v0 + w0.cross(g.r);
                 let weight = g.normal_force / total_load;
                 let mu = (wheel.def.friction * terrain.friction).sqrt();
+                // NB (P5/P6 follow-up, plan §6): the budget and the
+                // kill weights use the raw ray-compression N — a wheel
+                // whose ray hit a vertical riser face gets cos ≈ 0
+                // suspension push yet still claims friction and a
+                // load share, gripping a face nothing presses it
+                // into. Harmless on treads (today's scenarios); for
+                // walls/3D terrain weigh `N_eff = N·cos` here and in
+                // `total_load`.
                 let budget = mu * g.normal_force * dt;
                 // Longitudinal: drive force (unscaled) + weighted
                 // brake kill against rolling + brake-gated
