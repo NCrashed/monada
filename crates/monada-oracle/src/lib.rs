@@ -779,7 +779,10 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
                 // P6: a short tunnel drilled through the bump field
                 // while edits stream in — one column of cells per
                 // tick, wake/invalidate notify, hardness reaction on
-                // the vehicle.
+                // the vehicle. The two-material cut list is a
+                // STAND-IN for an engine policy (six cells are carved
+                // per tick) — the mismatch is deliberate: the golden
+                // gates the seam's arithmetic, not a cutting policy.
                 400..=429 => {
                     let x = 45 + i64::try_from(t - 400).expect("small");
                     for y in -1..=1i64 {

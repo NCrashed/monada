@@ -202,10 +202,30 @@ fn reaction_closed_form_and_effective_mass_clamp() {
         "tool point must never reverse"
     );
 
-    // Zero velocity: no reaction, deterministic branch, still wakes.
+    // Zero velocity: no reaction, deterministic branch — and the wake
+    // is unconditional, so prove it on a body that is ACTUALLY asleep
+    // (its velocities are zeroed by the sleep itself).
     let mut world = layered_world();
-    let id = world.spawn(&BodyDef::default());
+    let mut shape = VoxelShape::new(2, 2, 2);
+    shape.fill_box((0, 0, 0), (1, 1, 1), MaterialId(1));
+    let id = world.spawn_voxels(&VoxelBodyDef {
+        shape,
+        position: vec3(0, 0, 3),
+        orientation: FixedQuat::IDENTITY,
+        linear_velocity: FixedVec3::ZERO,
+        angular_velocity: FixedVec3::ZERO,
+    });
+    let carved = BTreeSet::new();
+    for _ in 0..200 {
+        let field = Layered { carved: &carved };
+        world.step(&field);
+    }
+    assert!(world.body(id).unwrap().asleep(), "setup: must sleep");
     assert_eq!(world.drill_reaction(id, &tool, &cut), Fixed::ZERO);
+    assert!(
+        !world.body(id).unwrap().asleep(),
+        "a zero-impulse reaction still wakes"
+    );
 }
 
 /// Query geometry: a 45°-rotated box catches the diagonal cells; an
