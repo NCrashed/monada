@@ -18,6 +18,14 @@ use core::ops::{Add, Mul, Neg, Sub};
 
 use crate::{Fixed, FixedQuat, FixedVec3};
 
+/// One Q32.32 product kept wide: an `i128` still scaled by 2³².
+/// The wide determinant/inverse paths build on this so no
+/// intermediate ever narrows to `i64`.
+#[inline]
+fn wide_mul(a: Fixed, b: Fixed) -> i128 {
+    (i128::from(a.to_bits()) * i128::from(b.to_bits())) >> 32
+}
+
 /// A 3×3 matrix of [`Fixed`] entries, stored as three column vectors.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -97,39 +105,93 @@ impl FixedMat3 {
     }
 
     /// The determinant, as the scalar triple product of the columns.
+    ///
+    /// **Range**: the value wraps past `±2^31` like every [`Fixed`]
+    /// chain — an inertia tensor of a body barely 6 voxels across
+    /// already exceeds it (`1296³ ≈ 2.2e9`). Sign tests and inversion
+    /// must go through the wide-arithmetic paths
+    /// ([`leading_minors_positive`](FixedMat3::leading_minors_positive),
+    /// [`inverse`](FixedMat3::inverse)), which never narrow the
+    /// determinant to `i64`.
     #[inline]
     #[must_use]
     pub fn determinant(self) -> Fixed {
         self.x_axis.dot(self.y_axis.cross(self.z_axis))
     }
 
-    /// The inverse, via the adjugate over the determinant.
+    /// The determinant as a Q32.32-scaled `i128` — exact sign and
+    /// magnitude for any tensor physics builds (entries below `2^28`
+    /// keep every intermediate inside `i128` with room to spare).
+    fn determinant_wide(self) -> i128 {
+        let (a, b, c) = (self.x_axis, self.y_axis, self.z_axis);
+        // (b × c) per component, Q32.32-scaled i128.
+        let cx = wide_mul(b.y, c.z) - wide_mul(b.z, c.y);
+        let cy = wide_mul(b.z, c.x) - wide_mul(b.x, c.z);
+        let cz = wide_mul(b.x, c.y) - wide_mul(b.y, c.x);
+        // a · (b × c), still Q32.32-scaled.
+        ((i128::from(a.x.to_bits()) * cx) >> 32)
+            + ((i128::from(a.y.to_bits()) * cy) >> 32)
+            + ((i128::from(a.z.to_bits()) * cz) >> 32)
+    }
+
+    /// Sylvester's criterion on the leading principal minors, computed
+    /// in wide arithmetic so large inertia tensors cannot wrap the
+    /// third minor into a false (or worse, falsely passing) sign.
+    #[must_use]
+    pub fn leading_minors_positive(self) -> bool {
+        let m1 = self.x_axis.x > Fixed::ZERO;
+        let m2 =
+            wide_mul(self.x_axis.x, self.y_axis.y) - wide_mul(self.y_axis.x, self.x_axis.y) > 0;
+        m1 && m2 && self.determinant_wide() > 0
+    }
+
+    /// The inverse, via the adjugate over the determinant — the
+    /// determinant and every adjugate entry are carried in `i128`, so
+    /// tensors whose determinant exceeds the Q32.32 ceiling (any body
+    /// ≳ 6 voxels across) invert correctly; only the *result* narrows,
+    /// and inverse-inertia entries are small by nature.
     ///
     /// Intended for the well-conditioned matrices physics actually
     /// inverts — the inertia tensor of a non-empty voxel body is
     /// symmetric positive-definite, so its determinant is comfortably
-    /// non-zero. Entries of a near-singular matrix wrap like any other
-    /// out-of-range [`Fixed`] quotient.
+    /// non-zero.
     ///
     /// # Panics
     /// Panics if the determinant is zero (the matrix is singular).
     #[must_use]
     pub fn inverse(self) -> FixedMat3 {
-        // For column-major M = [a b c] the inverse's *rows* are the
-        // cross products (b×c, c×a, a×b) over det = a · (b×c).
-        let r0 = self.y_axis.cross(self.z_axis);
-        let r1 = self.z_axis.cross(self.x_axis);
-        let r2 = self.x_axis.cross(self.y_axis);
-        let det = self.x_axis.dot(r0);
+        let det = self.determinant_wide();
         assert!(
-            det != Fixed::ZERO,
+            det != 0,
             "FixedMat3::inverse: singular matrix (determinant is zero)"
         );
-        let inv_det = Fixed::ONE / det;
+        let (a, b, c) = (self.x_axis, self.y_axis, self.z_axis);
+        // For column-major M = [a b c] the inverse's rows are the
+        // cross products (b×c, c×a, a×b) over the determinant. Each
+        // entry: (cross_raw << 32) / det_raw, truncating toward zero
+        // like Fixed::div.
+        let entry = |p: Fixed, q: Fixed, r: Fixed, s: Fixed| {
+            let cross = wide_mul(p, q) - wide_mul(r, s);
+            Fixed::from_bits(((cross << 32) / det) as i64)
+        };
+        // Columns collect the x/y/z components of the rows
+        // (b×c, c×a, a×b) — same layout as the narrow version had.
         FixedMat3 {
-            x_axis: FixedVec3::new(r0.x, r1.x, r2.x).scale(inv_det),
-            y_axis: FixedVec3::new(r0.y, r1.y, r2.y).scale(inv_det),
-            z_axis: FixedVec3::new(r0.z, r1.z, r2.z).scale(inv_det),
+            x_axis: FixedVec3::new(
+                entry(b.y, c.z, b.z, c.y), // (b×c).x
+                entry(c.y, a.z, c.z, a.y), // (c×a).x
+                entry(a.y, b.z, a.z, b.y), // (a×b).x
+            ),
+            y_axis: FixedVec3::new(
+                entry(b.z, c.x, b.x, c.z), // (b×c).y
+                entry(c.z, a.x, c.x, a.z), // (c×a).y
+                entry(a.z, b.x, a.x, b.z), // (a×b).y
+            ),
+            z_axis: FixedVec3::new(
+                entry(b.x, c.y, b.y, c.x), // (b×c).z
+                entry(c.x, a.y, c.y, a.x), // (c×a).z
+                entry(a.x, b.y, a.y, b.x), // (a×b).z
+            ),
         }
     }
 

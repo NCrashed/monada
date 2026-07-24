@@ -209,3 +209,32 @@ fn additive_ops_are_entrywise() {
         assert_eq!(m * Fixed::ONE, m);
     }
 }
+
+/// Large inertia tensors — the P4 regression: a body barely 6 voxels
+/// across has det ≈ 1296³ ≈ 2.2e9, past the Q32.32 ceiling. The wide
+/// paths must still invert it and read its definiteness correctly.
+#[test]
+fn wide_paths_survive_large_tensors() {
+    let d = FixedMat3::from_diagonal(FixedVec3::new(
+        Fixed::from_int(1296),
+        Fixed::from_int(1400),
+        Fixed::from_int(1522),
+    ));
+    assert!(d.leading_minors_positive(), "large SPD reads positive");
+    close_mat(d * d.inverse(), FixedMat3::IDENTITY, 1 << 12);
+    // Rotated large tensor: R·D·Rᵀ inverts through the same path.
+    let mut s = 0x1BAD_B002;
+    for _ in 0..50 {
+        let r = FixedMat3::from_quat(random_unit_quat(&mut s));
+        let m = r * d * r.transpose();
+        assert!(m.leading_minors_positive());
+        close_mat(m * m.inverse(), FixedMat3::IDENTITY, 1 << 14);
+    }
+    // Indefinite large tensor reads negative despite the wrap regime.
+    let bad = FixedMat3::from_diagonal(FixedVec3::new(
+        Fixed::from_int(1296),
+        Fixed::from_int(1400),
+        Fixed::from_int(-1522),
+    ));
+    assert!(!bad.leading_minors_positive());
+}
