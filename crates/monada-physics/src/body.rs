@@ -143,18 +143,14 @@ impl RigidBody {
             mass > Fixed::ZERO,
             "RigidBody: mass must be positive, got {mass:?}"
         );
-        // Sylvester's criterion: positive leading principal minors.
-        // (Physical tensors are symmetric up to per-entry rounding —
-        // e.g. an R·D·Rᵀ built in fixed point — so symmetry itself is
-        // deliberately not asserted.)
-        let i = &inertia_body;
-        let minor1 = i.x_axis.x;
-        let minor2 = i.x_axis.x * i.y_axis.y - i.y_axis.x * i.x_axis.y;
-        let minor3 = i.determinant();
+        // Sylvester's criterion via the wide-arithmetic minors — the
+        // third minor of a body barely 6 voxels across already wraps
+        // Q32.32. (Physical tensors are symmetric up to per-entry
+        // rounding — e.g. an R·D·Rᵀ built in fixed point — so symmetry
+        // itself is deliberately not asserted.)
         assert!(
-            minor1 > Fixed::ZERO && minor2 > Fixed::ZERO && minor3 > Fixed::ZERO,
-            "RigidBody: inertia_body must be positive-definite \
-             (leading minors {minor1:?}, {minor2:?}, {minor3:?})"
+            inertia_body.leading_minors_positive(),
+            "RigidBody: inertia_body must be positive-definite, got {inertia_body:?}"
         );
         RigidBody {
             id,

@@ -10,14 +10,15 @@
 //! render state — bodies are mirrored to roxlap grids by the engine.
 //!
 //! Built milestone by milestone (P0–P6, see the plan). Currently at
-//! **P3**: raycast wheel suspension — DDA rays into the field,
-//! spring-damper along the ray with the force on the contact normal,
-//! friction-circle tires, drive/brake/steer inputs — on top of P2's
-//! voxel bodies vs terrain (sphere-skin narrowphase,
-//! sequential-impulse solver, full-K NGS), P1's free-body integration,
-//! and P0's deterministic shell (fixed timestep, canonical
-//! [`state_hash`](PhysicsWorld::state_hash), serde snapshots, the
-//! `phys@` oracle golden gating it in CI).
+//! **P4**: destruction — `remove_voxels` carves bodies, updates mass
+//! properties incrementally, flood-fills connectivity, splits
+//! fragments into new bodies, degrades sub-threshold clusters to
+//! debris, and re-anchors or auto-detaches wheels — on top of P3's
+//! raycast wheels, P2's voxel bodies vs terrain (sphere-skin
+//! narrowphase, sequential-impulse solver, full-K NGS), P1's free-body
+//! integration, and P0's deterministic shell (fixed timestep,
+//! canonical [`state_hash`](PhysicsWorld::state_hash), serde
+//! snapshots, the `phys@` oracle golden gating it in CI).
 //!
 //! ## Units
 //!
@@ -34,6 +35,7 @@
 
 mod body;
 mod contact;
+mod destruct;
 mod field;
 mod ids;
 mod material;
@@ -44,6 +46,7 @@ mod wheels;
 mod world;
 
 pub use body::{BodyDef, RigidBody, VoxelBodyDef};
+pub use destruct::{DebrisCluster, Removal};
 pub use field::{EmptyField, VoxelField};
 pub use ids::BodyId;
 pub use material::{Material, MaterialId};

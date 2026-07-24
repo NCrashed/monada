@@ -588,13 +588,16 @@ pub fn rts_checkpoints() -> Vec<Checkpoint> {
 /// two P2 voxel bodies exercising the contact stack (a 3³ cube dropped
 /// from z = 30, at rest well before tick 600 with a live warm-start
 /// cache; a 4×4×2 slab shoved sideways, sliding to a frictional stop)
-/// — and a P3 four-wheel vehicle driving a scripted schedule: wind-up
-/// straight, a steered arc over the bump field, brake to a stop.
+/// — a P3 four-wheel vehicle driving a scripted schedule (wind-up
+/// straight, a steered arc over the bump field, brake to a stop) —
+/// and a P4 destruction beat at tick 300: the resting cube is cut in
+/// half (a split into two live bodies) and the slab loses its corner
+/// column to a debris cluster, mid-slide.
 /// Like `kernel@` it is pure Rust with no scripting: the anchor that
 /// gates `monada-physics`'s state layout, canonical hash, and solver +
-/// wheel arithmetic cross-platform (docs/plans/voxel-physics.md §5).
-/// Later milestones grow this scenario (P4 a destruction script), each
-/// growth re-blessed explicitly.
+/// wheel + destruction arithmetic cross-platform
+/// (docs/plans/voxel-physics.md §5). Later milestones grow this
+/// scenario, each growth re-blessed explicitly.
 ///
 /// [`PhysicsWorld`]: monada_physics::PhysicsWorld
 ///
@@ -664,7 +667,7 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
     // P2: a dropped cube (rests by ~tick 80)…
     let mut cube = VoxelShape::new(3, 3, 3);
     cube.fill_box((0, 0, 0), (2, 2, 2), mat);
-    world.spawn_voxels(&VoxelBodyDef {
+    let cube_body = world.spawn_voxels(&VoxelBodyDef {
         shape: cube,
         position: v3(20, 0, 30),
         orientation: FixedQuat::IDENTITY,
@@ -674,7 +677,7 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
     // …and a shoved slab sliding to a frictional stop.
     let mut slab = VoxelShape::new(4, 4, 2);
     slab.fill_box((0, 0, 0), (3, 3, 1), mat);
-    world.spawn_voxels(&VoxelBodyDef {
+    let slab_body = world.spawn_voxels(&VoxelBodyDef {
         shape: slab,
         position: v3(-20, 0, 1),
         orientation: FixedQuat::IDENTITY,
@@ -745,6 +748,17 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
                     input(true, Fixed::from_ratio(3, 10), fx(25), Fixed::ZERO)(
                         &mut world, &wheel_ids,
                     );
+                }
+                // P4: cut the resting cube in half (both halves ≥ the
+                // debris threshold → a split) and blow the slab's
+                // corner column off (2 voxels → a debris cluster).
+                300 => {
+                    let plane: Vec<(i32, i32, i32)> = (0..3)
+                        .flat_map(|y| (0..3).map(move |z| (1, y, z)))
+                        .collect();
+                    let _ = world.remove_voxels(cube_body, &plane);
+                    let _ = world
+                        .remove_voxels(slab_body, &[(1, 0, 0), (1, 0, 1), (0, 1, 0), (0, 1, 1)]);
                 }
                 450 => input(false, Fixed::ZERO, Fixed::ZERO, fx(100))(&mut world, &wheel_ids),
                 _ => {}

@@ -1,20 +1,20 @@
 //! [`PhysicsWorld`] — the physics state root (docs/plans/voxel-physics.md
 //! §3 `world`).
 //!
-//! P2 scope: voxel bodies against a terrain [`VoxelField`] — sphere-skin
-//! narrowphase, sequential-impulse velocity solve with Coulomb
-//! friction, full-K NGS position correction, persistent warm-start
-//! cache. P1's free-body integration and P0's deterministic shell
-//! carry over unchanged.
+//! The tick pipeline (gravity → wheels → narrowphase → velocity solve
+//! → integrate → NGS → cache) plus the out-of-tick mutation surface:
+//! spawns, impulses, wheel management, and P4 destruction.
 
-use monada_fixed::{Fixed, FixedQuat, FixedVec3};
+use monada_fixed::{Fixed, FixedMat3, FixedQuat, FixedVec3};
 use monada_sim::{StateHash, StateHasher};
 
 use crate::body::{BodyDef, RigidBody, VoxelBodyDef};
 use crate::contact::{self, ContactCacheEntry};
+use crate::destruct::{self, DebrisCluster, Removal};
 use crate::field::VoxelField;
 use crate::ids::BodyId;
 use crate::material::{Material, MaterialId};
+use crate::shape::VoxelShape;
 use crate::solver;
 use crate::wheels::{self, Wheel, WheelDef, WheelId, WheelInput};
 
@@ -48,8 +48,9 @@ pub struct PhysicsWorld {
     /// The next id [`spawn`](PhysicsWorld::spawn) hands out. Monotonic,
     /// hashed (rule 3: id allocation is simulation state).
     next_body_id: u64,
-    /// All live bodies, ascending by id. Spawn-only until P4, so a
-    /// plain push keeps the order; despawn/split must preserve it.
+    /// All live bodies, ascending by id — spawn pushes fresh (larger)
+    /// ids, P4 despawn/split removes and appends in order, so the Vec
+    /// stays sorted through every mutation.
     bodies: Vec<RigidBody>,
     /// Registered materials; `MaterialId` indexes this in registration
     /// order (the cross-crate contract on [`VoxelField`]).
@@ -59,6 +60,11 @@ pub struct PhysicsWorld {
     /// accumulated impulses feed the next tick's solve (plan, P2
     /// amendments).
     impulse_cache: Vec<ContactCacheEntry>,
+    /// Connected components SMALLER than this many voxels become
+    /// debris instead of bodies — including the would-be survivor
+    /// (a body degrades to debris and despawns). Hashed config;
+    /// default 3. Values ≤ 1 disable debris entirely.
+    debris_threshold: u32,
 }
 
 impl PhysicsWorld {
@@ -80,7 +86,14 @@ impl PhysicsWorld {
             bodies: Vec::new(),
             materials: Vec::new(),
             impulse_cache: Vec::new(),
+            debris_threshold: 3,
         }
+    }
+
+    /// Set the debris threshold (see the field: components smaller
+    /// than this become [`DebrisCluster`]s, survivors included).
+    pub fn set_debris_threshold(&mut self, voxels: u32) {
+        self.debris_threshold = voxels;
     }
 
     /// Ticks stepped since construction.
@@ -247,6 +260,278 @@ impl PhysicsWorld {
         body.wheels[index].input = input;
     }
 
+    /// Carve `cells` (SHAPE-local coordinates — the body's as-authored
+    /// grid; note a split-off fragment gets a rebased tight grid, so a
+    /// later `remove_voxels` on the fragment speaks the fragment's own
+    /// coordinates, not the parent's) out of a voxel body,
+    /// synchronously: incremental mass update of the survivor,
+    /// 6-connected flood fill, splits, debris, skin re-derive, wheel
+    /// re-anchor/auto-detach, warm-start cache purge.
+    ///
+    /// Empty / out-of-bounds cells are skipped silently and duplicates
+    /// collapse (contract, not accident — the P6 drill may
+    /// over-approximate freely). `removed == 0` guarantees zero state
+    /// change.
+    ///
+    /// **No-teleport invariant**: every surviving voxel keeps both its
+    /// world position AND its world point velocity across the call —
+    /// only the `CoM` bookkeeping moves (`position += R·Δcom`,
+    /// `v += ω × R·Δcom`, wheel anchors and skin offsets shift by
+    /// `−Δcom`).
+    ///
+    /// # Panics
+    /// Panics on an unknown body id or a ghost body (no shape).
+    #[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+    pub fn remove_voxels(&mut self, body: BodyId, cells: &[(i32, i32, i32)]) -> Removal {
+        let index = self
+            .bodies
+            .binary_search_by_key(&body, RigidBody::id)
+            .unwrap_or_else(|_| panic!("remove_voxels: no body {body:?}"));
+        assert!(
+            self.bodies[index].shape.is_some(),
+            "remove_voxels: body {body:?} is a ghost (no shape)"
+        );
+
+        // Pre-carve snapshot: pose, mass properties, occupied cells.
+        let position = self.bodies[index].position;
+        let orientation = self.bodies[index].orientation;
+        let velocity = self.bodies[index].linear_velocity;
+        let omega = self.bodies[index].angular_velocity;
+        let mass_old = self.bodies[index].mass;
+        let inertia_old = self.bodies[index].inertia_body;
+        let com_old = self.bodies[index].com_local;
+        let pre_cells: Vec<(i32, i32, i32)> = {
+            let shape = self.bodies[index].shape.as_ref().expect("checked above");
+            shape
+                .occupied_cells()
+                .map(|(x, y, z, _)| (x, y, z))
+                .collect()
+        };
+
+        // Carve. `(centre − com_old, density)` per removed voxel feeds
+        // the incremental update below.
+        let mut departed: Vec<(FixedVec3, Fixed)> = Vec::new();
+        {
+            let body_ref = &mut self.bodies[index];
+            let shape = body_ref.shape.as_mut().expect("checked above");
+            for &(x, y, z) in cells {
+                if let Some(mat) = shape.clear(x, y, z) {
+                    departed.push((
+                        destruct::cell_center((x, y, z)) - com_old,
+                        self.materials[usize::from(mat.0)].density,
+                    ));
+                }
+            }
+        }
+        let removed = u32::try_from(departed.len()).expect("bounded by shape size");
+        if removed == 0 {
+            return Removal {
+                removed: 0,
+                survivor: Some(body),
+                split_off: Vec::new(),
+                debris: Vec::new(),
+                detached_wheels: Vec::new(),
+            };
+        }
+
+        // Connectivity over what remains (parent as-authored grid).
+        let comps = {
+            let shape = self.bodies[index].shape.as_ref().expect("checked above");
+            destruct::components(shape, &self.materials)
+        };
+        let threshold = usize::try_from(self.debris_threshold).expect("small");
+
+        // Identity: the heaviest at-or-above-threshold component keeps
+        // the BodyId; ties break to the lexicographically smallest
+        // min_cell. Sub-threshold components — the would-be survivor
+        // included — degrade to debris.
+        let keeper = comps
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.cells.len() >= threshold)
+            .max_by(|(_, a), (_, b)| {
+                a.mass.cmp(&b.mass).then(b.min_cell.cmp(&a.min_cell)) // smaller cell wins ties
+            })
+            .map(|(i, _)| i);
+
+        // Rigid-body point kinematics for a departing cluster at
+        // shape-space CoM `c`.
+        let kinematics = |com_shape: FixedVec3| {
+            let r_world = orientation * (com_shape - com_old);
+            (position + r_world, velocity + omega.cross(r_world))
+        };
+
+        // Fragment defs and debris clusters, both built against the
+        // still-intact post-carve shape, ordered by min_cell (comps
+        // arrive sorted).
+        let mut fragment_defs: Vec<VoxelBodyDef> = Vec::new();
+        let mut debris: Vec<DebrisCluster> = Vec::new();
+        for (i, comp) in comps.iter().enumerate() {
+            if Some(i) == keeper {
+                continue;
+            }
+            let shape = self.bodies[index].shape.as_ref().expect("checked above");
+            let (pos, vel) = kinematics(comp.com);
+            if comp.cells.len() >= threshold {
+                let min = comp.cells.iter().fold(comp.cells[0], |m, &c| {
+                    (m.0.min(c.0), m.1.min(c.1), m.2.min(c.2))
+                });
+                let max = comp.cells.iter().fold(comp.cells[0], |m, &c| {
+                    (m.0.max(c.0), m.1.max(c.1), m.2.max(c.2))
+                });
+                let mut tight =
+                    VoxelShape::new(max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1);
+                for &(x, y, z) in &comp.cells {
+                    tight.set(
+                        x - min.0,
+                        y - min.1,
+                        z - min.2,
+                        shape.get(x, y, z).expect("component cell occupied"),
+                    );
+                }
+                fragment_defs.push(VoxelBodyDef {
+                    shape: tight,
+                    position: pos,
+                    orientation,
+                    linear_velocity: vel,
+                    angular_velocity: omega,
+                });
+            } else {
+                debris.push(DebrisCluster {
+                    position: pos,
+                    orientation,
+                    linear_velocity: vel,
+                    voxels: comp
+                        .cells
+                        .iter()
+                        .map(|&(x, y, z)| {
+                            (
+                                destruct::cell_center((x, y, z)) - comp.com,
+                                shape.get(x, y, z).expect("component cell occupied"),
+                            )
+                        })
+                        .collect(),
+                });
+            }
+        }
+
+        // Survivor update or despawn.
+        let mut detached_wheels = Vec::new();
+        let survivor = if let Some(keeper_index) = keeper {
+            let keeper_comp = &comps[keeper_index];
+            let keeper_cells: std::collections::BTreeSet<(i32, i32, i32)> =
+                keeper_comp.cells.iter().copied().collect();
+
+            // Everything not in the keeper departs: already-carved
+            // voxels are in `departed`; add the other components'.
+            {
+                let body_ref = &mut self.bodies[index];
+                let shape = body_ref.shape.as_mut().expect("checked above");
+                for (i, comp) in comps.iter().enumerate() {
+                    if i == keeper_index {
+                        continue;
+                    }
+                    for &(x, y, z) in &comp.cells {
+                        let mat = shape.clear(x, y, z).expect("component cell occupied");
+                        departed.push((
+                            destruct::cell_center((x, y, z)) - com_old,
+                            self.materials[usize::from(mat.0)].density,
+                        ));
+                    }
+                }
+            }
+
+            // Incremental mass properties (plan §6 P4): subtract each
+            // departed voxel's contribution about com_old, then
+            // parallel-axis the tensor to com_new. The full-recompute
+            // path stays in tests as the reference.
+            // Rule 6 in miniature: the CoM update works entirely in
+            // relative offsets — `com_new = com_old − Σρ·d / M'` with
+            // d = centre − com_old (already in hand for the tensor).
+            // Reconstructing `com·mass` instead would amplify the
+            // stored CoM's rounding by the body mass.
+            let mut mass_new = mass_old;
+            let mut moment = FixedVec3::ZERO;
+            let mut inertia = inertia_old;
+            for &(d, density) in &departed {
+                mass_new -= density;
+                moment += d.scale(density);
+                inertia = inertia - crate::shape::voxel_inertia(density, d);
+            }
+            let shift = -crate::shape::div_by(moment, mass_new);
+            let com_new = com_old + shift;
+            let dd = shift.dot(shift);
+            inertia = inertia
+                - (FixedMat3::from_diagonal(FixedVec3::new(dd, dd, dd))
+                    - crate::shape::outer(shift))
+                .scale(mass_new);
+            // The survivor bypasses RigidBody::build — re-assert SPD
+            // here, where incremental drift would first surface.
+            debug_assert!(
+                inertia.leading_minors_positive(),
+                "incremental inertia update lost positive-definiteness"
+            );
+
+            let world_shift = orientation * shift;
+            let body_ref = &mut self.bodies[index];
+            body_ref.mass = mass_new;
+            body_ref.inv_mass = Fixed::ONE / mass_new;
+            body_ref.inertia_body = inertia;
+            body_ref.inv_inertia_body = inertia.inverse();
+            body_ref.com_local = com_new;
+            body_ref.skin =
+                crate::shape::derive_skin(body_ref.shape.as_ref().expect("survivor"), com_new);
+            // No-teleport: the shape stays put in the world; the CoM
+            // bookkeeping moves around it — including each voxel's
+            // point VELOCITY (the new CoM point moved at v + ω×Δ).
+            body_ref.position += world_shift;
+            body_ref.linear_velocity += omega.cross(world_shift);
+            // Wheels: bolted to structure, not to the CoM. Re-anchor
+            // survivors by −Δcom; detach wheels whose nearest occupied
+            // pre-carve cell departed.
+            let mut kept = Vec::with_capacity(body_ref.wheels.len());
+            for mut wheel in std::mem::take(&mut body_ref.wheels) {
+                let anchor_shape = wheel.def.anchor + com_old;
+                let home = destruct::nearest_cell(anchor_shape, &pre_cells);
+                if keeper_cells.contains(&home) {
+                    wheel.def.anchor -= shift;
+                    kept.push(wheel);
+                } else {
+                    detached_wheels.push(wheel.id);
+                }
+            }
+            body_ref.wheels = kept;
+            Some(body)
+        } else {
+            self.bodies.remove(index);
+            None
+        };
+
+        // New bodies (ids monotonic, in min_cell order — the Vec stays
+        // sorted because fresh ids exceed every live one).
+        let split_off: Vec<BodyId> = fragment_defs
+            .iter()
+            .map(|def| {
+                let id = self.next_id();
+                self.bodies
+                    .push(RigidBody::from_voxels(id, def, &self.materials));
+                id
+            })
+            .collect();
+
+        // Skin indices (and the body itself) may be gone — stale
+        // warm-start keys are purged, not left to miss deterministically.
+        self.impulse_cache.retain(|e| e.key.body != body);
+
+        Removal {
+            removed,
+            survivor,
+            split_off,
+            debris,
+            detached_wheels,
+        }
+    }
+
     /// Advance one fixed tick against the terrain `field` (a read-only
     /// per-tick input — physics never owns terrain).
     ///
@@ -370,5 +655,6 @@ impl StateHash for PhysicsWorld {
         self.bodies.hash(h);
         self.materials.hash(h);
         self.impulse_cache.hash(h);
+        h.write_u64(u64::from(self.debris_threshold));
     }
 }

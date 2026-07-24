@@ -112,6 +112,16 @@ impl VoxelShape {
         }
     }
 
+    /// Clear one cell, returning its material if it was occupied.
+    /// Out-of-bounds is a no-op returning `None` (destruction intake
+    /// silently skips cells that miss the grid).
+    pub(crate) fn clear(&mut self, x: i32, y: i32, z: i32) -> Option<MaterialId> {
+        let mat = self.get(x, y, z)?;
+        let i = self.index(x, y, z);
+        self.cells[i] = EMPTY;
+        Some(mat)
+    }
+
     /// The cell's material, if occupied. Out-of-bounds reads as empty
     /// (that is what makes boundary voxels surface voxels).
     #[must_use]
@@ -214,25 +224,38 @@ pub(crate) fn mass_properties(shape: &VoxelShape, materials: &[Material]) -> Mas
         weighted += cell_center(x, y, z).scale(density);
     }
     assert!(mass > Fixed::ZERO, "voxel body must have positive mass");
-    let com = weighted.scale(Fixed::ONE / mass);
+    // Component-wise division, NOT `scale(ONE/mass)`: the reciprocal's
+    // rounding would be amplified by |weighted| (hundreds of ulps on a
+    // 5³ body); direct division truncates within 1 ulp.
+    let com = div_by(weighted, mass);
 
-    let sixth = Fixed::from_ratio(1, 6);
     let mut inertia = FixedMat3::ZERO;
     for (x, y, z, mat) in shape.occupied_cells() {
         let density = materials[usize::from(mat.0)].density;
-        let d = cell_center(x, y, z) - com;
-        let dd = d.dot(d);
-        // ρ·[(|d|²·E − d⊗d) + E/6]
-        let parallel = FixedMat3::from_diagonal(FixedVec3::new(dd, dd, dd)) - outer(d);
-        inertia = inertia
-            + (parallel + FixedMat3::from_diagonal(FixedVec3::new(sixth, sixth, sixth)))
-                .scale(density);
+        inertia = inertia + voxel_inertia(density, cell_center(x, y, z) - com);
     }
     MassProperties { mass, com, inertia }
 }
 
+/// One voxel's inertia contribution about a point at offset `d` from
+/// its centre: `ρ·[(|d|²·E − d⊗d) + E/6]` (solid-cube convention).
+/// Shared by the initial sum and P4's incremental subtraction — the
+/// two paths must agree term-for-term.
+pub(crate) fn voxel_inertia(density: Fixed, d: FixedVec3) -> FixedMat3 {
+    let sixth = Fixed::from_ratio(1, 6);
+    let dd = d.dot(d);
+    let parallel = FixedMat3::from_diagonal(FixedVec3::new(dd, dd, dd)) - outer(d);
+    (parallel + FixedMat3::from_diagonal(FixedVec3::new(sixth, sixth, sixth))).scale(density)
+}
+
+/// Component-wise vector ÷ scalar (see the note at the call sites —
+/// this is deliberately not `scale(ONE/s)`).
+pub(crate) fn div_by(v: FixedVec3, s: Fixed) -> FixedVec3 {
+    FixedVec3::new(v.x / s, v.y / s, v.z / s)
+}
+
 /// The outer product `d ⊗ d` (symmetric).
-fn outer(d: FixedVec3) -> FixedMat3 {
+pub(crate) fn outer(d: FixedVec3) -> FixedMat3 {
     FixedMat3::from_cols(
         FixedVec3::new(d.x * d.x, d.y * d.x, d.z * d.x),
         FixedVec3::new(d.x * d.y, d.y * d.y, d.z * d.y),
