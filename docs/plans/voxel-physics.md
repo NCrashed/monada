@@ -467,6 +467,64 @@ under the per-tick budget (confirmed: 4 ms of the 40 ms tick on reference
 hardware, criterion-tracked); determinism matrix green; sleeping bodies
 wake on contact and on nearby voxel edits.
 
+**P5 amendments (approved 2026-07-24).** Surfaced per §7 and folded in:
+
+- **Pair narrowphase is asymmetric**: the body with the smaller skin
+  contributes spheres, the other its voxel grid (queried in its shape
+  frame; rotation preserves distances). Ties to the lower id. Known
+  properties: a carve can flip a pair's owner (its warm-start keys re-key
+  for one deterministically cold tick), and coverage has chunky seams (a
+  corner entering between four face spheres goes unnoticed to ~⅓ voxel —
+  the same envelope as the P2 terrain path).
+- **The warm-start cache is sorted by one explicit `sort_unstable` after
+  generation** — with pair contacts the generation order cannot be made
+  globally lexicographic by loop nesting (the P2 "sorted by construction"
+  story ends here; the strict-ascending `debug_assert` remains the
+  tripwire).
+- **Pairs run BEFORE terrain in narrowphase** (found in testing): a
+  sleeper woken by an impact must get its terrain contacts the same tick,
+  or the sandwich solves without its floor — the struck body was driven
+  into the ground and NGS heaved it back, a flicker-and-pump cycle.
+- **`CONTACT_MARGIN` grew to 1/8, paired with SPECULATIVE contacts**
+  (found in testing): one tick of standstill free fall is
+  `|g|·dt² ≈ 0.016` voxels, and the old 1/64 margin was *below* that
+  window — stacked manifolds flickered on/off every other tick, breaking
+  warm starts and pumping the stack. The generous margin keeps manifolds
+  persistent; the speculative velocity bias (`vn` may close up to
+  `separation/dt` per tick, impulses fire only on faster approach) keeps
+  it from being sticky or leaving bodies hovering.
+- **Contact normals: closest-point axis first, occupancy gradient as the
+  deep fallback** (found in testing — a P2 revision): the gradient goes
+  diagonal on the corner/edge cells of a *finite* body grid (terrain
+  never showed it — side neighbours there are occupied), and a stacked
+  cube received ~0.5z corner normals from its counterpart and ground
+  itself sideways. The closest-point axis is the exact sphere-vs-box
+  normal whenever the centre is outside the cell.
+- **Sleep is island-wide with zeroed velocities**: per-body still-timers
+  (`SLEEP_TICKS = 25`), union-find over this tick's pair contacts, a
+  whole island sleeps only when every member is eligible; velocities zero
+  on the way down (no micro-drift in hashed state). Waking: a REAL
+  narrowphase contact from an awake body (broadphase adjacency alone
+  never wakes — no sleep-thrash from drive-bys; a sleeping stack wakes as
+  a wave, one layer per tick, documented and tested), any external
+  mutation (`apply_impulse*`, wheel attach/detach/input — all funnel
+  through the waking `body_mut`), `remove_voxels`, `set_gravity` (wakes
+  ALL — a gravity flip must not leave sleepers hanging), and
+  `notify_terrain_edit` (pulled forward from P6: wakes sleepers whose
+  bounding sphere overlaps the inclusive edited cell box; P6 hangs
+  cached-contact invalidation on the same seam).
+- **`World::raycast`**: terrain + every voxel body (shape-frame DDA, min
+  t; ties → terrain, then lowest id; ghosts invisible — consistent with
+  having no skin; sleepers visible, waking nothing). `bounding_radius`
+  joined the serialized-not-hashed cache family (refreshed on carve).
+- **Benchmark recorded**: 32 driving vehicles + 256 wrecks (64 piles,
+  self-validated ≥ 128 bodies asleep at measurement) step in
+  **≈ 179 µs** on the reference machine (12th Gen Intel i7-12700H,
+  Linux, release) — 22× under the 4 ms budget. The P4-era optimization
+  candidates (incremental skin, flood-fill, buffer reuse) stay shelved
+  until a real scene says otherwise. Criterion runs locally; CI gates
+  determinism, not wall time.
+
 **P6 — Drill coupling + materials.**
 `DrillQuery` API, reaction forces from material hardness, edited-region
 intake refreshing contacts, cached-contact invalidation on terrain edits.
