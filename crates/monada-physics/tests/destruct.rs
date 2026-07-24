@@ -69,9 +69,11 @@ fn base_def() -> VoxelBodyDef {
 }
 
 /// Test-side reference: full mass-property recompute from a body's
-/// (public) shape, unit density — the same solid-cube convention the
-/// crate documents. The acceptance's independent yardstick.
-fn reference_properties(body: &RigidBody) -> (Fixed, FixedVec3, FixedMat3) {
+/// (public) shape — the same solid-cube convention the crate
+/// documents, with per-material densities indexed by `MaterialId`
+/// (the incremental path's trickiest case is mixed densities). The
+/// acceptance's independent yardstick.
+fn reference_properties(body: &RigidBody, densities: &[Fixed]) -> (Fixed, FixedVec3, FixedMat3) {
     let shape = body.shape().expect("voxel body");
     let (dx, dy, dz) = shape.dims();
     let mut mass = Fixed::ZERO;
@@ -80,15 +82,16 @@ fn reference_properties(body: &RigidBody) -> (Fixed, FixedVec3, FixedMat3) {
     for z in 0..dz {
         for y in 0..dy {
             for x in 0..dx {
-                if shape.get(x, y, z).is_some() {
+                if let Some(mat) = shape.get(x, y, z) {
+                    let density = densities[usize::from(mat.0)];
                     let c = FixedVec3::new(
                         Fixed::from_int(x) + Fixed::HALF,
                         Fixed::from_int(y) + Fixed::HALF,
                         Fixed::from_int(z) + Fixed::HALF,
                     );
-                    mass += Fixed::ONE;
-                    weighted += c;
-                    cells.push(c);
+                    mass += density;
+                    weighted += c.scale(density);
+                    cells.push((c, density));
                 }
             }
         }
@@ -98,7 +101,7 @@ fn reference_properties(body: &RigidBody) -> (Fixed, FixedVec3, FixedMat3) {
     let com = FixedVec3::new(weighted.x / mass, weighted.y / mass, weighted.z / mass);
     let sixth = Fixed::ONE / Fixed::from_int(6);
     let mut inertia = FixedMat3::ZERO;
-    for c in cells {
+    for (c, density) in cells {
         let d = c - com;
         let dd = d.dot(d);
         let outer = FixedMat3::from_cols(
@@ -106,8 +109,10 @@ fn reference_properties(body: &RigidBody) -> (Fixed, FixedVec3, FixedMat3) {
             FixedVec3::new(d.x * d.y, d.y * d.y, d.z * d.y),
             FixedVec3::new(d.x * d.z, d.y * d.z, d.z * d.z),
         );
-        inertia = inertia + FixedMat3::from_diagonal(FixedVec3::new(dd, dd, dd)) - outer
-            + FixedMat3::from_diagonal(FixedVec3::new(sixth, sixth, sixth));
+        inertia = inertia
+            + (FixedMat3::from_diagonal(FixedVec3::new(dd, dd, dd)) - outer
+                + FixedMat3::from_diagonal(FixedVec3::new(sixth, sixth, sixth)))
+            .scale(density);
     }
     (mass, com, inertia)
 }
@@ -149,25 +154,50 @@ fn cut_in_half_masses_and_tensors_add_up() {
     // Incremental survivor vs full recompute: 75 departed voxels, a
     // couple of ulps each, plus one parallel-axis transfer — 2⁻²⁰
     // per entry is a comfortable roof.
-    let (m_ref, com_ref, i_ref) = reference_properties(survivor);
+    let (m_ref, com_ref, i_ref) = reference_properties(survivor, &[Fixed::ONE]);
     assert_eq!(survivor.mass(), m_ref);
     close_vec(survivor.com_in_shape(), com_ref, 1 << 10);
     assert_mat_close(survivor.inertia_body(), i_ref, 1 << 12);
     // Fragment was fully computed at spawn — tighter agreement.
-    let (fm, fcom, fi) = reference_properties(fragment);
+    let (fm, fcom, fi) = reference_properties(fragment, &[Fixed::ONE]);
     assert_eq!(fragment.mass(), fm);
     close_vec(fragment.com_in_shape(), fcom, 1 << 4);
     assert_mat_close(fragment.inertia_body(), fi, 1 << 8);
 }
 
-/// A run of LCG-random carves: after every carve the survivor's
-/// incremental properties track the full recompute; drift accumulates
-/// linearly in the carve count (documented bound: 2⁻²⁰ per entry per
-/// carve round).
+/// A run of LCG-random carves on a TWO-MATERIAL body (the incremental
+/// path's trickiest input — mixed densities): after every carve the
+/// survivor's incremental properties track the full recompute; drift
+/// accumulates linearly in the carve count (documented bound: 2⁻²⁰
+/// per entry per carve round, density-scaled).
 #[test]
 fn incremental_tracks_full_recompute_over_many_carves() {
-    let (mut world, mat) = new_world();
-    let id = cube_body(&mut world, mat, 6, &base_def());
+    let (mut world, light) = new_world();
+    let dense = world.register_material(Material {
+        density: Fixed::from_int(4),
+        friction: Fixed::HALF,
+        restitution: Fixed::ZERO,
+    });
+    // 6³ with dense voxels sprinkled deterministically through the
+    // light bulk.
+    let mut shape = VoxelShape::new(6, 6, 6);
+    for z in 0..6 {
+        for y in 0..6 {
+            for x in 0..6 {
+                let mat = if (x + 2 * y + 3 * z) % 5 == 0 {
+                    dense
+                } else {
+                    light
+                };
+                shape.set(x, y, z, mat);
+            }
+        }
+    }
+    let id = world.spawn_voxels(&VoxelBodyDef {
+        shape,
+        ..base_def()
+    });
+    let densities = [Fixed::ONE, Fixed::from_int(4)];
     let mut lcg: u64 = 0x00DE_FACE;
     let mut next = |m: i32| {
         lcg = lcg.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
@@ -180,7 +210,7 @@ fn incremental_tracks_full_recompute_over_many_carves() {
             break; // degraded away — fine for this test's purpose
         }
         let survivor = world.body(id).unwrap();
-        let (m_ref, com_ref, i_ref) = reference_properties(survivor);
+        let (m_ref, com_ref, i_ref) = reference_properties(survivor, &densities);
         assert_eq!(survivor.mass(), m_ref, "round {round}");
         close_vec(survivor.com_in_shape(), com_ref, 1 << 10);
         assert_mat_close(survivor.inertia_body(), i_ref, i64::from(round) << 12);
@@ -295,7 +325,9 @@ fn edge_cases() {
     assert_eq!(dup.removed, 1, "duplicates collapse");
 
     // Survivor below the threshold: a 2-voxel remainder degrades to
-    // debris and the body despawns.
+    // debris and the body despawns — and its wheels ALL report as
+    // detached (the blown-to-debris vehicle must not be the silent
+    // case).
     let (mut world, mat) = new_world();
     let mut bar = VoxelShape::new(4, 1, 1);
     bar.fill_box((0, 0, 0), (3, 0, 0), mat);
@@ -303,10 +335,26 @@ fn edge_cases() {
         shape: bar,
         ..base_def()
     });
+    let wheel = world.attach_wheel(
+        id,
+        &WheelDef {
+            anchor: FixedVec3::ZERO,
+            rest_length: Fixed::ONE,
+            radius: Fixed::HALF,
+            stiffness: Fixed::from_int(10),
+            damping: Fixed::ONE,
+            friction: Fixed::HALF,
+        },
+    );
     let outcome = world.remove_voxels(id, &[(0, 0, 0), (1, 0, 0)]);
     assert_eq!(outcome.survivor, None, "sub-threshold survivor degrades");
     assert_eq!(outcome.debris.len(), 1);
     assert_eq!(outcome.debris[0].voxels.len(), 2);
+    assert_eq!(
+        outcome.detached_wheels,
+        vec![wheel],
+        "a despawned body detaches every wheel"
+    );
     assert!(world.body(id).is_none(), "body despawned");
 
     // Total destruction: nothing left at all.

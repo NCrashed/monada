@@ -39,8 +39,9 @@ pub struct Removal {
     pub debris: Vec<DebrisCluster>,
     /// Wheels auto-detached because their anchor's nearest occupied
     /// pre-carve cell departed with a fragment (or was carved away).
-    /// Ascending by id. The engine decides what, if anything, to
-    /// spawn in their place.
+    /// When the whole body degrades (`survivor: None`), EVERY wheel
+    /// lands here. Ascending by id. The engine decides what, if
+    /// anything, to spawn in their place.
     pub detached_wheels: Vec<WheelId>,
 }
 

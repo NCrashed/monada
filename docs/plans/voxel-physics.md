@@ -405,6 +405,11 @@ whose ray hits a vertical face (riser, wall) claims grip and load share
 with zero suspension push behind it. Harmless on stair treads; revisit
 as `N_eff = N·cos` when walls/3D terrain arrive.
 
+P5-benchmark candidates carried over from P4's correctness-first cuts:
+incremental skin updates (currently a full re-derive per carve) and the
+`destruct::components` flood fill (a fresh `BTreeSet` walk per call,
+O(n log n)) — optimize either only if the 4 ms budget says so.
+
 **P4 amendments (approved 2026-07-24).** Surfaced per §7 and folded in:
 
 - **Destruction outcomes are a return value, not a world event buffer**

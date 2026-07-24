@@ -503,6 +503,11 @@ impl PhysicsWorld {
             body_ref.wheels = kept;
             Some(body)
         } else {
+            // A fully-degraded body takes no wheels with it: they ALL
+            // detach, and the engine hears about every one — the
+            // most spectacular case (a vehicle blown to debris) must
+            // not be the one that reports nothing.
+            detached_wheels.extend(self.bodies[index].wheels.iter().map(|w| w.id));
             self.bodies.remove(index);
             None
         };
