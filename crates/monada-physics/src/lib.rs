@@ -9,15 +9,14 @@
 //! arithmetic is fixed-point (`monada-fixed`); the crate never touches
 //! render state — bodies are mirrored to roxlap grids by the engine.
 //!
-//! Built milestone by milestone (P0–P6, see the plan). Currently at
-//! **P5**: scale — body-vs-body contacts through a transient spatial
-//! hash, speculative persistent manifolds, island sleeping with a
-//! full wake-source contract, and [`PhysicsWorld::raycast`] for
-//! engine-side projectiles — on top of P4 destruction, P3 raycast
-//! wheels, P2 voxel bodies vs terrain, P1 free-body integration, and
-//! P0.s deterministic shell (fixed timestep, canonical
+//! Built milestone by milestone — and complete: P0 shell, P1 free
+//! bodies, P2 voxel bodies vs terrain, P3 raycast wheels, P4
+//! destruction, P5 scale (body-vs-body, islands, sleep, raycast), P6
+//! drill coupling ([`PhysicsWorld::drill_query`] /
+//! [`PhysicsWorld::drill_reaction`] + terrain-edit intake). The
+//! deterministic spine throughout: fixed timestep, canonical
 //! [`state_hash`](PhysicsWorld::state_hash), serde snapshots, the
-//! `phys@` oracle golden gating it in CI).
+//! `phys@` oracle golden gating every milestone in CI.
 //!
 //! ## Units
 //!
@@ -36,6 +35,7 @@ mod body;
 mod broadphase;
 mod contact;
 mod destruct;
+mod drill;
 mod field;
 mod ids;
 mod material;
@@ -47,6 +47,7 @@ mod world;
 
 pub use body::{BodyDef, RigidBody, VoxelBodyDef};
 pub use destruct::{DebrisCluster, Removal};
+pub use drill::{DrillSample, DrillTool};
 pub use field::{EmptyField, VoxelField};
 pub use ids::BodyId;
 pub use material::{Material, MaterialId};

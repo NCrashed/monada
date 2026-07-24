@@ -615,9 +615,18 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
 
     /// Flat floor; bumps (height 0–2, deterministic in the cell
     /// coords) beyond x > 40; stairs descending for x < −40.
-    struct Terrain;
-    impl VoxelField for Terrain {
+    // P6: the terrain is no longer a pure function of coordinates —
+    // the drill beat carves cells at ticks 400..=429, so the field
+    // reads a mutable carved-set held beside it (deterministic and
+    // cheap: BTreeSet lookups, mutated only between steps).
+    struct Terrain<'a> {
+        carved: &'a std::collections::BTreeSet<(i64, i64, i64)>,
+    }
+    impl VoxelField for Terrain<'_> {
         fn occupied(&self, x: i64, y: i64, z: i64) -> bool {
+            if self.carved.contains(&(x, y, z)) {
+                return false;
+            }
             if x > 40 {
                 let bump = (x.div_euclid(3).wrapping_mul(7) + y.div_euclid(3).wrapping_mul(5))
                     .rem_euclid(3);
@@ -642,6 +651,7 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
         density: Fixed::ONE,
         friction: Fixed::HALF,
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
 
     // A box-ish inertia diag(2, 3, 4) rotated off-axis: R · D · Rᵀ.
@@ -738,6 +748,12 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
         }
     };
 
+    let mut carved: std::collections::BTreeSet<(i64, i64, i64)> = std::collections::BTreeSet::new();
+    let drill = monada_physics::DrillTool {
+        anchor: v3(4, 0, -1),
+        half_extents: FixedVec3::new(Fixed::ONE, fx(2), Fixed::ONE),
+    };
+
     let mut prev = 0;
     let mut out = Vec::with_capacity(TICK_CHECKPOINTS.len());
     for &tick in TICK_CHECKPOINTS {
@@ -760,10 +776,24 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
                     let _ = world
                         .remove_voxels(slab_body, &[(1, 0, 0), (1, 0, 1), (0, 1, 0), (0, 1, 1)]);
                 }
+                // P6: a short tunnel drilled through the bump field
+                // while edits stream in — one column of cells per
+                // tick, wake/invalidate notify, hardness reaction on
+                // the vehicle.
+                400..=429 => {
+                    let x = 45 + i64::try_from(t - 400).expect("small");
+                    for y in -1..=1i64 {
+                        for z in 0..=1i64 {
+                            carved.insert((x, y, z));
+                        }
+                    }
+                    world.notify_terrain_edit((x, -1, 0), (x, 1, 1));
+                    let _ = world.drill_reaction(vehicle, &drill, &[MaterialId(0), MaterialId(0)]);
+                }
                 450 => input(false, Fixed::ZERO, Fixed::ZERO, fx(100))(&mut world, &wheel_ids),
                 _ => {}
             }
-            world.step(&Terrain);
+            world.step(&Terrain { carved: &carved });
         }
         prev = tick;
         out.push(Checkpoint {

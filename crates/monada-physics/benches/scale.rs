@@ -44,6 +44,7 @@ fn build_scene() -> PhysicsWorld {
         density: Fixed::ONE,
         friction: Fixed::HALF,
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
 
     // 32 vehicles on an 8×4 grid, all driving +x (the test-suite

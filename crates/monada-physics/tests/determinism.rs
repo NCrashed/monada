@@ -114,6 +114,7 @@ fn hash_covers_every_state_field() {
         density: Fixed::ONE,
         friction: Fixed::HALF,
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
     assert_ne!(
         with_material.state_hash(),
@@ -128,6 +129,7 @@ fn hash_covers_every_state_field() {
         density: Fixed::ONE,
         friction: Fixed::HALF,
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
     let mut shape = monada_physics::VoxelShape::new(1, 1, 1);
     shape.set(0, 0, 0, mat);
@@ -144,6 +146,7 @@ fn hash_covers_every_state_field() {
         density: Fixed::ONE,
         friction: Fixed::HALF,
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
     let sixth = Fixed::ONE / Fixed::from_int(6);
     ghost.spawn(&BodyDef {
@@ -189,6 +192,7 @@ fn snapshot_round_trip_mid_contact() {
         density: Fixed::ONE,
         friction: Fixed::HALF,
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
     let mut shape = monada_physics::VoxelShape::new(2, 2, 2);
     shape.fill_box((0, 0, 0), (1, 1, 1), mat);

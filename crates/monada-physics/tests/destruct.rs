@@ -40,6 +40,7 @@ fn new_world() -> (PhysicsWorld, MaterialId) {
         density: Fixed::ONE,
         friction: Fixed::HALF,
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
     (world, mat)
 }
@@ -177,6 +178,7 @@ fn incremental_tracks_full_recompute_over_many_carves() {
         density: Fixed::from_int(4),
         friction: Fixed::HALF,
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
     // 6³ with dense voxels sprinkled deterministically through the
     // light bulk.

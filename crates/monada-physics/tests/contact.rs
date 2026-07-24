@@ -36,6 +36,7 @@ fn material(friction_num: i32, friction_den: i32) -> Material {
         density: Fixed::ONE,
         friction: Fixed::from_ratio(friction_num, friction_den),
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     }
 }
 
@@ -144,11 +145,13 @@ fn two_material_com_shifts_to_denser_side() {
         density: Fixed::ONE,
         friction: Fixed::HALF,
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
     let heavy = world.register_material(Material {
         density: Fixed::from_int(3),
         friction: Fixed::HALF,
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
     // 2×1×1: light at x∈[0,1), heavy at x∈[1,2).
     let mut shape = VoxelShape::new(2, 1, 1);

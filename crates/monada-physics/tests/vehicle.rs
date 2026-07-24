@@ -79,12 +79,14 @@ fn vehicle_at_impl(
         density: Fixed::ONE,
         friction: fx(terrain_friction.0, terrain_friction.1),
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
     assert_eq!(ground, MaterialId(0), "terrain material is id 0");
     let dense = world.register_material(Material {
         density: Fixed::from_int(4),
         friction: fx(1, 2),
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
 
     // Chassis 6×4×2; optional dense ballast as a 2×2×2 tower on top
@@ -564,6 +566,7 @@ fn ghost_body_hovers_on_wheels() {
         density: Fixed::ONE,
         friction: fx(1, 2),
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
     // mass 4, unit inertia — spawn well above ride height.
     let body = world.spawn(&monada_physics::BodyDef {

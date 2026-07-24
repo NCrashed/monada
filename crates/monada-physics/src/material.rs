@@ -29,6 +29,11 @@ pub struct Material {
     pub friction: Fixed,
     /// Bounciness in [0, 1]; the target feel wants ≈ 0 (plan §6 P2).
     pub restitution: Fixed,
+    /// Drill resistance: the reaction force one voxel of this
+    /// material exerts while being cut (P6). Intuition beats the
+    /// formula here: hardness 100 stops a light vehicle dead,
+    /// hardness 10 barely slows it.
+    pub hardness: Fixed,
 }
 
 impl StateHash for Material {
@@ -36,6 +41,7 @@ impl StateHash for Material {
         self.density.hash(h);
         self.friction.hash(h);
         self.restitution.hash(h);
+        self.hardness.hash(h);
     }
 }
 

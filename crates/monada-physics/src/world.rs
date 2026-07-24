@@ -12,6 +12,7 @@ use crate::body::{BodyDef, RigidBody, VoxelBodyDef};
 use crate::broadphase;
 use crate::contact::{self, ContactCacheEntry};
 use crate::destruct::{self, DebrisCluster, Removal};
+use crate::drill::{DrillSample, DrillTool};
 use crate::field::VoxelField;
 use crate::ids::BodyId;
 use crate::material::{Material, MaterialId};
@@ -767,18 +768,31 @@ impl PhysicsWorld {
         }
     }
 
-    /// Wake sleeping bodies whose bounding sphere
-    /// (`position ± bounding_radius`) overlaps the INCLUSIVE cell box
-    /// `[min, max]` of a terrain edit. The engine calls this after
-    /// `voxel_clear`-style changes; the ground may have vanished from
-    /// under a sleeper. P6 hangs cached-contact invalidation on this
-    /// same seam.
+    /// A terrain edit happened in the INCLUSIVE cell box `[min, max]`
+    /// (the engine calls this after `voxel_clear`-style changes):
+    ///
+    /// - wakes sleeping bodies whose bounding sphere
+    ///   (`position ± bounding_radius`) overlaps the box — the ground
+    ///   may have vanished from under a sleeper;
+    /// - purges warm-start cache entries against terrain cells inside
+    ///   the box (P6). A stale entry is inert while its cell stays
+    ///   empty, but if the engine BUILDS the cell back, a regenerated
+    ///   contact would warm-start with another era's impulse. Only
+    ///   awake bodies can have cache entries at all — a sleeper's
+    ///   entries drop at the first cache rebuild after it sleeps
+    ///   (P5 mechanics) — so both halves of this method concern the
+    ///   same boundary between the box and live state.
+    ///
+    /// Both halves read the box with the same inclusive convention:
+    /// cells `min ..= max` on every axis.
     pub fn notify_terrain_edit(&mut self, min: (i64, i64, i64), max: (i64, i64, i64)) {
         for body in &mut self.bodies {
             if !body.asleep {
                 continue;
             }
             let r = body.bounding_radius;
+            // Closest point of the inclusive cell box to the CoM: the
+            // box spans [min, max+1) in world units per axis.
             let clamp = |v: Fixed, lo: i64, hi: i64| {
                 v.clamp(Fixed::from_bits(lo << 32), Fixed::from_bits((hi + 1) << 32))
             };
@@ -793,6 +807,156 @@ impl PhysicsWorld {
                 body.sleep_timer = 0;
             }
         }
+        let cell_in_box = |c: (i64, i64, i64)| {
+            (min.0..=max.0).contains(&c.0)
+                && (min.1..=max.1).contains(&c.1)
+                && (min.2..=max.2).contains(&c.2)
+        };
+        self.impulse_cache
+            .retain(|e| e.key.other.is_some() || !cell_in_box(e.key.cell));
+    }
+
+    /// Read-only: the terrain cells the drill tool currently overlaps
+    /// (cell CENTRE inside the tool's oriented box, boundary
+    /// INCLUSIVE — a centre exactly on a face counts), in canonical
+    /// (x, y, z) order with empty cells skipped. Terrain material ids
+    /// obey the same cross-crate contract as narrowphase. The ENGINE
+    /// decides what actually gets cut — hardness tables, tool power,
+    /// and wear all live on its side of the wall (plan §4).
+    ///
+    /// # Panics
+    /// Panics on an unknown body id, non-positive `half_extents`, or
+    /// an unregistered terrain material. Ghost bodies are fine — the
+    /// query needs a pose, not a skin.
+    #[must_use]
+    pub fn drill_query(
+        &self,
+        body: BodyId,
+        tool: &DrillTool,
+        field: &dyn VoxelField,
+    ) -> Vec<DrillSample> {
+        let body = self
+            .body(body)
+            .unwrap_or_else(|| panic!("drill_query: no body {body:?}"));
+        assert!(
+            tool.half_extents.x > Fixed::ZERO
+                && tool.half_extents.y > Fixed::ZERO
+                && tool.half_extents.z > Fixed::ZERO,
+            "DrillTool: half_extents must be positive, got {:?}",
+            tool.half_extents
+        );
+        let center = body.position() + body.orientation() * tool.anchor;
+        let inv_rot = body.orientation().inverse();
+        // World AABB of the oriented box: per world axis, the reach is
+        // Σ |R column| · half_extent.
+        let rot = FixedMat3::from_quat(body.orientation());
+        let reach = |ax: Fixed, ay: Fixed, az: Fixed| {
+            ax.abs() * tool.half_extents.x
+                + ay.abs() * tool.half_extents.y
+                + az.abs() * tool.half_extents.z
+        };
+        let rx = reach(rot.x_axis.x, rot.y_axis.x, rot.z_axis.x);
+        let ry = reach(rot.x_axis.y, rot.y_axis.y, rot.z_axis.y);
+        let rz = reach(rot.x_axis.z, rot.y_axis.z, rot.z_axis.z);
+
+        let lo = |v: Fixed, r: Fixed| i64::from((v - r).floor_to_int());
+        let hi = |v: Fixed, r: Fixed| i64::from((v + r).floor_to_int());
+        let mut out = Vec::new();
+        for cx in lo(center.x, rx)..=hi(center.x, rx) {
+            for cy in lo(center.y, ry)..=hi(center.y, ry) {
+                for cz in lo(center.z, rz)..=hi(center.z, rz) {
+                    if !field.occupied(cx, cy, cz) {
+                        continue;
+                    }
+                    let cell_center = FixedVec3::new(
+                        Fixed::from_bits(cx << 32) + Fixed::HALF,
+                        Fixed::from_bits(cy << 32) + Fixed::HALF,
+                        Fixed::from_bits(cz << 32) + Fixed::HALF,
+                    );
+                    // Into the tool's box frame (body axes).
+                    let local = inv_rot * (cell_center - center);
+                    if local.x.abs() <= tool.half_extents.x
+                        && local.y.abs() <= tool.half_extents.y
+                        && local.z.abs() <= tool.half_extents.z
+                    {
+                        let material = field.material(cx, cy, cz);
+                        assert!(
+                            usize::from(material.0) < self.materials.len(),
+                            "terrain returned material {}, world has {} registered",
+                            material.0,
+                            self.materials.len()
+                        );
+                        out.push(DrillSample {
+                            cell: (cx, cy, cz),
+                            material,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Apply the drill reaction from what the engine actually cut
+    /// this tick: `Σ hardness(cut)` acts as a force OPPOSING the tool
+    /// point's velocity, applied at the tool centre (regardless of
+    /// which overlapped cells were the ones cut — an asymmetric cut
+    /// exerts no side torque; another documented chunky allowance).
+    /// The impulse is clamped through the point's EFFECTIVE mass along
+    /// the motion direction — the P3 brake-clamp math — so it can stop
+    /// the tool point but never reverse it (a naive `m·|v|` clamp
+    /// would fling an off-CoM nose backwards). A still tool point
+    /// (zero velocity) takes no reaction — a deterministic branch,
+    /// like the degenerate steer. Wakes the body unconditionally,
+    /// zero-impulse branches included. Returns the applied impulse
+    /// magnitude (engine-side feedback: tool wear, sparks, audio).
+    ///
+    /// # Panics
+    /// Panics on an unknown body id, non-positive `half_extents`, or
+    /// an unregistered material in `cut`.
+    pub fn drill_reaction(&mut self, body: BodyId, tool: &DrillTool, cut: &[MaterialId]) -> Fixed {
+        assert!(
+            tool.half_extents.x > Fixed::ZERO
+                && tool.half_extents.y > Fixed::ZERO
+                && tool.half_extents.z > Fixed::ZERO,
+            "DrillTool: half_extents must be positive, got {:?}",
+            tool.half_extents
+        );
+        let mut force = Fixed::ZERO;
+        for mat in cut {
+            force += self
+                .materials
+                .get(usize::from(mat.0))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "drill_reaction: cut material {}, world has {} registered",
+                        mat.0,
+                        self.materials.len()
+                    )
+                })
+                .hardness;
+        }
+        let index = self
+            .bodies
+            .binary_search_by_key(&body, RigidBody::id)
+            .unwrap_or_else(|_| panic!("drill_reaction: no body {body:?}"));
+        let inv_inertia = solver::inv_inertia_world(&self.bodies[index]);
+        let body_ref = &mut self.bodies[index];
+        body_ref.asleep = false;
+        body_ref.sleep_timer = 0;
+        let point = body_ref.position + body_ref.orientation * tool.anchor;
+        let r = point - body_ref.position;
+        let v_point = body_ref.linear_velocity + body_ref.angular_velocity.cross(r);
+        let dir = v_point.normalize();
+        if dir == FixedVec3::ZERO || force == Fixed::ZERO {
+            return Fixed::ZERO;
+        }
+        let m_eff = solver::effective_mass(body_ref, &inv_inertia, r, dir);
+        let applied = (force * self.dt).min(m_eff * v_point.length());
+        let impulse = dir.scale(-applied);
+        body_ref.linear_velocity += impulse.scale(body_ref.inv_mass);
+        body_ref.angular_velocity += inv_inertia * r.cross(impulse);
+        applied
     }
 
     /// Cast a ray against terrain and every voxel body (P5): the

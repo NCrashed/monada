@@ -38,6 +38,7 @@ fn new_world() -> (PhysicsWorld, MaterialId) {
         density: Fixed::ONE,
         friction: Fixed::HALF,
         restitution: Fixed::ZERO,
+        hardness: Fixed::from_int(50),
     });
     (world, mat)
 }
