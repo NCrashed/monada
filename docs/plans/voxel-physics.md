@@ -335,6 +335,63 @@ is hash-stable; high-CoM vehicle rolls over in a scripted hard turn while
 low-CoM does not; losing one wheel (script-removed) produces sag + pull
 measurable in trajectory.
 
+**P3 amendments (approved 2026-07-24).** Surfaced per §7 and folded in:
+
+- **Wheels are chassis attachments, no spin DOF in v1**: drive torque
+  becomes a longitudinal contact force (`τ/radius`) directly; the render
+  side derives wheel rotation from `v·f/radius`. Keeps wheels free of
+  dynamic state (no history, no warm-start questions) — compression and
+  damping both derive from the current raycast and velocity.
+- **Suspension: compression and damping measure along the ray; the force
+  acts along the CONTACT NORMAL, cosine-projected** (`J = n·N·(−d·n)·dt`).
+  The sketch had the force along the ray itself; testing showed that
+  self-locks tall vehicles — drive torque pitches the body, the tilted
+  spring axis gains a tangential component that cancels 100% of the drive
+  (a perfect anti-squat), and on flat stair treads the same component
+  shoves a parked pitched body downhill. The normal direction is the
+  surface's actual reaction; on a riser face it pushes the wheel *out*,
+  which is the legitimate half of the original "no sideways springs"
+  concern. Tire friction stays in the contact-face plane.
+- **All wheel impulses apply at the raycast hit point** — lateral friction
+  below the CoM is what produces the roll moment the rollover acceptance
+  measures (no Jolt-style roll-centre lift; tipping over is the feature).
+- **Damper sign and sampling**: compression rate is `+v·d` (anchor
+  approaching contact), so `N = max(0, k·x + c·(v·d))` — the damper opposes
+  both compression and rebound (the sketch had the sign flipped; caught in
+  review). The velocity sample is **pre-gravity** (`v − g·dt`): the
+  integrator adds gravity before the wheel pass, and a damper fed that
+  per-tick kick fights gravity permanently, shifting the static ride
+  height by `c·|g|·dt/k` per wheel; subtracting it lets stiffness alone
+  set the ride height.
+- **Wheel pass is order-independent, with two stabilizers**: all wheels of
+  a body compute their impulses from a pre-pass velocity snapshot and
+  apply in bulk, so wheel №2 never reads wheel №1's impulse (`WheelId`
+  order stays purely an iteration/hashing canonicality, and the lost-wheel
+  baseline carries no parasitic pull). Bulk application is Jacobi, which
+  demands: (1) **load-weighted slip kills** — K wheels each killing the
+  body's shared slip from one snapshot would overcorrect K-fold and ring
+  the roll axis (observed as a self-accelerating tumble), so
+  constraint-type impulses (lateral kill, brake) are weighted `N_i/ΣN`;
+  the drive term is a real force and is never scaled; (2) **static-
+  friction feed-forward** — the suspension impulses land after the
+  snapshot, so any tangential component they retain would re-feed a creep
+  no velocity kill can hold (a braked vehicle tobogganing down stairs);
+  tires react that known impulse up front, laterally always,
+  longitudinally under braking. Gravity's feed is already in the snapshot
+  and is excluded (double-count otherwise).
+- **Tire friction is a friction circle**: desired `(J_long, J_lat)` clamped
+  as a 2-vector to `μ·N·dt` — full throttle honestly eats lateral grip.
+- **Degenerate steer branch**: if the steered forward direction projects to
+  ~zero on the contact plane (near-vertical face), friction is skipped that
+  tick — a deterministic branch, never a zero-normalize.
+- **The DDA raycast is a shared module** (P5's `World::raycast` seam).
+  Contract: near-zero direction components take an explicit "axis never
+  crossed" branch (no 1/ε at the Q32.32 ceiling); a ray starting inside
+  solid hits at `t = 0` with `normal = −dir` (documented on `cast`).
+- **Wheels on ghost bodies are allowed** and documented: suspension raycasts
+  terrain and needs no skin — a hover-cart with no chassis collision,
+  useful for isolating suspension in tests.
+
 **P4 — Destruction: split + mass recompute.**
 Voxel removal intake on bodies, incremental mass properties, connectivity
 flood-fill, split into new bodies, debris-spawn events, collision-skin update.
