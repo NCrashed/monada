@@ -405,6 +405,54 @@ whose ray hits a vertical face (riser, wall) claims grip and load share
 with zero suspension push behind it. Harmless on stair treads; revisit
 as `N_eff = N·cos` when walls/3D terrain arrive.
 
+**P4 amendments (approved 2026-07-24).** Surfaced per §7 and folded in:
+
+- **Destruction outcomes are a return value, not a world event buffer**
+  (deviation from §3's `events` module): `remove_voxels` reports splits,
+  debris, and detached wheels synchronously through `Removal`. A pending
+  event queue would be hashed, serialized sim state with drain-order
+  rules; the single caller wants the outcome immediately. The general
+  per-tick event list is deferred until a real consumer of tick events
+  exists (contacts/wheel state — P5+/demo work).
+- **Identity goes to the heaviest surviving component**, ties broken by
+  the lexicographically smallest occupied cell — all comparisons in the
+  PARENT's as-authored grid, before fragments are rebased. The debris
+  threshold applies to the survivor too: a body whose largest component
+  falls under it degrades entirely to debris (`survivor: None`).
+- **The survivor's shape keeps its grid (holes punched); fragments get
+  tight rebased grids** — so a later `remove_voxels` on a fragment speaks
+  the fragment's own coordinates. The FULL no-teleport invariant: every
+  surviving voxel keeps its world position AND its world point velocity;
+  the CoM bookkeeping moves around the shape (`position += R·Δcom`,
+  `v += ω × R·Δcom` — the velocity half was caught in review; fragments
+  get `v + ω×r`, `ω` unchanged), and wheel anchors shift by `−Δcom`
+  (bolted to structure, not to the CoM).
+- **Wheels whose structure departs auto-detach** (`Removal::
+  detached_wheels`): a wheel's home is the occupied pre-carve cell
+  nearest its anchor (anchors may be virtual/overhanging, so "the
+  containing cell" is undefined; ties break lexicographically). The
+  engine decides what to spawn for a detached wheel.
+- **Mass properties: survivor incremental, fragments fresh.** The
+  incremental CoM update works in relative offsets
+  (`com_new = com_old − Σρ·d/M'`) — reconstructing `com·mass` amplifies
+  the stored CoM's rounding by the body mass. Same lesson applied
+  crate-wide: CoM divisions are component-wise (`shape::div_by`), never
+  `scale(ONE/mass)`, whose reciprocal rounding scales with |weighted|
+  (found as an exact 75×287-ulp signature in the split test). A
+  `debug_assert` re-checks Sylvester after every incremental update —
+  the survivor bypasses `RigidBody::build`.
+- **Skin re-derives in full on every carve**; the §3 "incremental update
+  on voxel edits" for the skin is deferred until the P5 benchmark says
+  it hurts. The carved body's warm-start cache entries are purged (skin
+  indices shift), not left to miss deterministically.
+- **`FixedMat3` grew wide-arithmetic paths** (`inverse`,
+  `leading_minors_positive`): P4's fragments surfaced that a body barely
+  6 voxels across has an inertia determinant past the Q32.32 ceiling
+  (`1296³ ≈ 2.2e9`) — the narrow determinant wrapped negative, and
+  `inverse()` divided by the wrapped value. Both now carry `i128`
+  intermediates; only results narrow. (A latent P0-era bug that P2/P3
+  bodies were simply too small to hit.)
+
 **P5 — Scale: broadphase, islands, sleeping, raycast.**
 Spatial hash broadphase, union-find islands, sleeping/waking, body-vs-body
 contacts (vehicle collisions, wreck piles), `PhysicsWorld::raycast` (for
