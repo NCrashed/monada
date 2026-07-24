@@ -79,6 +79,11 @@ fn manifest_declares_the_volume_map() {
     assert_eq!(map.manifest.terrain, monada_format::Terrain::Volume);
     assert_eq!(map.manifest.players, 1);
     assert_eq!(map.manifest.host_api, 8);
+    // The oracle's digger golden hardcodes the tick rate (it embeds the
+    // script via include_str!, not the archive) — this pin is what
+    // catches a manifest sim_hz change before the golden silently runs
+    // the map at the wrong rate.
+    assert_eq!(map.manifest.sim_hz, monada_format::SimHz::Fixed(SIM_HZ));
 }
 
 #[test]

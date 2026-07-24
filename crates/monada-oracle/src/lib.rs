@@ -818,7 +818,10 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
 ///
 /// [`VolumeStore`]: monada_script::VolumeStore
 const DIGGER_SCRIPT: &str = include_str!("../../monada-digger/map/scripts/main.rhai");
-/// The digger map's fixed tick rate (its manifest's `sim_hz`).
+/// The digger map's fixed tick rate — a DUPLICATE of the manifest's
+/// `sim_hz` (the oracle embeds the script, not the archive). Guarded by
+/// `manifest_declares_the_volume_map` in the digger crate, which pins
+/// the manifest to 30 Hz.
 const DIGGER_HZ: u32 = 30;
 /// Hash the demo run at these tick counts (`digger@0` = post-init: apron
 /// painted, vehicle spawned, suspension not yet settled).

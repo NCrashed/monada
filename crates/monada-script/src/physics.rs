@@ -74,6 +74,18 @@ fn lock(phys: &SharedPhysics) -> std::sync::MutexGuard<'_, PhysicsSim> {
 ///
 /// Ordering: must run **after** `register_bridge_api`, because the
 /// `voxel_*` registrations here shadow the bridge-only ones.
+///
+/// ## The material-0 contract (part of `host_api` 8)
+///
+/// Terrain paints without a material argument write `MaterialId(0)`,
+/// and the [`VoxelField`](monada_physics::VoxelField) contract lets the
+/// solver assert on any id the world never registered. So a volume
+/// map's **first `phys_material` call is its ground material**, and it
+/// must happen before the first tick that can bring a body into
+/// terrain contact. Painting before registering is fine (the store
+/// holds bare ids); *stepping onto* unregistered terrain is not — and
+/// the panic is data-dependent (fires at first contact), so a map that
+/// gets this wrong may survive its first N ticks.
 #[allow(clippy::too_many_lines)] // a flat list of host-fn registrations
 pub(crate) fn register_physics_api(
     engine: &mut Engine,
@@ -221,7 +233,8 @@ pub(crate) fn register_physics_api(
     // material-id overload; these registrations shadow the bridge-only
     // ones. Every edit wakes/invalidates physics over the touched box
     // (the P6 discipline), then forwards to the bridge for the render
-    // world-grid.
+    // world-grid. No-material paints write id 0 — the material-0
+    // contract above.
 
     let paint_box = {
         let p = phys.clone();

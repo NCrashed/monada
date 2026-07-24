@@ -53,7 +53,10 @@ pub use volume::VolumeStore;
 /// ship doors); 7 = `grid_spawn`/`voxel_fill_in` + `vision_observer`'s
 /// grid overload (multi-grid ships); 8 = the `phys_*` sim-physics verbs
 /// and the material-id overloads of `voxel_fill`/`voxel_set` on volume
-/// maps (digger demo, docs/plans/digger-demo.md §1c).
+/// maps (digger demo, docs/plans/digger-demo.md §1c) — NB on a volume
+/// map, paints without a material id write material 0, so the map's
+/// first `phys_material` call is its ground material and must precede
+/// terrain contact (the material-0 contract on `register_physics_api`).
 pub const HOST_API_VERSION: u32 = 8;
 
 /// The oldest declared `host_api` requirement this build still fully

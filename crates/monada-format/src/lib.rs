@@ -526,6 +526,27 @@ mod tests {
     }
 
     #[test]
+    fn volume_terrain_requires_a_fixed_sim_hz() {
+        // Absent = column, the store every pre-volume map was written
+        // against.
+        let map = Map::read(&pack(&sample()).unwrap()).unwrap();
+        assert_eq!(map.manifest.terrain, Terrain::Column);
+        // volume + on_command (the sample's tick model) is refused: the
+        // embedded physics dt IS the tick.
+        let mut files = sample();
+        let volume =
+            String::from_utf8(files["manifest.toml"].clone()).unwrap() + "\nterrain = \"volume\"\n";
+        files.insert("manifest.toml".to_string(), volume.clone().into_bytes());
+        assert!(Map::read(&pack(&files).unwrap()).is_err());
+        // The same declaration under a fixed rate parses.
+        let fixed = volume.replace("\"on_command\"", "\"30hz\"");
+        files.insert("manifest.toml".to_string(), fixed.into_bytes());
+        let map = Map::read(&pack(&files).unwrap()).unwrap();
+        assert_eq!(map.manifest.terrain, Terrain::Volume);
+        assert_eq!(map.manifest.sim_hz, SimHz::Fixed(30));
+    }
+
+    #[test]
     fn sim_hz_parses_fixed_rate() {
         assert_eq!(SimHz::from_str("25").unwrap(), SimHz::Fixed(25));
         assert_eq!(SimHz::from_str("25hz").unwrap(), SimHz::Fixed(25));

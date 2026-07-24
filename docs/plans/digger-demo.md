@@ -107,7 +107,12 @@ manifest opts in. `state_hash` = entity-world fold ⊕ physics fold ⊕
 terrain fold (append order fixed and documented — the same append-only
 discipline as the physics crate). `step()` order per tick: commands →
 script `on_tick` (inputs, drill calls) → `physics.step(&volume)` →
-hash. Snapshot/replay: all three serialize together.
+hash. Snapshot/replay: all three serialize together. *(D1 note:
+"together" landed as "each of the three is serde-serializable and
+round-trips bit-equal" — there is no unified snapshot container type,
+and the persisted format remains the input replay. If the net layer
+ever needs a state snapshot — late join — the container gets built
+then; later slices must not assume it exists.)*
 
 ### 1c. Script API (sim layer, the deterministic wall)
 
