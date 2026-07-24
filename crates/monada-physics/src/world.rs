@@ -745,6 +745,9 @@ impl PhysicsWorld {
             }
         }
         // A root's island may sleep only if every member is eligible.
+        // Ghosts (empty skin) NEVER sleep: nothing can ever touch one
+        // awake again, so a sleeping mid-air ghost would hang frozen
+        // forever — they stay integrating instead.
         let mut island_ready = vec![true; self.bodies.len()];
         for i in 0..self.bodies.len() {
             let root = find(&mut parent, i);
