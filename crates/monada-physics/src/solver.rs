@@ -101,6 +101,13 @@ pub(crate) fn prepare(
             effective_mass(body, inv_inertia, c.r, c.tangents.1),
         );
         // Restitution: measured before the solve, applied as a bias.
+        // Caveat: contact i's vn already includes the warm-start
+        // impulses of contacts j < i on the same body (this loop
+        // interleaves both). Box2D splits bias measurement and warm
+        // start into two passes; with restitution ≈ 0 (target feel)
+        // and the 1.0 threshold the difference is currently zero —
+        // split the passes when bouncy multi-contact impacts become
+        // real.
         let vn = velocity_at(body, c.r).dot(c.normal);
         c.restitution_bias = if vn < -RESTITUTION_THRESHOLD {
             c.restitution * vn

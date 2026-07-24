@@ -308,10 +308,15 @@ slides or holds according to friction coefficient; goldens.
   body-wide shift.
 - **The warm-start impulse cache is hashed sim state** (accumulated
   impulses feed the next tick), stored as a `Vec<ContactCacheEntry>` sorted
-  by `(body, sphere, cell)` rather than a `BTreeMap`: contact generation
-  order is already lexicographic, so the Vec is canonical by construction,
+  by `(body, sphere, cell)` rather than a `BTreeMap`: the cell loops in
+  contact generation iterate x → y → z outermost-first, *deliberately
+  matched* to `ContactKey`'s derived `Ord` (a `debug_assert` at cache
+  rebuild guards the pairing), so the Vec is canonical by construction,
   hashes through the existing slice impl, and stays serde-friendly (JSON
-  cannot encode struct map keys).
+  cannot encode struct map keys). NB the original wording claimed the
+  match came for free — it does not; the first cut nested the loops
+  z-outermost and warm starts silently missed cell-straddling spheres
+  (caught in review, fixed with a re-bless 2026-07-24).
 - **`max_speed` is a hashed world field** (no setter until a demo needs
   one), defaulting to 2000 voxels/s = 80 voxels/tick at 25 Hz — which is
   also the minimum obstacle thickness the clamp guarantees against

@@ -256,7 +256,10 @@ fn zero_restitution_does_not_bounce() {
     for _ in 0..300 {
         world.step(&Floor);
         let b = world.body(id).unwrap();
-        if !touched && b.linear_velocity().z >= Fixed::from_int(-10) * world.dt() {
+        // Strict `>`: in free fall vz equals g·dt·n exactly (see the
+        // P1 bit-exact velocity law), so only a solver impulse can
+        // lift it strictly above one tick's worth of gravity.
+        if !touched && b.linear_velocity().z > Fixed::from_int(-10) * world.dt() {
             // Normal impulse fired this tick (fall speed absorbed).
             touched = true;
             ceiling = b.position().z + Fixed::from_ratio(1, 16);

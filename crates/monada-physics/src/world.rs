@@ -260,8 +260,10 @@ impl PhysicsWorld {
         // 6. Position correction.
         solver::solve_positions(&mut self.bodies, &contacts);
 
-        // 7. Persist accumulated impulses (contacts are in key order,
-        // so the rebuilt cache is sorted by construction).
+        // 7. Persist accumulated impulses (contacts are in key order —
+        // the generation loops iterate x→y→z outermost-first to match
+        // `ContactKey`'s derived `Ord` — so the rebuilt cache is
+        // sorted by construction).
         self.impulse_cache.clear();
         self.impulse_cache.extend(
             contacts
@@ -276,6 +278,14 @@ impl PhysicsWorld {
                     normal_impulse: c.accumulated_normal,
                     tangent_impulse: c.accumulated_tangent,
                 }),
+        );
+        // Tripwire for the loop-order ↔ Ord pairing above: the
+        // binary_search warm-start lookup silently degrades if this
+        // ever breaks (strictly ascending — duplicates are impossible
+        // by key construction).
+        debug_assert!(
+            self.impulse_cache.windows(2).all(|w| w[0].key < w[1].key),
+            "impulse cache no longer sorted — generation order diverged from ContactKey::Ord"
         );
 
         self.tick += 1;

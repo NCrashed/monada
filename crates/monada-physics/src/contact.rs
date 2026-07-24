@@ -163,12 +163,21 @@ pub(crate) fn generate(
         for (sphere_index, sphere) in body.skin.iter().enumerate() {
             let center = body.position + body.orientation * sphere.offset;
             let reach = SKIN_RADIUS + CONTACT_MARGIN;
-            // Cells overlapping the sphere's AABB: at most 2×2×2.
+            // Cells overlapping the sphere's AABB: 2 per axis
+            // normally, 3 in the ~2·margin window around half-integer
+            // centres (up to 27 candidates; the distance filter below
+            // trims those to the real ≤ handful).
+            //
+            // Loop nesting is x → y → z OUTERMOST-FIRST, deliberately
+            // matching `ContactKey`'s derived `Ord` (tuple compares
+            // x first) — this is what makes the warm-start cache
+            // sorted by construction; the debug_assert at rebuild
+            // (world.rs) guards the pairing.
             let lo = |v: Fixed| i64::from((v - reach).floor_to_int());
             let hi = |v: Fixed| i64::from((v + reach).floor_to_int());
-            for cz in lo(center.z)..=hi(center.z) {
+            for cx in lo(center.x)..=hi(center.x) {
                 for cy in lo(center.y)..=hi(center.y) {
-                    for cx in lo(center.x)..=hi(center.x) {
+                    for cz in lo(center.z)..=hi(center.z) {
                         if !field.occupied(cx, cy, cz) {
                             continue;
                         }
