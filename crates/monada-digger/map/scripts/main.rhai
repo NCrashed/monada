@@ -28,7 +28,19 @@ fn init() {
     // top surface at z = 2) — runway enough for the golden's full
     // drive/arc/brake schedule. Spans many 16³ chunks, so the
     // chunk-hash cache is exercised from tick 0.
-    voxel_fill(0, 0, 0, 159, 159, 1, 0x808080);
+    // NB the colour's high byte is roxlap BRIGHTNESS (0xBB_RR_GG_BB) —
+    // 0x00 there renders pure black. And render-side inserts NEVER
+    // recolour an existing solid voxel (VoxLap span semantics: the
+    // first painter owns the colour) — so the start pad goes down
+    // BEFORE the slab it sits flush in.
+    voxel_fill(34, 114, 1, 46, 126, 1, 0x8050_78a0);
+    voxel_fill(0, 0, 0, 159, 159, 1, 0x8080_8080);
+    // Corner posts: real terrain (solid, hashed, collidable) marking
+    // the apron's extent.
+    voxel_fill(0, 0, 0, 1, 1, 4, 0x80a0_6040);
+    voxel_fill(158, 0, 0, 159, 1, 4, 0x80a0_6040);
+    voxel_fill(0, 158, 0, 1, 159, 4, 0x80a0_6040);
+    voxel_fill(158, 158, 0, 159, 159, 4, 0x80a0_6040);
 
     // The vehicle: a 6×4×2 chassis on four wheels — the physics
     // test-suite stance (wheelbase ±3.5, track ±2.5, k = 240, c = 80).
@@ -57,9 +69,17 @@ fn init() {
     entity_set_field(v, "w_rr", fixed(w_rr));
     entity_set_position(v, phys_pos(body));
 
-    // Render-side dressing (no-ops headless).
-    camera_focus(vec3(fixed(80), fixed(80), fixed(2)));
-    camera_dist(fixed(60));
+    // D1 placeholder art: a sprite box riding the entity's mirrored pose,
+    // so the windowed run shows the drive. D2's automatic body render
+    // mirror (per-BodyId grid, real rotation) replaces it.
+    let m = model_box(96, 64, 32, 0x80c8_6a32);
+    entity_set_model(v, m);
+
+    // Render-side dressing (no-ops headless). Frame the start pad from
+    // high enough that the apron reads as a place; the chase cam is D2.
+    camera_focus(vec3(fixed(60), fixed(100), fixed(2)));
+    camera_angle(ratio(8, 10), fixed(1));
+    camera_dist(fixed(400));
     set_light(vec3(fixed(1), fixed(2), fixed(-3)), ratio(9, 10));
     status("digger: W/S drive, A/D steer, Space brake");
 }

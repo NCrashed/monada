@@ -195,6 +195,9 @@ pub trait HostBridge: Send {
     fn entity_set_model(&mut self, entity: i64, model: i64);
     /// Paint a solid voxel box into the world grid, in sim coordinates.
     /// (Two corners + colour reads naturally as separate args for scripts.)
+    /// `color` is roxlap-packed `0xBB_RR_GG_BB` — the HIGH byte is
+    /// brightness, not alpha: `0x0080_8080` is a *black* voxel,
+    /// `0x8080_8080` a mid-grey one.
     #[allow(clippy::too_many_arguments)]
     fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64);
     /// Paint a single voxel into the world grid, in sim coordinates.
