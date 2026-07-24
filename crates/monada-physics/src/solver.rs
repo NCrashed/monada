@@ -62,7 +62,7 @@ pub(crate) fn inv_inertia_world(body: &RigidBody) -> FixedMat3 {
 
 /// The effective mass of a unit impulse along `axis` at offset `r`:
 /// `1 / (m⁻¹ + ((I⁻¹(r×axis)) × r) · axis)`.
-fn effective_mass(
+pub(crate) fn effective_mass(
     body: &RigidBody,
     inv_inertia: &FixedMat3,
     r: FixedVec3,

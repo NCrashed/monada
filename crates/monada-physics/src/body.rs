@@ -24,6 +24,7 @@ use monada_sim::{StateHash, StateHasher};
 use crate::ids::BodyId;
 use crate::material::Material;
 use crate::shape::{derive_skin, mass_properties, SkinSphere, VoxelShape};
+use crate::wheels::{Wheel, WheelId};
 
 /// Spawn-time description of a ghost body (explicit mass properties,
 /// no collision skin — see the module docs). The explicit path stays
@@ -109,6 +110,15 @@ pub struct RigidBody {
     pub(crate) inv_inertia_body: FixedMat3,
     /// Derived cache: surface voxels as CoM-relative spheres.
     pub(crate) skin: Vec<SkinSphere>,
+    /// Derived cache: the `CoM` in shape-local coordinates (ZERO for
+    /// ghosts). The render mirror and wheel authoring both need the
+    /// shape→body-frame rebase.
+    pub(crate) com_local: FixedVec3,
+    /// Attached wheels, ascending by [`WheelId`] (P3). Hashed.
+    pub(crate) wheels: Vec<Wheel>,
+    /// Next wheel id this body hands out — monotonic, never reused,
+    /// hashed (rule 3: id allocation is simulation state).
+    pub(crate) next_wheel_id: u32,
 }
 
 impl RigidBody {
@@ -127,6 +137,7 @@ impl RigidBody {
         inertia_body: FixedMat3,
         shape: Option<VoxelShape>,
         skin: Vec<SkinSphere>,
+        com_local: FixedVec3,
     ) -> RigidBody {
         assert!(
             mass > Fixed::ZERO,
@@ -157,6 +168,9 @@ impl RigidBody {
             inv_mass: Fixed::ONE / mass,
             inv_inertia_body: inertia_body.inverse(),
             skin,
+            com_local,
+            wheels: Vec::new(),
+            next_wheel_id: 0,
         }
     }
 
@@ -176,6 +190,7 @@ impl RigidBody {
             def.inertia_body,
             None,
             Vec::new(),
+            FixedVec3::ZERO,
         )
     }
 
@@ -198,6 +213,7 @@ impl RigidBody {
             props.inertia,
             Some(def.shape.clone()),
             skin,
+            props.com,
         )
     }
 
@@ -255,12 +271,33 @@ impl RigidBody {
     pub fn skin_len(&self) -> usize {
         self.skin.len()
     }
+
+    /// Attached wheels, ascending by [`WheelId`].
+    #[must_use]
+    pub fn wheels(&self) -> &[Wheel] {
+        &self.wheels
+    }
+
+    /// The centre of mass in shape-local coordinates (`ZERO` for
+    /// ghosts): body frame = shape frame − this. The seam for the
+    /// render mirror's rebase and for authoring wheel anchors from
+    /// shape geometry.
+    #[must_use]
+    pub fn com_in_shape(&self) -> FixedVec3 {
+        self.com_local
+    }
+
+    /// Index of `wheel` in the sorted wheel Vec, if attached.
+    pub(crate) fn wheel_index(&self, wheel: WheelId) -> Option<usize> {
+        self.wheels.binary_search_by_key(&wheel, |w| w.id).ok()
+    }
 }
 
 impl StateHash for RigidBody {
-    /// Canonical fold: `id`, pose, velocities, mass properties, shape.
-    /// The `inv_*` and `skin` caches are excluded — pure functions of
-    /// hashed fields (see the cache policy on [`RigidBody`]).
+    /// Canonical fold: `id`, pose, velocities, mass properties, shape,
+    /// then wheels + `next_wheel_id` (P3 append). The `inv_*` and
+    /// `skin` caches are excluded — pure functions of hashed fields
+    /// (see the cache policy on [`RigidBody`]).
     fn hash(&self, h: &mut StateHasher) {
         self.id.hash(h);
         self.position.hash(h);
@@ -276,5 +313,7 @@ impl StateHash for RigidBody {
                 shape.hash(h);
             }
         }
+        self.wheels.hash(h);
+        h.write_u64(u64::from(self.next_wheel_id));
     }
 }

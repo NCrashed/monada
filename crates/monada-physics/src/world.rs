@@ -16,6 +16,7 @@ use crate::field::VoxelField;
 use crate::ids::BodyId;
 use crate::material::{Material, MaterialId};
 use crate::solver;
+use crate::wheels::{self, Wheel, WheelDef, WheelId, WheelInput};
 
 /// Default speed ceiling: 2000 voxels/s = 80 voxels/tick at 25 Hz.
 const DEFAULT_MAX_SPEED: Fixed = Fixed::from_int(2000);
@@ -200,6 +201,52 @@ impl PhysicsWorld {
         &mut self.bodies[index]
     }
 
+    /// Attach a raycast wheel to `body` (see the `wheels` module for
+    /// the suspension model). Wheel ids are per-body, monotonic, never
+    /// reused. Ghost bodies may carry wheels — the suspension raycasts
+    /// terrain and needs no collision skin (a hover-cart; useful for
+    /// isolating suspension in tests).
+    ///
+    /// # Panics
+    /// Panics on an unknown body id.
+    pub fn attach_wheel(&mut self, body: BodyId, def: &WheelDef) -> WheelId {
+        let body = self.body_mut(body);
+        let id = WheelId(body.next_wheel_id);
+        body.next_wheel_id += 1;
+        body.wheels.push(Wheel {
+            id,
+            def: *def,
+            input: WheelInput::default(),
+        });
+        id
+    }
+
+    /// Detach a wheel (the P3 lost-wheel acceptance path). The id is
+    /// retired, not reused.
+    ///
+    /// # Panics
+    /// Panics on an unknown body id or a wheel that is not attached.
+    pub fn detach_wheel(&mut self, body: BodyId, wheel: WheelId) {
+        let body = self.body_mut(body);
+        let index = body
+            .wheel_index(wheel)
+            .unwrap_or_else(|| panic!("detach_wheel: no wheel {wheel:?} on body"));
+        body.wheels.remove(index);
+    }
+
+    /// Set a wheel's control input. Retained (hashed) state — it holds
+    /// until the next call, matching the lockstep command model.
+    ///
+    /// # Panics
+    /// Panics on an unknown body id or a wheel that is not attached.
+    pub fn set_wheel_input(&mut self, body: BodyId, wheel: WheelId, input: WheelInput) {
+        let body = self.body_mut(body);
+        let index = body
+            .wheel_index(wheel)
+            .unwrap_or_else(|| panic!("set_wheel_input: no wheel {wheel:?} on body"));
+        body.wheels[index].input = input;
+    }
+
     /// Advance one fixed tick against the terrain `field` (a read-only
     /// per-tick input — physics never owns terrain).
     ///
@@ -229,6 +276,10 @@ impl PhysicsWorld {
         for body in &mut self.bodies {
             body.linear_velocity = (body.linear_velocity + g_dt).clamp_length_max(self.max_speed);
         }
+
+        // 1½. Wheel pass — before the contact solver, so a chassis
+        // bottoming out on a step is still corrected by NGS.
+        wheels::wheel_pass(&mut self.bodies, field, &self.materials, g_dt, self.dt);
 
         // 2. Narrowphase at pre-step poses.
         let mut contacts = contact::generate(&self.bodies, field, &self.materials);

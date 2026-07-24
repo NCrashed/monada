@@ -10,10 +10,12 @@
 //! render state — bodies are mirrored to roxlap grids by the engine.
 //!
 //! Built milestone by milestone (P0–P6, see the plan). Currently at
-//! **P2**: voxel bodies against a terrain [`VoxelField`] — sphere-skin
-//! narrowphase, sequential-impulse solver with Coulomb friction,
-//! full-K NGS position correction — on top of P1's free-body
-//! integration and P0's deterministic shell (fixed timestep, canonical
+//! **P3**: raycast wheel suspension — DDA rays into the field,
+//! spring-damper along the ray with the force on the contact normal,
+//! friction-circle tires, drive/brake/steer inputs — on top of P2's
+//! voxel bodies vs terrain (sphere-skin narrowphase,
+//! sequential-impulse solver, full-K NGS), P1's free-body integration,
+//! and P0's deterministic shell (fixed timestep, canonical
 //! [`state_hash`](PhysicsWorld::state_hash), serde snapshots, the
 //! `phys@` oracle golden gating it in CI).
 //!
@@ -35,8 +37,10 @@ mod contact;
 mod field;
 mod ids;
 mod material;
+mod raycast;
 mod shape;
 mod solver;
+mod wheels;
 mod world;
 
 pub use body::{BodyDef, RigidBody, VoxelBodyDef};
@@ -44,4 +48,5 @@ pub use field::{EmptyField, VoxelField};
 pub use ids::BodyId;
 pub use material::{Material, MaterialId};
 pub use shape::VoxelShape;
+pub use wheels::{Wheel, WheelDef, WheelId, WheelInput};
 pub use world::{PhysicsWorld, SLEEP_ANGULAR, SLEEP_LINEAR};

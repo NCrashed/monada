@@ -579,32 +579,50 @@ pub fn rts_checkpoints() -> Vec<Checkpoint> {
 }
 
 /// The physics-crate golden: a [`PhysicsWorld`] at the engine-default
-/// 25 Hz under gravity, over a flat voxel floor (cells below z = 0
-/// solid). Bodies: the two free P1 ghosts — a spinning ballistic one
+/// 25 Hz under gravity, over bumpy voxel terrain — a flat floor with a
+/// deterministic 0–2 voxel bump field for x > 40 and a staircase for
+/// x < −40. Bodies: the two free P1 ghosts — a spinning ballistic one
 /// carrying a *rotated* (non-diagonal) inertia tensor so the
 /// `FixedMat3` hash fold is warmed by real data, and a drifting one
 /// (ghosts have no skin, so they sail through the floor by design) —
-/// plus two P2 voxel bodies exercising the contact stack: a 3³ cube
-/// dropped from z = 30 (at rest well before tick 600, warm-start cache
-/// live) and a 4×4×2 slab shoved sideways at spawn, sliding to a
-/// frictional stop. Like `kernel@` it is pure Rust with no scripting:
-/// the anchor that gates `monada-physics`'s state layout, canonical
-/// hash, and solver arithmetic cross-platform
-/// (docs/plans/voxel-physics.md §5). Later milestones grow this
-/// scenario (P3 a vehicle, P4 a destruction script), each growth
-/// re-blessed explicitly.
+/// two P2 voxel bodies exercising the contact stack (a 3³ cube dropped
+/// from z = 30, at rest well before tick 600 with a live warm-start
+/// cache; a 4×4×2 slab shoved sideways, sliding to a frictional stop)
+/// — and a P3 four-wheel vehicle driving a scripted schedule: wind-up
+/// straight, a steered arc over the bump field, brake to a stop.
+/// Like `kernel@` it is pure Rust with no scripting: the anchor that
+/// gates `monada-physics`'s state layout, canonical hash, and solver +
+/// wheel arithmetic cross-platform (docs/plans/voxel-physics.md §5).
+/// Later milestones grow this scenario (P4 a destruction script), each
+/// growth re-blessed explicitly.
 ///
 /// [`PhysicsWorld`]: monada_physics::PhysicsWorld
+///
+/// # Panics
+/// Panics if the scenario's fixed spawns fail (a bug, not a data
+/// condition — every input here is a compile-time constant).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn phys_checkpoints() -> Vec<Checkpoint> {
     use monada_fixed::{FixedMat3, FixedQuat};
     use monada_physics::{
         BodyDef, Material, MaterialId, PhysicsWorld, VoxelBodyDef, VoxelField, VoxelShape,
+        WheelDef, WheelInput,
     };
 
-    struct Floor;
-    impl VoxelField for Floor {
-        fn occupied(&self, _x: i64, _y: i64, z: i64) -> bool {
+    /// Flat floor; bumps (height 0–2, deterministic in the cell
+    /// coords) beyond x > 40; stairs descending for x < −40.
+    struct Terrain;
+    impl VoxelField for Terrain {
+        fn occupied(&self, x: i64, y: i64, z: i64) -> bool {
+            if x > 40 {
+                let bump = (x.div_euclid(3).wrapping_mul(7) + y.div_euclid(3).wrapping_mul(5))
+                    .rem_euclid(3);
+                return z < bump;
+            }
+            if x < -40 {
+                return z < ((-40 - x).div_euclid(2)).clamp(0, 20);
+            }
             z < 0
         }
         fn material(&self, _x: i64, _y: i64, _z: i64) -> MaterialId {
@@ -664,11 +682,74 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
         angular_velocity: FixedVec3::ZERO,
     });
 
+    // P3: a four-wheel vehicle (the test-suite stance: wheelbase ±3.5,
+    // track ±2.5, k = 240, c = 80).
+    let mut chassis = VoxelShape::new(6, 4, 2);
+    chassis.fill_box((0, 0, 0), (5, 3, 1), mat);
+    let vehicle = world.spawn_voxels(&VoxelBodyDef {
+        shape: chassis,
+        position: v3(0, 15, 3),
+        orientation: FixedQuat::IDENTITY,
+        linear_velocity: FixedVec3::ZERO,
+        angular_velocity: FixedVec3::ZERO,
+    });
+    let com = world.body(vehicle).expect("vehicle").com_in_shape();
+    let corners = [
+        (Fixed::from_ratio(13, 2), Fixed::from_ratio(9, 2)),
+        (Fixed::from_ratio(13, 2), Fixed::from_ratio(-1, 2)),
+        (Fixed::from_ratio(-1, 2), Fixed::from_ratio(9, 2)),
+        (Fixed::from_ratio(-1, 2), Fixed::from_ratio(-1, 2)),
+    ];
+    let wheel_ids = corners.map(|(sx, sy)| {
+        world.attach_wheel(
+            vehicle,
+            &WheelDef {
+                anchor: FixedVec3::new(sx, sy, Fixed::ZERO) - com,
+                rest_length: Fixed::from_ratio(3, 2),
+                radius: Fixed::HALF,
+                stiffness: fx(240),
+                damping: fx(80),
+                friction: Fixed::from_ratio(4, 5),
+            },
+        )
+    });
+    // Scripted schedule: settle → wind up straight → steered arc onto
+    // the bump field → brake to a stop.
+    let input = |steer_front: bool, steer: Fixed, drive: Fixed, brake: Fixed| {
+        move |world: &mut PhysicsWorld, ids: &[monada_physics::WheelId; 4]| {
+            for (i, id) in ids.iter().enumerate() {
+                world.set_wheel_input(
+                    vehicle,
+                    *id,
+                    WheelInput {
+                        steer: if !steer_front || i < 2 {
+                            steer
+                        } else {
+                            Fixed::ZERO
+                        },
+                        drive,
+                        brake,
+                    },
+                );
+            }
+        }
+    };
+
     let mut prev = 0;
     let mut out = Vec::with_capacity(TICK_CHECKPOINTS.len());
     for &tick in TICK_CHECKPOINTS {
-        for _ in prev..tick {
-            world.step(&Floor);
+        for t in prev..tick {
+            match t {
+                50 => input(false, Fixed::ZERO, fx(25), Fixed::ZERO)(&mut world, &wheel_ids),
+                200 => {
+                    input(true, Fixed::from_ratio(3, 10), fx(25), Fixed::ZERO)(
+                        &mut world, &wheel_ids,
+                    );
+                }
+                450 => input(false, Fixed::ZERO, Fixed::ZERO, fx(100))(&mut world, &wheel_ids),
+                _ => {}
+            }
+            world.step(&Terrain);
         }
         prev = tick;
         out.push(Checkpoint {
