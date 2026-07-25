@@ -841,7 +841,9 @@ fn digger_input(t: usize) -> Command {
     let (drive, steer, brake) = match t {
         0..=29 => (0, 0, 0),
         30..=209 => (1, 0, 0),
-        210..=389 => (1, -1, 0),
+        // +1 = steer RIGHT (screen convention; the script negates into
+        // physics yaw).
+        210..=389 => (1, 1, 0),
         390..=419 => (1, 0, 0),
         _ => (0, 0, 1),
     };

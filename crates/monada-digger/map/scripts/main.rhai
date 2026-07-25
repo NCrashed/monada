@@ -7,7 +7,8 @@
 // onto wheels. Feel constants live HERE (plan §1f), not in the engine.
 //
 // Input packing (the rpg pattern, one command per tick, verb 0):
-//   arg.x = drive in −1..1, arg.y = steer in −1..1, target bit 0 = brake.
+//   arg.x = drive in −1..1, arg.y = steer in −1..1 (+1 = steer RIGHT,
+//   the player's view), target bit 0 = brake.
 //
 // All gameplay state lives in the World (decision A2): one entity
 // carries the body/wheel ids and the latest input intent as fields.
@@ -86,7 +87,7 @@ fn init() {
     // The chase cam takes over on the first tick; this is just the pre-tick
     // frame.
     camera_focus(phys_pos(body));
-    camera_angle(pi() - phys_yaw(body), fixed(1));
+    camera_angle(pi() - phys_yaw(body), ratio(1, 2));
     camera_dist(fixed(220));
     set_light(vec3(fixed(1), fixed(2), fixed(-3)), ratio(9, 10));
     status("digger: W/S drive, A/D steer, Space brake");
@@ -124,8 +125,11 @@ fn tick(dt) {
     let body = to_int(entity_field(v, "body"));
     // Feel constants: full drive = torque 25, full brake = 100, full
     // steer = 1/5 rad (3/10 drifts the stance into a bottomed-out slide).
+    // Steer is NEGATED: input +1 means "screen right", and with the
+    // chase cam behind the body a positive physics yaw (+z, toward sim
+    // +y) reads as a LEFT turn on screen.
     let drive = entity_field(v, "drive") * fixed(25);
-    let steer = entity_field(v, "steer") * ratio(1, 5);
+    let steer = entity_field(v, "steer") * ratio(-1, 5);
     let brake = entity_field(v, "brake") * fixed(100);
     // Front wheels steer; all four drive and brake.
     phys_wheel_input(body, to_int(entity_field(v, "w_fl")), steer, drive, brake);
@@ -135,10 +139,18 @@ fn tick(dt) {
     // Mirror the pose onto the entity (sensors and game logic read the
     // World, never the physics handle).
     entity_set_position(v, phys_pos(body));
-    // Chase cam (plan §1e): follow the body, yaw tracks its heading
-    // (world yaw = pi − sim yaw under the render mirror), pitch fixed.
-    camera_focus(phys_pos(body));
-    camera_angle(pi() - phys_yaw(body), fixed(1));
+    // Chase cam (plan §1e): aim AHEAD of the body along its heading so
+    // the road fills the view instead of the wheels, yaw tracks the
+    // heading (world yaw = pi − sim yaw under the render mirror), pitch
+    // fixed and shallow.
+    let yaw = phys_yaw(body);
+    let p = phys_pos(body);
+    camera_focus(vec3(
+        p.x + cos(yaw) * fixed(10),
+        p.y + sin(yaw) * fixed(10),
+        p.z,
+    ));
+    camera_angle(pi() - yaw, ratio(1, 2));
 }
 
 // --- local layer (unsynchronized, docs/plans/input-bindings.md) ------

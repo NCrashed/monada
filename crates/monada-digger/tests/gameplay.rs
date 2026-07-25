@@ -61,7 +61,9 @@ fn schedule(t: u64) -> Command {
     match t {
         0..=29 => input(0, 0, 0),
         30..=209 => input(1, 0, 0),
-        210..=389 => input(1, -1, 0),
+        // +1 = steer RIGHT (the screen convention; the script negates
+        // into physics yaw) — the same right-hand arc as ever.
+        210..=389 => input(1, 1, 0),
         390..=419 => input(1, 0, 0),
         _ => input(0, 0, 1),
     }
