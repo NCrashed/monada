@@ -32,6 +32,14 @@ fn crew_speed() { ratio(16, 100) } // sim cells / tick (30 Hz)
 // pure functions can't see top-level consts. Fog + deck_clip ride this grid.
 fn hull_grid() { 0 }
 
+// The ship entity's id. It is the FIRST entity `init` creates (before any crew),
+// and ids are allocated strictly increasing from 0, so it is deterministically 0
+// — written as a literal the same way `hull_grid()` is, since the rhai backend
+// rewinds its scope between ticks (a real per-tick cache can't persist) and pure
+// functions can't read a top-level const. Lets `step_ship` skip an `entities_of`
+// Array allocation every tick for this singleton.
+fn ship_entity() { 0 }
+
 fn absf(x) { if x < fixed(0) { -x } else { x } }
 
 fn nonzero(x) { x > fixed(0) || x < fixed(0) }
@@ -382,11 +390,9 @@ fn tick() {
 /// local origin (a hull corner) for now; spinning about the hull centre is a
 /// later pivot-compensation pass (see docs/plans/ship-visibility.md).
 fn step_ship() {
-    let ships = entities_of(1);
-    if ships.is_empty() {
-        return;
-    }
-    let ship = ships[0];
+    // The ship is a known singleton (`ship_entity()`), so skip the per-tick
+    // `entities_of(1)` Array allocation and address it directly.
+    let ship = ship_entity();
     let spin = entity_field(ship, "spin") + ratio(2, 100); // rad / tick (30 Hz)
     // Wrap so the fixed-point angle never grows without bound.
     if spin > tau() {
@@ -461,7 +467,10 @@ fn follow_camera() {
     let idx = if lp < 0 { 0 } else { lp };
     if idx < crew.len() {
         let c = crew[idx];
-        camera_focus(entity_position(c));
+        // Focus BY entity so the host composes the crew's grid-local seat through
+        // the hull's transform — a bare `camera_focus(entity_position(c))` aims at
+        // the un-rotated cell and slides off a turning hull.
+        camera_focus_entity(c, entity_position(c));
         // See the world through this crew member's eyes (fog of war), against
         // the hull's own grid so the mask stays grid-local (movable hull).
         vision_observer(c, hull_grid());

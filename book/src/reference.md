@@ -213,6 +213,7 @@ Spawn and paint additional voxel grids independent of the world grid (e.g. ships
 | Function | Result |
 |---|---|
 | `camera_focus(point)` | aim the camera at a sim-space point |
+| `camera_focus_entity(entity, point)` | aim the camera at an entity's `point`, composed through the grid the entity rides (tracks a crew member on a moving/rotating hull) |
 | `camera_angle(yaw, pitch)` | set the camera's orbit angles (radians) |
 | `camera_dist(dist)` | set the camera's distance from its focus |
 | `camera_pan(dx, dy)` | shift the camera focus by a sim-space delta — an RTS-style scroll, accumulated host-side |

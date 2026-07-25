@@ -590,6 +590,16 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     });
 
     let b = bridge.clone();
+    engine.register_fn(
+        "camera_focus_entity",
+        move |entity: i64, point: FixedVec3| {
+            b.lock()
+                .expect("bridge mutex")
+                .camera_focus_entity(entity, point);
+        },
+    );
+
+    let b = bridge.clone();
     engine.register_fn("camera_angle", move |yaw: Fixed, pitch: Fixed| {
         b.lock().expect("bridge mutex").camera_angle(yaw, pitch);
     });

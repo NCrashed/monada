@@ -313,6 +313,11 @@ pub trait HostBridge: Send {
     fn status(&mut self, text: &str);
     /// Aim the camera at a point (sim coordinates).
     fn camera_focus(&mut self, point: FixedVec3);
+    /// Aim the camera at an entity's `point` (sim coordinates), composed through
+    /// the grid the entity rides — so following a crew member on a moving or
+    /// rotating hull tracks its true world seat, not the un-transformed cell.
+    /// Render-side only; the default no-ops (headless bridges have no camera).
+    fn camera_focus_entity(&mut self, _entity: i64, _point: FixedVec3) {}
     /// Orient the camera: `yaw`/`pitch` in radians — the orbit angles the
     /// view should start at. Lets a map face the scene its own way instead
     /// of inheriting the host's default angle.

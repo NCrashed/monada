@@ -978,6 +978,16 @@ impl MapRender {
             self.vision_grid = grid;
             self.drop_fow();
         }
+        // The fog mask re-bases the observer through `vision_grid` while `place`
+        // seats the same crew through `entity_grid` — if a map bound the observer
+        // to a different hull than the crew rides, the cone and the sprite would
+        // silently disagree. Derive one from the other rather than trusting the
+        // author: the observer entity always rides its own vision grid. A `None`
+        // (legacy world) grid leaves the binding to the identity world transform,
+        // which `place` already assumes for an unbound entity.
+        if let (Some(e), Some(g)) = (e, grid) {
+            self.entity_grid.insert(e, g);
+        }
     }
 
     /// Push the current deck cutaway onto the vision grid's `z_clip` (the render
@@ -1106,29 +1116,37 @@ impl MapRender {
         }
         let out = if twin.sync(&mut self.scene, &fow) {
             let id = twin.twin();
-            // The twin renders the hull (the real grid is `render_excluded`),
-            // but `sync` only mirrors the real grid's transform in its Phase 2 —
-            // which it SKIPS on a "quiet" frame (mask version + real mutation
-            // counter unchanged). A hull that merely ROTATES each tick bumps
-            // neither: `grid_orient` is not a voxel edit (no mutation) and turns
-            // no cell visible/dark (no mask change). So on an idle frame `sync`
-            // early-outs and the twin's transform freezes while the real grid
-            // keeps turning — the rendered hull stalls, and the crew (placed from
-            // the live real transform in `place`) visibly slides off it. Force
-            // the twin to track the real transform every frame so the hull turns
-            // smoothly regardless of fog activity.
+            self.fow_twin = Some(twin);
+            Some(id)
+        } else {
+            // Twin lost (snapshot / rollback) — re-arm AND populate the fresh twin
+            // THIS frame. A newly attached twin holds no geometry until its first
+            // `sync`, so deferring to next frame would blank the hull for a frame;
+            // syncing now (a full first-seen scan) also lets a rollback that lands
+            // mid-rotation render at the live transform instead of jittering.
+            let mut fresh = FowTwin::attach(&mut self.scene, main_grid);
+            let out = fresh.sync(&mut self.scene, &fow).then(|| fresh.twin());
+            self.fow_twin = Some(fresh);
+            out
+        };
+        // The twin renders the hull (the real grid is `render_excluded`), but
+        // `sync` only mirrors the real grid's transform in its Phase 2 — which it
+        // SKIPS on a "quiet" frame (mask version + real mutation counter
+        // unchanged). A hull that merely ROTATES each tick bumps neither:
+        // `grid_orient` is not a voxel edit (no mutation) and turns no cell
+        // visible/dark (no mask change). So on an idle frame `sync` early-outs and
+        // the twin's transform freezes while the real grid keeps turning — the
+        // rendered hull stalls, and the crew (placed from the live real transform
+        // in `place`) visibly slides off it. Force the twin to track the real
+        // transform every frame — on both the synced and the just-re-armed twin —
+        // so the hull turns smoothly regardless of fog activity or rollback.
+        if let Some(id) = out {
             if let Some(t) = self.scene.grid(main_grid).map(|g| g.transform) {
                 if let Some(tw) = self.scene.grid_mut(id) {
                     tw.transform = t;
                 }
             }
-            self.fow_twin = Some(twin);
-            Some(id)
-        } else {
-            // Twin lost (snapshot / rollback) — re-arm for next frame.
-            self.fow_twin = Some(FowTwin::attach(&mut self.scene, main_grid));
-            None
-        };
+        }
         self.fow = Some(fow);
         out
     }
@@ -1240,7 +1258,15 @@ impl MapRender {
             Some(grid) => {
                 let dir =
                     grid.transform.rotation * DVec3::new(world_yaw.cos(), world_yaw.sin(), 0.0);
-                dir.y.atan2(dir.x)
+                // A hull pitched toward vertical projects the facing onto a
+                // near-zero horizontal vector; `atan2(0, 0)` is a meaningless 0
+                // that would snap the billboard to +x. Below that floor the
+                // heading is undefined, so hold the incoming world yaw.
+                if dir.x.hypot(dir.y) < 1e-6 {
+                    world_yaw
+                } else {
+                    dir.y.atan2(dir.x)
+                }
             }
             None => world_yaw,
         }
@@ -1266,7 +1292,15 @@ impl MapRender {
             let Some(p) = world.position(e) else {
                 continue; // despawned (e.g. captured / killed)
             };
-            let w = self.place(e, p);
+            // The observer entity is usually model-bound too, so reuse the
+            // seat we already composed for `observer_pose` above instead of
+            // running `place` (a quaternion rotate) a second time this frame.
+            let w = if Some(e) == self.vision_entity {
+                self.observer_pose
+                    .map_or_else(|| self.place(e, p), |(pos, _)| pos)
+            } else {
+                self.place(e, p)
+            };
             match self.model_refs.get(model_id) {
                 Some(&ModelRef::Sprite(si)) => {
                     // roxlap anchors the kv6's stored pivot at the sprite
@@ -1307,12 +1341,18 @@ impl MapRender {
         // (killed / captured since selection) silently drop out of the set,
         // so `highlighted_all` never hands the map a stale id.
         self.highlighted.retain(|e| world.position(*e).is_some());
-        // Snapshot so the loop can call `place` (whole `&self`) while pushing
-        // into the disjoint `self.sprites` field (the set is small — per pick).
-        let highlighted: Vec<EntityId> = self.highlighted.iter().copied().collect();
-        for h in highlighted {
+        // Compose each marker's seat inline rather than snapshotting the set into
+        // a fresh `Vec` every frame: `place` borrows the whole `&self`, which
+        // would clash with pushing into `self.sprites`, but inlining its grid
+        // composition touches only the disjoint `entity_grid` / `scene` fields the
+        // borrow checker can split from `sprites`.
+        for &h in &self.highlighted {
             if let Some(p) = world.position(h) {
-                let w = self.place(h, p);
+                let local = world_of(p);
+                let w = match self.entity_grid.get(&h).and_then(|&g| self.scene.grid(g)) {
+                    Some(grid) => grid.transform.rotation * local + grid.transform.origin,
+                    None => local,
+                };
                 self.sprites.instances.push(SpriteInstanceDesc {
                     // Seat the tile flush on the ground the entity stands
                     // on (its own w.z, not the z=0 board plane — a unit up
@@ -1480,7 +1520,10 @@ impl MapRender {
         let mut best: Option<(EntityId, f64)> = None;
         for &e in self.models.keys() {
             let Some(p) = world.position(e) else { continue };
-            let w = world_of(p);
+            // Compose through the grid the entity rides (rotation + origin), the
+            // same seat `build_instances` renders it at — hit-testing against the
+            // bare `world_of(p)` mis-picks on a moved/rotated hull.
+            let w = self.place(e, p);
             let d2 = (w.x - hit.x).powi(2) + (w.y - hit.y).powi(2);
             if best.map_or(true, |(_, b)| d2 < b) {
                 best = Some((e, d2));
@@ -2657,6 +2700,13 @@ impl HostBridge for MapRender {
         self.camera.center = self.entity_world_of(point);
     }
 
+    fn camera_focus_entity(&mut self, entity: i64, point: FixedVec3) {
+        // Compose through the grid the entity rides (the same seat
+        // `build_instances` renders it at), so following a crew member on a
+        // rotating hull tracks it instead of aiming at the un-transformed cell.
+        self.camera.center = self.place(EntityId(entity as u64), point);
+    }
+
     fn camera_angle(&mut self, yaw: Fixed, pitch: Fixed) {
         self.camera.yaw = yaw.to_f64();
         self.camera.pitch = pitch.to_f64();
@@ -3197,17 +3247,16 @@ mod tests {
         r.vision_config(110, 6, 3);
         r.deck_clip(0, 3); // sets the deck band the mask needs
 
-        // Observer entity at WORLD sim (wx+4, wy+4, wz) — grid-local sim (4, 4, 0).
+        // Observer entity at GRID-LOCAL sim (4, 4, 0) — as real crew are stored.
+        // `vision_observer_in` binds it to grid `g`, so `place` composes this
+        // through the hull transform to the true world seat (== WORLD sim
+        // (wx+4, wy+4, wz)); `update_fow` then rebases back to grid-local.
         let mut world = World::new(0);
         let arch = world.register_archetype(&["deck"]);
         let e = world.spawn(arch);
         world.set_position(
             e,
-            FixedVec3::new(
-                Fixed::from_int((wx + 4) as i32),
-                Fixed::from_int((wy + 4) as i32),
-                Fixed::from_int(wz as i32),
-            ),
+            FixedVec3::new(Fixed::from_int(4), Fixed::from_int(4), Fixed::ZERO),
         );
         r.vision_observer_in(e.0 as i64, g);
 
