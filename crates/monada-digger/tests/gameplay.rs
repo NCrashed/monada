@@ -50,18 +50,19 @@ fn input(drive: i32, steer: i32, brake: u64) -> Command {
     )
 }
 
-/// The fixed 600-tick schedule: settle → straight run → steered arc →
-/// straighten → brake. KEEP IN SYNC with the oracle's `digger_input` —
-/// this test asserts the behaviour the golden hashes.
+/// The fixed 600-tick schedule: settle → straight run over the jump ramp
+/// (launch ~t165, land ~t210) → steered arc → straighten → brake. KEEP IN
+/// SYNC with the oracle's `digger_input` — this test asserts the behaviour
+/// the golden hashes.
 fn schedule(t: u64) -> Command {
     // Identical arm bodies are distinct beats (straight run vs
     // straighten-after-the-arc), mirroring the oracle's schedule.
     #[allow(clippy::match_same_arms)]
     match t {
         0..=29 => input(0, 0, 0),
-        30..=119 => input(1, 0, 0),
-        120..=299 => input(1, -1, 0),
-        300..=419 => input(1, 0, 0),
+        30..=209 => input(1, 0, 0),
+        210..=389 => input(1, -1, 0),
+        390..=419 => input(1, 0, 0),
         _ => input(0, 0, 1),
     }
 }
@@ -98,14 +99,19 @@ fn the_vehicle_settles_drives_arcs_and_brakes() {
     let start = body_pos(&phys);
     let mut settled = FixedVec3::ZERO;
     let mut arc_entry = FixedVec3::ZERO;
+    let mut apex = Fixed::ZERO;
     for t in 1..=600u64 {
         driver.apply_command(P0, &schedule(t));
         driver.step();
         if t == 30 {
             settled = body_pos(&phys);
         }
-        if t == 120 {
+        if t == 210 {
             arc_entry = body_pos(&phys);
+        }
+        // The jump-ramp flight window: past the launch lip, before landing.
+        if (160..=205).contains(&t) {
+            apex = apex.max(body_pos(&phys).z);
         }
     }
     let end = body_pos(&phys);
@@ -119,10 +125,17 @@ fn the_vehicle_settles_drives_arcs_and_brakes() {
     );
     // The straight run drove the nose (+x) a real distance.
     assert!(
-        arc_entry.x - start.x > Fixed::from_int(10),
+        arc_entry.x - start.x > Fixed::from_int(40),
         "straight run should cover ground: {:?} -> {:?}",
         start.x,
         arc_entry.x
+    );
+    // The jump: the ramp launches the vehicle well above its ride height
+    // (CoM ~4.5 on the flat, ramp top surface at z 6) — ballistic flight
+    // through the full engine stack.
+    assert!(
+        apex > Fixed::from_int(8),
+        "the ramp should launch the vehicle: flight apex z {apex:?}"
     );
     // The steered arc bent the path off the start row.
     assert!(

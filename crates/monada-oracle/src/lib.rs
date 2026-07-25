@@ -828,10 +828,11 @@ const DIGGER_HZ: u32 = 30;
 const DIGGER_CHECKPOINTS: &[usize] = &[0, 1, 30, 150, 600];
 
 /// The fixed drive schedule (docs/plans/digger-demo.md §4): settle →
-/// straight run → steered arc → straighten → brake to a stop. Verb 0,
-/// `arg.x` = drive, `arg.y` = steer, `target` bit 0 = brake — one packed
-/// command per tick, the rpg pattern. KEPT IN SYNC with the behaviour
-/// test in `crates/monada-digger/tests/gameplay.rs`.
+/// straight run over the jump ramp (launch ~t165, land ~t210) → steered
+/// arc → straighten → brake to a stop. Verb 0, `arg.x` = drive, `arg.y` =
+/// steer, `target` bit 0 = brake — one packed command per tick, the rpg
+/// pattern. KEPT IN SYNC with the behaviour test in
+/// `crates/monada-digger/tests/gameplay.rs`.
 fn digger_input(t: usize) -> Command {
     // Identical arm bodies are distinct BEATS (straight run vs
     // straighten-after-the-arc) — merging them would scramble the
@@ -839,9 +840,9 @@ fn digger_input(t: usize) -> Command {
     #[allow(clippy::match_same_arms)]
     let (drive, steer, brake) = match t {
         0..=29 => (0, 0, 0),
-        30..=119 => (1, 0, 0),
-        120..=299 => (1, -1, 0),
-        300..=419 => (1, 0, 0),
+        30..=209 => (1, 0, 0),
+        210..=389 => (1, -1, 0),
+        390..=419 => (1, 0, 0),
         _ => (0, 0, 1),
     };
     Command::on(
@@ -1119,9 +1120,11 @@ mod tests {
             std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
         };
         let sources = format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             read("crates/monada-script/src/rhai_backend.rs"),
             read("crates/monada-script/src/local_backend.rs"),
+            // The volume-map physics verbs (digger demo, host_api 8).
+            read("crates/monada-script/src/physics.rs"),
         );
         let registered = registered_fn_names(&sources);
         let documented = documented_fn_names(&read("book/src/reference.md"));

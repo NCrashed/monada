@@ -893,11 +893,11 @@ impl App {
             .to_string();
         // Hotseat: one window drives every side, so there is no single
         // local player (-1) — the script enforces turns by piece colour.
-        let render = Arc::new(Mutex::new(MapRender::new(
-            run.map.assets,
-            None,
-            &run.map.manifest.actions,
-        )));
+        let mut map_render = MapRender::new(run.map.assets, None, &run.map.manifest.actions);
+        if run.map.manifest.terrain == Terrain::Volume {
+            map_render.set_volume_terrain();
+        }
+        let render = Arc::new(Mutex::new(map_render));
         // Bridge must be set before `init` calls model_box / voxel_fill / …
         let bridge: SharedBridge = render.clone();
         backend.set_bridge(&bridge);
@@ -965,11 +965,15 @@ impl App {
             .to_string();
         // This peer plays the side matching its player id; the script gates
         // off-turn input on `local_player()`.
-        let render = Arc::new(Mutex::new(MapRender::new(
+        let mut map_render = MapRender::new(
             run.map.assets,
             Some(i64::from(local.0)),
             &run.map.manifest.actions,
-        )));
+        );
+        if run.map.manifest.terrain == Terrain::Volume {
+            map_render.set_volume_terrain();
+        }
+        let render = Arc::new(Mutex::new(map_render));
         let bridge: SharedBridge = render.clone();
         let mut driver = match volume_physics(&run.map.manifest) {
             Some(phys) => RhaiDriver::with_physics(shared_world(SEED), &script, &bridge, &phys),
@@ -1032,11 +1036,11 @@ impl App {
         };
         // No local layer for a replay: the recorded command stream *is*
         // the input; live clicks/actions are ignored.
-        let render = Arc::new(Mutex::new(MapRender::new(
-            run.map.assets,
-            None,
-            &run.map.manifest.actions,
-        )));
+        let mut map_render = MapRender::new(run.map.assets, None, &run.map.manifest.actions);
+        if run.map.manifest.terrain == Terrain::Volume {
+            map_render.set_volume_terrain();
+        }
+        let render = Arc::new(Mutex::new(map_render));
         let bridge: SharedBridge = render.clone();
         let mut driver = match volume_physics(&run.map.manifest) {
             Some(phys) => {
@@ -1463,21 +1467,36 @@ impl App {
     /// interpolates mover positions; the map scenes (local / networked /
     /// replay) rebuild sprites from the live world + the script's model
     /// bindings.
-    fn update_scene(&mut self, alpha: f64) {
+    fn update_scene(&mut self, alpha: f64, dt: f64) {
+        // The physics body mirror (volume maps, plan §1d) syncs beside the
+        // sprite rebuild on every path; `dt` drives its render-side wheel
+        // spin. `sync_physics` never touches hashed state.
         match (&self.sim, &mut self.scene) {
             (Sim::Map(map), SceneKind::Map(render)) => {
                 let world = map.world.lock().expect("world mutex");
-                render.lock().expect("render mutex").build_instances(&world);
+                let mut render = render.lock().expect("render mutex");
+                render.build_instances(&world);
+                if let Some(phys) = &map.phys {
+                    render.sync_physics(&phys.lock().expect("physics mutex"), dt);
+                }
             }
             (Sim::NetMap(nm), SceneKind::Map(render)) => {
                 let world = nm.session.driver().world().clone();
                 let guard = world.lock().expect("world mutex");
-                render.lock().expect("render mutex").build_instances(&guard);
+                let mut render = render.lock().expect("render mutex");
+                render.build_instances(&guard);
+                if let Some(phys) = nm.session.driver().physics() {
+                    render.sync_physics(&phys.lock().expect("physics mutex"), dt);
+                }
             }
             (Sim::Replay(r), SceneKind::Map(render)) => {
                 let world = r.driver.world().clone();
                 let guard = world.lock().expect("world mutex");
-                render.lock().expect("render mutex").build_instances(&guard);
+                let mut render = render.lock().expect("render mutex");
+                render.build_instances(&guard);
+                if let Some(phys) = r.driver.physics() {
+                    render.sync_physics(&phys.lock().expect("physics mutex"), dt);
+                }
             }
             (_, SceneKind::Circle(scene)) => {
                 scene.update(&self.prev_pos, &self.curr_pos, alpha);
@@ -1671,7 +1690,7 @@ impl App {
         self.play_pending_audio(now);
 
         self.drive_camera(dt);
-        self.update_scene(alpha);
+        self.update_scene(alpha, dt);
 
         if !self.debug_done && std::env::var_os("MONADA_DEBUG").is_some() {
             self.debug_done = true;

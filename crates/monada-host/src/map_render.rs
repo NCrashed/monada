@@ -362,6 +362,147 @@ fn sim_box_to_world(x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64) -> (IV
     (lo, hi)
 }
 
+/// Map an inclusive sim-cell region to its grid-voxel box on the ISOTROPIC
+/// volume world grid (one grid voxel per cell, `voxel_world_size = SCALE`,
+/// origin `(0, 0, GROUND_Z)`): cell `(x, y, z)` is grid voxel
+/// `(-x-1, y, -z-1)` — the same world-X mirror and z-down flip as
+/// `sim_box_to_world`, but in cells, not world voxels.
+#[allow(clippy::cast_possible_truncation)]
+fn cell_box_to_volume_grid(
+    x0: i64,
+    y0: i64,
+    z0: i64,
+    x1: i64,
+    y1: i64,
+    z1: i64,
+) -> (IVec3, IVec3) {
+    let (xa, xb) = (x0.min(x1), x0.max(x1));
+    let (ya, yb) = (y0.min(y1), y0.max(y1));
+    let (za, zb) = (z0.min(z1), z0.max(z1));
+    let lo = IVec3::new((-xb - 1) as i32, ya as i32, (-zb - 1) as i32);
+    let hi = IVec3::new((-xa - 1) as i32, yb as i32, (-za - 1) as i32);
+    (lo, hi)
+}
+
+/// The continuous sim→world map of a volume map (see the `volume` field):
+/// `(0, 0, GROUND_Z) + SCALE · R_y(π) · p`. Agrees with
+/// `cell_box_to_volume_grid` on cell corners and with `world_of` on x/y —
+/// only z differs (scaled by `SCALE` instead of unscaled).
+fn volume_world_of(p: DVec3) -> DVec3 {
+    DVec3::new(-SCALE * p.x, SCALE * p.y, GROUND_Z - SCALE * p.z)
+}
+
+/// The world-frame pose of a physics body's render grid. The grid's voxels
+/// are the body's SHAPE cells 1:1 (`voxel_world_size = SCALE`), so the pose
+/// must compose the shape→body rebase (the derived CoM, physics P3's
+/// `com_in_shape` seam), the body's sim orientation, and the sim→world map:
+/// `rotation = R_y(π) ∘ q` (the mirror half-turn is a proper rotation, so a
+/// full 3D orientation survives), `origin = world(position) − rotation ·
+/// (SCALE · com)`. Free function so the math is unit-testable without a
+/// physics world.
+fn body_grid_pose(
+    position: FixedVec3,
+    orientation: monada_fixed::FixedQuat,
+    com_in_shape: FixedVec3,
+) -> (DVec3, glam::DQuat) {
+    let rot = mirror_half_turn() * dquat(orientation);
+    let origin = volume_world_of(dvec3(position)) - rot * (dvec3(com_in_shape) * SCALE);
+    (origin, rot)
+}
+
+/// The sim→world mirror as a rotation: `diag(-1, 1, -1)` = a half-turn
+/// about +Y (`det = +1`).
+fn mirror_half_turn() -> glam::DQuat {
+    glam::DQuat::from_rotation_y(std::f64::consts::PI)
+}
+
+fn dvec3(v: FixedVec3) -> DVec3 {
+    DVec3::new(v.x.to_f64(), v.y.to_f64(), v.z.to_f64())
+}
+
+fn dquat(q: monada_fixed::FixedQuat) -> glam::DQuat {
+    glam::DQuat::from_xyzw(q.x.to_f64(), q.y.to_f64(), q.z.to_f64(), q.w.to_f64())
+}
+
+/// Render colour for a physics material id — a fixed, engine-side palette
+/// (the map gets a real colour pass in D4; until then distinct materials
+/// just need to READ as distinct). High byte = roxlap brightness.
+fn material_color(mat: u16) -> u32 {
+    const PALETTE: [u32; 8] = [
+        0x80c8_6a32, // 0: rust orange (the digger hull / default)
+        0x8078_8290, // 1: steel grey
+        0x80b8_9850, // 2: sandstone
+        0x8060_6a74, // 3: granite
+        0x8068_c8d8, // 4: crystal
+        0x80a0_5048, // 5: brick red
+        0x8058_a058, // 6: moss green
+        0x8090_78b0, // 7: violet
+    ];
+    PALETTE[usize::from(mat) % PALETTE.len()]
+}
+
+/// Render mirror of one physics body (plan §1d): its shape grid plus one
+/// small grid per wheel. Grids are blitted once and re-posed per frame —
+/// transform updates never touch voxel data.
+struct BodyMirror {
+    grid: GridId,
+    /// Occupied-cell count at the last blit; a difference re-blits (the D3
+    /// carve seam — `remove_voxels` shrinks the count).
+    blitted: usize,
+    wheels: Vec<WheelMirror>,
+}
+
+/// One wheel's render state: the cylinder grid and its accumulated spin
+/// angle (radians). Spin is derived render-side from ground speed — the
+/// stateless-wheel dividend; it exists nowhere in the hashed sim.
+struct WheelMirror {
+    wheel: u32,
+    grid: GridId,
+    spin: f64,
+}
+
+/// Wheel cylinder half-width along its axle, world voxels.
+const WHEEL_HALF_WIDTH: i32 = 3;
+
+/// A grid for a small dynamic prop (a physics body, a wheel): rotates every
+/// frame, so apply roxlap's rotating-grid guidance — one mip level (the
+/// near-axis-aligned cf-cancellation artifact) and no grid-local sky (it
+/// would rotate with the prop and fight the world's).
+fn new_prop_grid(scene: &mut Scene, voxel_world_size: f64) -> GridId {
+    let id = scene.add_grid(GridTransform::at_scale(DVec3::ZERO, voxel_world_size));
+    if let Some(grid) = scene.grid_mut(id) {
+        grid.mip_levels_override = Some(1);
+        grid.render_sky = false;
+    }
+    id
+}
+
+/// Blit a wheel cylinder into its (world-voxel) grid: axis along local Y
+/// (the axle), radius `r` world voxels, centred on the grid origin. A
+/// lighter spoke arm makes the render-side spin readable.
+#[allow(clippy::cast_possible_truncation)]
+fn blit_wheel_cylinder(scene: &mut Scene, id: GridId, r: f64, half_width: i32) {
+    let Some(grid) = scene.grid_mut(id) else {
+        return;
+    };
+    let ri = r.ceil() as i32;
+    for x in -ri..=ri {
+        for z in -ri..=ri {
+            // Voxel centre vs the axle at the grid origin.
+            let (cx, cz) = (f64::from(x) + 0.5, f64::from(z) + 0.5);
+            if cx.mul_add(cx, cz * cz) > r * r {
+                continue;
+            }
+            let spoke = z >= 0 && x.abs() <= 1;
+            let color = if spoke { 0x8090_9098 } else { 0x8030_3038 };
+            for y in -half_width..half_width {
+                let c = IVec3::new(x, y, z);
+                grid.set_rect(c, c, Some(VoxColor(color)));
+            }
+        }
+    }
+}
+
 /// The `Grid::z_clip` value that cuts everything ABOVE sim band top `z_hi` (a
 /// deck cutaway). CRITICAL: `z_clip` is in **grid-local voxel z** — where
 /// `voxel_fill`/`voxel_set` actually place voxels, `GROUND_Z - sim_z`,
@@ -418,6 +559,9 @@ fn ground_hit(origin: DVec3, dir: DVec3) -> Option<DVec3> {
 /// The render + bridge state for one scripted map. Owned by the host
 /// behind `Arc<Mutex<_>>`; the same handle is coerced to a
 /// [`SharedBridge`](monada_script::SharedBridge) for the Rhai engine.
+// Independent renderer facts (upload latches, terrain mode), not a state
+// machine — the same stance as RhaiBackend's handler flags.
+#[allow(clippy::struct_excessive_bools)]
 pub struct MapRender {
     scene: Scene,
     /// The world / terrain grid, painted by `voxel_fill`/`voxel_set`/`tile_fill`/
@@ -425,6 +569,21 @@ pub struct MapRender {
     /// [`world_grid`](Self::world_grid)) so a map that paints terrain never needs
     /// to spawn a grid explicitly, and old maps keep working. `None` until then.
     world_grid: Option<GridId>,
+    /// `terrain = "volume"` mode (docs/plans/digger-demo.md §1d): the world
+    /// grid is ISOTROPIC — `voxel_world_size = SCALE`, ONE grid voxel per sim
+    /// cell on all three axes — instead of the column convention's
+    /// `SCALE×SCALE×1` world voxels per cell. Rotating physics bodies force
+    /// this: a roxlap grid supports rotation + uniform scale only, and the
+    /// column convention's anisotropic z (unscaled) cannot rotate. The world-X
+    /// mirror + z-down flip compose to `diag(-1, 1, -1)` = a half-turn about
+    /// +Y — a PROPER rotation — so sim→world stays exact: `world = (0, 0,
+    /// GROUND_Z) + SCALE · R_y(π) · sim`. Set by the host from the manifest
+    /// BEFORE the first paint.
+    volume: bool,
+    /// Per-`BodyId` render mirrors of the embedded physics sim (volume maps
+    /// only), fed by [`sync_physics`](Self::sync_physics). Map scripts never
+    /// hand-mirror a body (plan §1d locked decision).
+    body_mirrors: BTreeMap<u64, BodyMirror>,
     /// Grids spawned by the script via `grid_spawn` (e.g. the ship demo's hull).
     /// The script's i64 handle is the index into this Vec; never reordered or
     /// compacted so handles stay stable. Painted by `voxel_fill_in`. Kept
@@ -637,6 +796,8 @@ impl MapRender {
         MapRender {
             scene,
             world_grid: None,
+            volume: false,
+            body_mirrors: BTreeMap::new(),
             grids: Vec::new(),
             vision_grid: None,
             sprites,
@@ -697,9 +858,32 @@ impl MapRender {
     /// keep working (an identity grid so the GPU sprite pass projects the world
     /// camera correctly — see `monada_render`'s circle ground).
     fn world_grid(&mut self) -> GridId {
-        *self
-            .world_grid
-            .get_or_insert_with(|| self.scene.add_grid(GridTransform::identity()))
+        *self.world_grid.get_or_insert_with(|| {
+            if self.volume {
+                // Isotropic cell grid (see the `volume` field): origin at
+                // GROUND_Z so cell z 0 tops out exactly where the column
+                // convention's floor surface sits.
+                self.scene.add_grid(GridTransform::at_scale(
+                    DVec3::new(0.0, 0.0, GROUND_Z),
+                    SCALE,
+                ))
+            } else {
+                self.scene.add_grid(GridTransform::identity())
+            }
+        })
+    }
+
+    /// Switch this map to `terrain = "volume"` rendering (isotropic world
+    /// grid + physics body mirrors — see the `volume` field). The host calls
+    /// this from the manifest BEFORE the script's `init` paints anything;
+    /// flipping it after the world grid exists would leave voxels painted
+    /// under the other convention, so it panics on a late call.
+    pub fn set_volume_terrain(&mut self) {
+        assert!(
+            self.world_grid.is_none(),
+            "set_volume_terrain must precede the first terrain paint"
+        );
+        self.volume = true;
     }
 
     /// The grid the fog / deck cutaway attach to: the observer's hull if the map
@@ -921,6 +1105,18 @@ impl MapRender {
         (self.model_refs.len() - 1) as i64
     }
 
+    /// [`world_of`] with this map's z convention: volume maps scale z by
+    /// `SCALE` (isotropic cells — see the `volume` field), column maps keep
+    /// the unscaled-z convention. Everything that seats render state on an
+    /// entity/sim position goes through here.
+    fn entity_world_of(&self, p: FixedVec3) -> DVec3 {
+        let mut w = world_of(p);
+        if self.volume {
+            w.z = GROUND_Z - p.z.to_f64() * SCALE;
+        }
+        w
+    }
+
     /// Rebuild the sprite instances from the live world: one sprite per
     /// entity that has a model binding, seated on the board, plus the
     /// highlight marker on the selected entity.
@@ -932,7 +1128,7 @@ impl MapRender {
         self.observer_pose = self.vision_entity.and_then(|e| {
             let p = world.position(e)?;
             let yaw = self.entity_actors.get(&e).map_or(0.0, |a| a.facing);
-            Some((world_of(p), yaw))
+            Some((self.entity_world_of(p), yaw))
         });
         // Snapshot the bindings so the loop can mutate the disjoint sprite /
         // actor-target fields freely (the map is small — per-entity).
@@ -941,7 +1137,7 @@ impl MapRender {
             let Some(p) = world.position(e) else {
                 continue; // despawned (e.g. captured / killed)
             };
-            let w = world_of(p);
+            let w = self.entity_world_of(p);
             match self.model_refs.get(model_id) {
                 Some(&ModelRef::Sprite(si)) => {
                     // roxlap anchors the kv6's stored pivot at the sprite
@@ -982,7 +1178,7 @@ impl MapRender {
         self.highlighted.retain(|e| world.position(*e).is_some());
         for &h in &self.highlighted {
             if let Some(p) = world.position(h) {
-                let w = world_of(p);
+                let w = self.entity_world_of(p);
                 self.sprites.instances.push(SpriteInstanceDesc {
                     // Seat the tile flush on the ground the entity stands
                     // on (its own w.z, not the z=0 board plane — a unit up
@@ -991,6 +1187,108 @@ impl MapRender {
                     model: HIGHLIGHT_MODEL,
                     pos: [w.x as f32, w.y as f32, (w.z - 1.0) as f32],
                 });
+            }
+        }
+    }
+
+    /// Mirror the embedded physics sim into render grids (plan §1d): one
+    /// isotropic grid per body (shape cells 1:1, blitted once, re-posed each
+    /// frame — transform updates never touch voxel data) plus a small
+    /// world-voxel cylinder grid per wheel. `dt` drives the render-side
+    /// wheel-spin accumulator (the stateless-wheel dividend: spin exists
+    /// nowhere in the hashed sim). Ghost bodies (no shape) have nothing to
+    /// draw and are skipped.
+    pub fn sync_physics(&mut self, sim: &monada_script::PhysicsSim, dt: f64) {
+        for body in sim.world.bodies() {
+            let Some(shape) = body.shape() else { continue };
+            let (origin, rot) = body_grid_pose(
+                body.position(),
+                body.orientation(),
+                body.com_in_shape(),
+            );
+            let mirror = self.body_mirrors.entry(body.id().0).or_insert_with(|| {
+                let grid = new_prop_grid(&mut self.scene, SCALE);
+                BodyMirror {
+                    grid,
+                    blitted: usize::MAX,
+                    wheels: Vec::new(),
+                }
+            });
+
+            // Blit the shape once; re-blit when the occupied count changes
+            // (the D3 carve seam — remove_voxels shrinks it).
+            let (dx, dy, dz) = shape.dims();
+            let mut filled = 0usize;
+            for z in 0..dz {
+                for y in 0..dy {
+                    for x in 0..dx {
+                        filled += usize::from(shape.get(x, y, z).is_some());
+                    }
+                }
+            }
+            if mirror.blitted != filled {
+                if let Some(grid) = self.scene.grid_mut(mirror.grid) {
+                    grid.set_rect(
+                        IVec3::ZERO,
+                        IVec3::new(dx - 1, dy - 1, dz - 1),
+                        None,
+                    );
+                    for z in 0..dz {
+                        for y in 0..dy {
+                            for x in 0..dx {
+                                if let Some(mat) = shape.get(x, y, z) {
+                                    let c = IVec3::new(x, y, z);
+                                    grid.set_rect(c, c, Some(VoxColor(material_color(mat.0))));
+                                }
+                            }
+                        }
+                    }
+                }
+                mirror.blitted = filled;
+            }
+
+            if let Some(grid) = self.scene.grid_mut(mirror.grid) {
+                grid.transform.origin = origin;
+                grid.transform.rotation = rot;
+            }
+
+            // Wheels: cylinder grids on their anchors, dropped rest_length
+            // down the body's suspension axis; steer comes from the retained
+            // input, spin accumulates from ground speed.
+            let q = dquat(body.orientation());
+            let fwd_sim = q * DVec3::X;
+            let speed = dvec3(body.linear_velocity()).dot(fwd_sim);
+            for wheel in body.wheels() {
+                let radius = wheel.def().radius.to_f64();
+                let found = mirror.wheels.iter().position(|w| w.wheel == wheel.id().0);
+                let idx = if let Some(i) = found {
+                    i
+                } else {
+                    let grid = new_prop_grid(&mut self.scene, 1.0);
+                    blit_wheel_cylinder(&mut self.scene, grid, radius * SCALE, WHEEL_HALF_WIDTH);
+                    mirror.wheels.push(WheelMirror {
+                        wheel: wheel.id().0,
+                        grid,
+                        spin: 0.0,
+                    });
+                    mirror.wheels.len() - 1
+                };
+                let wm = &mut mirror.wheels[idx];
+                if radius > 1e-6 {
+                    wm.spin = (wm.spin + speed / radius * dt) % std::f64::consts::TAU;
+                }
+                let steer = wheel.input().steer.to_f64();
+                let center_body =
+                    dvec3(wheel.def().anchor) - DVec3::new(0.0, 0.0, wheel.def().rest_length.to_f64());
+                let center_sim = dvec3(body.position()) + q * center_body;
+                let wrot = mirror_half_turn()
+                    * q
+                    * DQuat::from_rotation_z(steer)
+                    * DQuat::from_rotation_y(wm.spin);
+                if let Some(grid) = self.scene.grid_mut(wm.grid) {
+                    grid.transform.origin = volume_world_of(center_sim);
+                    grid.transform.rotation = wrot;
+                }
             }
         }
     }
@@ -1669,8 +1967,15 @@ impl HostBridge for MapRender {
     #[allow(clippy::too_many_arguments)]
     fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64) {
         // Mirror into the sim-space terrain store for collision queries.
+        // (On a volume map the HASHED store is the sim-side VolumeStore;
+        // this column copy still answers the bridge's voxel_solid /
+        // ground_height, which volume maps simply shouldn't use.)
         self.terrain.fill(x0, y0, z0, x1, y1, z1);
-        let (lo, hi) = sim_box_to_world(x0, y0, z0, x1, y1, z1);
+        let (lo, hi) = if self.volume {
+            cell_box_to_volume_grid(x0, y0, z0, x1, y1, z1)
+        } else {
+            sim_box_to_world(x0, y0, z0, x1, y1, z1)
+        };
         let id = self.world_grid();
         if let Some(grid) = self.scene.grid_mut(id) {
             grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
@@ -1714,6 +2019,18 @@ impl HostBridge for MapRender {
     }
 
     fn voxel_clear(&mut self, x: i64, y: i64, z: i64) {
+        if self.volume {
+            // A true one-cell hole punch — the tunnel primitive. Matches the
+            // sim-side VolumeStore semantics exactly (the D1 column-clear
+            // mismatch, retired).
+            if let Some(id) = self.world_grid {
+                let (lo, hi) = cell_box_to_volume_grid(x, y, z, x, y, z);
+                if let Some(grid) = self.scene.grid_mut(id) {
+                    grid.set_rect(lo, hi, None);
+                }
+            }
+            return;
+        }
         // Truncate the collision column; the previous top bounds the render
         // span, so the clear erases exactly what was solid (an unpainted
         // column is a no-op — nothing to erase, nothing to collide with).
@@ -1742,7 +2059,11 @@ impl HostBridge for MapRender {
         // world voxel at UNMIRRORED +x, i.e. a speck in the void on the
         // wrong side of the map, silently diverging from the collision
         // store's full-cell semantics.
-        let (lo, hi) = sim_box_to_world(x, y, z, x, y, z);
+        let (lo, hi) = if self.volume {
+            cell_box_to_volume_grid(x, y, z, x, y, z)
+        } else {
+            sim_box_to_world(x, y, z, x, y, z)
+        };
         let id = self.world_grid();
         if let Some(grid) = self.scene.grid_mut(id) {
             grid.set_rect(lo, hi, Some(VoxColor(color as u32)));
@@ -2055,7 +2376,7 @@ impl HostBridge for MapRender {
     }
 
     fn camera_focus(&mut self, point: FixedVec3) {
-        self.camera.center = world_of(point);
+        self.camera.center = self.entity_world_of(point);
     }
 
     fn camera_angle(&mut self, yaw: Fixed, pitch: Fixed) {
@@ -2247,6 +2568,103 @@ mod tests {
     //! frame computes for `update_actors` to apply.
     use super::*;
     use monada_sim::World;
+
+    /// The body-mirror pose math: grid local = shape cells, so `origin +
+    /// rot · (SCALE · l)` must land shape point `l` exactly where the sim
+    /// says — through the CoM rebase, the body orientation, and the
+    /// mirror half-turn.
+    #[test]
+    fn body_grid_pose_composes_mirror_com_and_rotation() {
+        let fx = Fixed::from_int;
+        let pos = FixedVec3::new(fx(10), fx(20), fx(5));
+        let com = FixedVec3::new(Fixed::from_ratio(3, 2), fx(2), Fixed::ONE);
+
+        // Identity orientation: the shape's CoM cell lands on the body
+        // position.
+        let (origin, rot) = body_grid_pose(pos, monada_fixed::FixedQuat::IDENTITY, com);
+        let w = origin + rot * (dvec3(com) * SCALE);
+        assert!((w - volume_world_of(dvec3(pos))).length() < 1e-6);
+
+        // A quarter-turn about +z: one cell nose-ward of the CoM in shape
+        // space must land one cell +y of the position in sim space.
+        let q = monada_fixed::FixedQuat::from_axis_angle(
+            FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ONE),
+            monada_fixed::trig::FRAC_PI_2,
+        );
+        let (origin, rot) = body_grid_pose(pos, q, com);
+        let l = dvec3(com) + DVec3::X;
+        let w = origin + rot * (l * SCALE);
+        let expect = volume_world_of(dvec3(pos) + DVec3::Y);
+        assert!(
+            (w - expect).length() < 0.05,
+            "rotated shape point off by {:?}",
+            w - expect
+        );
+    }
+
+    /// The automatic body mirror, end-to-end through the REAL digger map:
+    /// init spawns the vehicle, `sync_physics` builds its grid, and a ray
+    /// down the spawn column meets the body's voxels well above the
+    /// terrain slab — proving the mirror grid exists, is posed by the
+    /// isotropic sim→world map, and carries the shape blit.
+    #[test]
+    fn digger_body_mirror_renders_above_the_terrain() {
+        use std::sync::{Arc, Mutex};
+
+        use monada_script::{RhaiBackend, ScriptBackend as _, SharedBridge};
+
+        let mut mr = MapRender::new(BTreeMap::new(), None, &[]);
+        mr.set_volume_terrain();
+        let render = Arc::new(Mutex::new(mr));
+        let bridge: SharedBridge = render.clone();
+        let world = monada_script::shared_world(1);
+        let mut backend = RhaiBackend::new(world);
+        backend.set_bridge(&bridge);
+        let phys = monada_script::shared_physics(30);
+        backend.set_physics(&phys);
+        backend.set_tick_hz(30);
+        backend
+            .load(include_str!("../../monada-digger/map/scripts/main.rhai"))
+            .expect("compile digger");
+        backend.on_init().expect("digger init");
+
+        let mut r = render.lock().unwrap();
+        r.sync_physics(&phys.lock().expect("physics mutex"), 1.0 / 60.0);
+
+        // Straight down the spawn cell (sim 25, 120). The chassis spans
+        // sim z 4..6 → WORLD z 4..36 (isotropic: 100 − 16·z); the slab
+        // top surface is at world z 68. A second sync must not disturb
+        // the pose (blit-once contract).
+        let col = DVec3::new(-25.5 * SCALE, 120.5 * SCALE, 0.0);
+        let down = DVec3::new(0.0, 0.0, 1.0);
+        let body_hit = r
+            .scene
+            .raycast_clipped(col, down, 4096.0)
+            .expect("ray should meet the mirrored chassis");
+        assert!(
+            body_hit.world.z < 40.0,
+            "first hit should be the body mirror (world z 4..36), got z {}",
+            body_hit.world.z
+        );
+        r.sync_physics(&phys.lock().expect("physics mutex"), 1.0 / 60.0);
+        let again = r
+            .scene
+            .raycast_clipped(col, down, 4096.0)
+            .expect("mirror survives a re-sync");
+        assert_eq!((body_hit.grid, body_hit.voxel), (again.grid, again.voxel));
+
+        // Off the vehicle, the same ray reaches the terrain slab instead.
+        let apron = DVec3::new(-100.5 * SCALE, 20.5 * SCALE, 0.0);
+        let terrain_hit = r
+            .scene
+            .raycast_clipped(apron, down, 4096.0)
+            .expect("apron ray hits the slab");
+        assert!(
+            (terrain_hit.world.z - 68.0).abs() < 0.01,
+            "slab top surface at world z 68, got {}",
+            terrain_hit.world.z
+        );
+    }
 
     /// The deck cutaway, end-to-end against the REAL roxlap grid: paint two
     /// stacked deck floors with the actual `voxel_set` the map uses, apply the

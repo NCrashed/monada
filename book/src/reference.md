@@ -151,6 +151,42 @@ collision queries above.
 | `terrain_fill(x0, y0, x1, y1, type)` | set the floor terrain type of a region |
 | `terrain_blit(base_type)` | autotile-paint the floor from the terrain types set |
 
+## Volume maps and physics — *simulation*
+
+A map that declares `terrain = "volume"` in its manifest (requires a fixed
+`sim_hz` and `host_api` 8) swaps the per-column heightmap for a chunked 3D
+voxel store — tunnels and overhangs are first-class — and embeds a
+deterministic rigid-body physics sim beside the entity world. The script
+vocabulary stays the same, with deeper semantics:
+
+- `voxel_fill`/`voxel_set` write the **hashed** volume store (and still
+  paint the render grid); both accept an optional trailing *material id*
+  argument (default `0`). `voxel_clear` hole-punches ONE cell — the tunnel
+  primitive — instead of truncating a column.
+- **The material-0 contract:** paints without a material id write material
+  `0`, so the map's FIRST `phys_material` call is its ground material and
+  must precede any tick that can bring a body into terrain contact.
+- Rendering is *isotropic*: one render voxel per sim cell on all three
+  axes (the column convention's unscaled z cannot rotate with a rigid
+  body). Physics bodies and their wheels are mirrored to the screen
+  automatically — never hand-mirror a body with sprites or grids.
+
+| Function | Result |
+|---|---|
+| `phys_gravity(gx, gy, gz)` | set gravity (the crate default is ZERO — set it in `init`) |
+| `phys_material(density, friction, restitution, hardness)` | register a material; returns its id (first call = the ground material) |
+| `phys_box(sx, sy, sz, mat, x, y, z)` | spawn a solid box body; CoM placed at `(x, y, z)`; returns a body id |
+| `phys_wheel(body, ax, ay, az, rest, radius, k, c, mu)` | attach a wheel at SHAPE coords `(ax, ay, az)`; returns a wheel id |
+| `phys_wheel_input(body, wheel, steer, drive, brake)` | set a wheel's retained steering/drive/brake |
+| `phys_impulse(body, jx, jy, jz)` | apply an impulse at the CoM |
+| `phys_pos(body)` | the body's CoM position (ZERO for an unknown id) |
+| `phys_vel(body)` | the body's linear velocity (ZERO for an unknown id) |
+| `phys_yaw(body)` | the body's heading about +z, radians (the chase-cam read) |
+
+All `phys_*` state — bodies, wheels, materials, the volume terrain — folds
+into the desync hash alongside the entity world; treat it exactly like
+entity state (deterministic inputs only).
+
 ## Dynamic grids — *presentation*
 
 Spawn and paint additional voxel grids independent of the world grid (e.g. ships, moving platforms). Render-only: dynamic grids do not feed collision. A grid handle is render-side — never store it in `World` state or hashed `tick()` logic. A `< 0` handle means the host lacks multi-grid support (requires `host_api` 7).

@@ -1,8 +1,10 @@
 # monada-digger — the physics demo: drive, jump, drill
 
-Status: **in progress — D1 landed** (volume store, physics-in-sim,
-`phys_*` verbs, `digger@` golden); D2–D4 pending. The demo that pays
-off `monada-physics` P0–P6
+Status: **in progress — D1 + D2 landed** (D1: volume store,
+physics-in-sim, `phys_*` verbs, `digger@` golden; D2: automatic body
+mirror with full-quaternion grids, wheel cylinders, chase cam, ramp
+field + jump beat); D3–D4 pending. The demo that pays off
+`monada-physics` P0–P6
 (docs/plans/voxel-physics.md): a drill-nosed vehicle in a voxel arena —
 drive it, jump it off ramps, and bore tunnels through walls and floor,
 pitching the drill up and down to slope the tunnel. Neutral naming
@@ -127,6 +129,7 @@ Minimal verb set, mirroring the crate 1:1 where possible:
 | `phys_wheel_input(body, wheel, steer, drive, brake)` | `set_wheel_input` |
 | `phys_impulse(body, jx, jy, jz)` | `apply_impulse` |
 | `phys_pos(body) -> vec3` / `phys_vel(body) -> vec3` | pose reads for game logic |
+| `phys_yaw(body) -> fixed` | heading about +z (D2 amendment: the chase cam follows the body's yaw, and the local layer cannot see physics — the sim reads it and aims the camera, the RPG `follow_camera` pattern) |
 | `phys_drill(body, pitch, budget) -> int` | the one-call drill loop (locked decision); returns voxels cut for HUD/score |
 | `phys_carve(body, cells…)` | `remove_voxels` (vehicle damage v2 — stub now) |
 
@@ -143,6 +146,22 @@ degree of freedom.
   covers arbitrary per-frame quaternions, not just yaw — if it is
   yaw-only, the fallback is yaw-from-quat for the body grid (visually
   fine for a vehicle) and a plan amendment.
+  **D2 verdict: VERIFIED** — `GridTransform.rotation` is a full `DQuat`
+  consumed by both CPU and GPU paths; per-frame transform writes are
+  free (voxels upload once, keyed by chunk versions). Two roxlap
+  caveats applied: `mip_levels_override = Some(1)` and
+  `render_sky = false` on small rotating grids.
+  **D2 amendment — isotropic volume rendering**: the assumption this
+  plan DIDN'T flag was the render convention. Column maps render
+  anisotropically (x/y ×SCALE, z unscaled), and a rotating grid
+  supports rotation + uniform scale only — a tumbling body is
+  unrepresentable in that convention. Volume maps therefore render
+  isotropically: the world grid takes `voxel_world_size = SCALE` with
+  ONE grid voxel per sim cell, and the world-X mirror + z-down flip
+  compose to `diag(-1,1,-1)` — a proper rotation (`R_y(π)`) — so
+  `world = (0,0,GROUND_Z) + SCALE·R_y(π)·sim` and a body's world
+  orientation is `R_y(π)∘q`, exact for any `q`. Dividend: terrain
+  paints shrink from `SCALE²` world voxels per cell to one.
 - Wheels render as small kv6/voxel cylinders on their anchors, spin
   derived render-side from ground speed (the stateless-wheel dividend).
 - Terrain carves mirror through the existing world-grid edit path.
@@ -198,7 +217,10 @@ Automatic body mirror (rotation assumption verified or amended), wheel
 cylinders, chase camera, bindings; the ramp field in the map.
 *Accept:* human-playable drive + jumps; `digger@` unchanged (render
 adds nothing hashed); the book gets a screenshotless "volume maps"
-note.
+note. *(D2 note: "unchanged" holds for the RENDER — the mirror, wheels
+and camera touch nothing hashed — but the ramp field is real terrain
+and the golden schedule grew its jump beat, so `digger@` was re-blessed
+once with the D2 map, like every map-growth slice.)*
 
 **D3 — the drill.**
 `DrillTool::orientation` (physics amendment), `phys_drill` host loop,

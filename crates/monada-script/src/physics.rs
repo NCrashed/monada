@@ -228,6 +228,21 @@ pub(crate) fn register_physics_api(
             .map_or(FixedVec3::ZERO, monada_physics::RigidBody::linear_velocity)
     });
 
+    // The body's heading about +z (radians, sim frame) — the D2 chase-cam
+    // read (plan §1c amendment, like phys_gravity): rotate the body's nose
+    // axis into the world and take its ground-plane bearing. ZERO for an
+    // unknown id, like phys_pos.
+    let p = phys.clone();
+    engine.register_fn("phys_yaw", move |body: i64| -> Fixed {
+        lock(&p)
+            .world
+            .body(BodyId(body as u64))
+            .map_or(Fixed::ZERO, |b| {
+                let nose = b.orientation() * FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
+                monada_fixed::trig::atan2(nose.y, nose.x)
+            })
+    });
+
     // --- terrain paints, volume-routed (plan §1a) ---------------------
     // Same names and arities the bridge registered, plus a trailing
     // material-id overload; these registrations shadow the bridge-only

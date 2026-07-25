@@ -33,7 +33,7 @@ fn init() {
     // recolour an existing solid voxel (VoxLap span semantics: the
     // first painter owns the colour) — so the start pad goes down
     // BEFORE the slab it sits flush in.
-    voxel_fill(34, 114, 1, 46, 126, 1, 0x8050_78a0);
+    voxel_fill(19, 114, 1, 31, 126, 1, 0x8050_78a0);
     voxel_fill(0, 0, 0, 159, 159, 1, 0x8080_8080);
     // Corner posts: real terrain (solid, hashed, collidable) marking
     // the apron's extent.
@@ -42,12 +42,24 @@ fn init() {
     voxel_fill(0, 158, 0, 1, 159, 4, 0x80a0_6040);
     voxel_fill(158, 158, 0, 159, 159, 4, 0x80a0_6040);
 
+    // The ramp field (plan §2, D2): stepped ramps of increasing grade.
+    // The JUMP ramp sits on the golden's straight-run path (y 114..126,
+    // driving +x from the pad): four 1-cell risers with 4-cell treads
+    // climbing to z 5, then a hard drop at x = 71 — the launch lip.
+    ramp(55, 114, 126, 4, 4);
+    // Three practice ramps of steepening grade, south of the golden
+    // path, climbing +x: treads 4 / 3 / 2 at grades the P3 staircase
+    // rules make progressively harder run-ups.
+    ramp(60, 30, 44, 4, 4);
+    ramp(90, 30, 44, 3, 4);
+    ramp(120, 30, 44, 2, 4);
+
     // The vehicle: a 6×4×2 chassis on four wheels — the physics
     // test-suite stance (wheelbase ±3.5, track ±2.5, k = 240, c = 80).
     // CoM at z = 5 puts the suspension exactly at rest on the apron:
     // wheel anchors sit at world z = 4, minus rest 3/2 and radius 1/2
     // lands the contact on the z = 2 surface.
-    let body = phys_box(6, 4, 2, hull, fixed(40), fixed(120), fixed(5));
+    let body = phys_box(6, 4, 2, hull, fixed(25), fixed(120), fixed(5));
     let rest = ratio(3, 2);
     let radius = ratio(1, 2);
     let k = fixed(240);
@@ -69,19 +81,28 @@ fn init() {
     entity_set_field(v, "w_rr", fixed(w_rr));
     entity_set_position(v, phys_pos(body));
 
-    // D1 placeholder art: a sprite box riding the entity's mirrored pose,
-    // so the windowed run shows the drive. D2's automatic body render
-    // mirror (per-BodyId grid, real rotation) replaces it.
-    let m = model_box(96, 64, 32, 0x80c8_6a32);
-    entity_set_model(v, m);
-
-    // Render-side dressing (no-ops headless). Frame the start pad from
-    // high enough that the apron reads as a place; the chase cam is D2.
-    camera_focus(vec3(fixed(60), fixed(100), fixed(2)));
-    camera_angle(ratio(8, 10), fixed(1));
-    camera_dist(fixed(400));
+    // Render-side dressing (no-ops headless). The engine's automatic body
+    // mirror draws the vehicle (plan §1d) — the map never hand-mirrors it.
+    // The chase cam takes over on the first tick; this is just the pre-tick
+    // frame.
+    camera_focus(phys_pos(body));
+    camera_angle(pi() - phys_yaw(body), fixed(1));
+    camera_dist(fixed(220));
     set_light(vec3(fixed(1), fixed(2), fixed(-3)), ratio(9, 10));
     status("digger: W/S drive, A/D steer, Space brake");
+}
+
+// A stepped ramp climbing +x from `x0`, spanning `y0..=y1`: `steps`
+// 1-cell risers, each `tread` cells long, on top of the z 0..1 slab.
+// Step k (1-based) is solid at z 2..=(1 + k) — a staircase the
+// suspension can climb with a run-up (the P3 lesson).
+fn ramp(x0, y0, y1, tread, steps) {
+    let k = 1;
+    while k <= steps {
+        let sx = x0 + (k - 1) * tread;
+        voxel_fill(sx, y0, 2, sx + tread - 1, y1, 1 + k, 0x8070_5838);
+        k += 1;
+    }
 }
 
 // The single vehicle entity (the map spawns exactly one).
@@ -111,9 +132,13 @@ fn tick(dt) {
     phys_wheel_input(body, to_int(entity_field(v, "w_fr")), steer, drive, brake);
     phys_wheel_input(body, to_int(entity_field(v, "w_rl")), fixed(0), drive, brake);
     phys_wheel_input(body, to_int(entity_field(v, "w_rr")), fixed(0), drive, brake);
-    // Mirror the pose onto the entity: sensors, camera and the D2
-    // render mirror all read the World, never the physics handle.
+    // Mirror the pose onto the entity (sensors and game logic read the
+    // World, never the physics handle).
     entity_set_position(v, phys_pos(body));
+    // Chase cam (plan §1e): follow the body, yaw tracks its heading
+    // (world yaw = pi − sim yaw under the render mirror), pitch fixed.
+    camera_focus(phys_pos(body));
+    camera_angle(pi() - phys_yaw(body), fixed(1));
 }
 
 // --- local layer (unsynchronized, docs/plans/input-bindings.md) ------
