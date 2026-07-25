@@ -270,7 +270,11 @@ landed as `phys_material_color` (render-side material→colour binding
 for the body mirror) plus `atan2` for the script layer (host_api 10);
 feel: chase-yaw lerp (1/6 per tick, atan2-wrapped), the vault floor
 raised to a jump-class ~3-cell drop so the arrival stays on wheels,
-and perimeter walls replacing the endless off-edge fall.)*
+and perimeter walls replacing the endless off-edge fall. A priced
+trade-off, on purpose: the lerp state (`cyaw`) is a HASHED entity
+field, so any camera-feel tweak re-blesses the golden; if that ever
+grates, the lerp can migrate to the local layer, which sees the
+mirrored pose in the World even though it cannot see physics.)*
 
 ## §4 Determinism
 

@@ -362,7 +362,9 @@ pub trait HostBridge: Send {
     /// colour instead of the engine's fallback palette. Render-side only
     /// — material ids and their PHYSICAL properties stay hashed sim
     /// state; this is their look. Call at init, before bodies first
-    /// appear on screen. The default ignores it.
+    /// appear on screen: a binding made AFTER a body was blitted shows
+    /// only on that body's next re-blit (a carve — none exists until
+    /// `phys_carve` lands). The default ignores it.
     fn phys_material_color(&mut self, _mat: i64, _color: i64) {}
 
     /// Queue a sim command for the host to route through the command path

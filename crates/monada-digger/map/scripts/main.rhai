@@ -73,13 +73,15 @@ fn init() {
     voxel_fill(143, 121, -4, 143, 120, -3, 0x80a0_e8f0, crystal);
 
     // Perimeter walls (D4): the sandbox has no kill-plane, and driving
-    // off the world edge was an endless fall — now it's a wall. The
-    // east side is walled only OUTSIDE the mountain's footprint.
-    voxel_fill(0, 0, 2, 1, 159, 4, 0x80a0_6040);
-    voxel_fill(0, 0, 2, 159, 1, 4, 0x80a0_6040);
-    voxel_fill(0, 158, 2, 159, 159, 4, 0x80a0_6040);
-    voxel_fill(158, 0, 2, 159, 95, 4, 0x80a0_6040);
-    voxel_fill(158, 146, 2, 159, 157, 4, 0x80a0_6040);
+    // off the world edge was an endless fall — now it's a wall, TALL
+    // enough that even a ramp jump (apex ~z 9.6 mid-apron, far lower by
+    // the edges) can't clear it. The east side is walled only OUTSIDE
+    // the mountain's footprint.
+    voxel_fill(0, 0, 2, 1, 159, 7, 0x80a0_6040);
+    voxel_fill(0, 0, 2, 159, 1, 7, 0x80a0_6040);
+    voxel_fill(0, 158, 2, 159, 159, 7, 0x80a0_6040);
+    voxel_fill(158, 0, 2, 159, 95, 7, 0x80a0_6040);
+    voxel_fill(158, 146, 2, 159, 157, 7, 0x80a0_6040);
 
     // The ramp field (plan §2, D2): stepped ramps of increasing grade.
     // The JUMP ramp sits on the golden's straight-run path (y 114..126,
@@ -157,7 +159,7 @@ fn init() {
 
     let arch = archetype([
         "body", "w_fl", "w_fr", "w_rl", "w_rr", "drive", "steer", "brake", "drill", "pitch_in",
-        "pitch", "score", "cam", "bite", "cyaw", "found",
+        "pitch", "score", "cam", "bite", "cyaw", "found", "crystal_arch",
     ]);
     let v = entity_create(arch);
     entity_set_field(v, "body", fixed(body));
@@ -170,7 +172,11 @@ fn init() {
     // The objective (plan §2): three crystals — ramp-top, chamber,
     // vault — as ENTITIES with proximity sensors on phys_pos (the tick
     // below), not terrain. No fail state: a sandbox with a finish line.
-    let cr = archetype(["got"]);
+    // Field-less: a crystal's whole state is "does it still exist". The
+    // archetype id rides a vehicle field so the sensor loop never leans
+    // on declaration order.
+    let cr = archetype([]);
+    entity_set_field(v, "crystal_arch", fixed(cr));
     let cm = model_box(10, 10, 14, 0x80a0_e8f0);
     let c1 = entity_create(cr);
     entity_set_position(c1, vec3(fixed(124), fixed(37), fixed(6)));
@@ -297,7 +303,7 @@ fn tick(dt) {
     // persistent counter lives on the vehicle entity ("found") — all
     // state in the World, decision A2.
     let found = entity_field(v, "found");
-    for c in entities_of(1) {
+    for c in entities_of(to_int(entity_field(v, "crystal_arch"))) {
         let cp = entity_position(c);
         let dx = cp.x - p0.x;
         let dy = cp.y - p0.y;
