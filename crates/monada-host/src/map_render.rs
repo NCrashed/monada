@@ -429,8 +429,8 @@ fn dquat(q: monada_fixed::FixedQuat) -> glam::DQuat {
 /// just need to READ as distinct). High byte = roxlap brightness.
 fn material_color(mat: u16) -> u32 {
     const PALETTE: [u32; 8] = [
-        0x80c8_6a32, // 0: rust orange (the digger hull / default)
-        0x8078_8290, // 1: steel grey
+        0x80c8_6a32, // 0: rust orange (the un-materialed default — terrain)
+        0x8078_8290, // 1: steel grey (the digger hull)
         0x80b8_9850, // 2: sandstone
         0x8060_6a74, // 3: granite
         0x8068_c8d8, // 4: crystal
@@ -443,12 +443,16 @@ fn material_color(mat: u16) -> u32 {
 
 /// Render mirror of one physics body (plan §1d): its shape grid plus one
 /// small grid per wheel. Grids are blitted once and re-posed per frame —
-/// transform updates never touch voxel data.
+/// transform updates never touch voxel data. When the body disappears
+/// from the sim (D3: fully drilled away, or a destruction split retiring
+/// an id) the mirror's voxels are cleared and the entry dropped.
 struct BodyMirror {
     grid: GridId,
     /// Occupied-cell count at the last blit; a difference re-blits (the D3
     /// carve seam — `remove_voxels` shrinks the count).
     blitted: usize,
+    /// Shape dims at the last blit — the box to clear on re-blit/removal.
+    dims: IVec3,
     wheels: Vec<WheelMirror>,
 }
 
@@ -459,10 +463,41 @@ struct WheelMirror {
     wheel: u32,
     grid: GridId,
     spin: f64,
+    /// Cylinder blit extent (radius, half-width) — the box to clear on
+    /// removal.
+    extent: (i32, i32),
 }
 
 /// Wheel cylinder half-width along its axle, world voxels.
 const WHEEL_HALF_WIDTH: i32 = 3;
+
+/// The render-side suspension length of a stateless wheel: march the
+/// solver's own ray — from the anchor along body-down through the volume
+/// terrain — and clamp the surface distance minus the wheel radius to
+/// `[0, rest]`. At equilibrium the chassis sits ~`mg/(4k)` lower than
+/// spawn, so a rest-length wheel would bury itself by that much;
+/// airborne (no hit) → full extension. Presentation only.
+#[allow(clippy::cast_possible_truncation)]
+fn wheel_travel(
+    terrain: &monada_script::VolumeStore,
+    anchor: DVec3,
+    down: DVec3,
+    rest: f64,
+    radius: f64,
+) -> f64 {
+    let mut dist = 0.0;
+    while dist <= rest + radius {
+        let probe = anchor + down * dist;
+        let cell_x = probe.x.floor() as i64;
+        let cell_y = probe.y.floor() as i64;
+        let cell_z = probe.z.floor() as i64;
+        if terrain.get(cell_x, cell_y, cell_z).is_some() {
+            return (dist - radius).clamp(0.0, rest);
+        }
+        dist += 1.0 / 16.0;
+    }
+    rest
+}
 
 /// A grid for a small dynamic prop (a physics body, a wheel): rotates every
 /// frame, so apply roxlap's rotating-grid guidance — one mip level (the
@@ -1199,6 +1234,7 @@ impl MapRender {
     /// nowhere in the hashed sim). Ghost bodies (no shape) have nothing to
     /// draw and are skipped.
     pub fn sync_physics(&mut self, sim: &monada_script::PhysicsSim, dt: f64) {
+        self.retire_dead_mirrors(sim);
         for body in sim.world.bodies() {
             let Some(shape) = body.shape() else { continue };
             let (origin, rot) = body_grid_pose(
@@ -1211,6 +1247,7 @@ impl MapRender {
                 BodyMirror {
                     grid,
                     blitted: usize::MAX,
+                    dims: IVec3::ONE,
                     wheels: Vec::new(),
                 }
             });
@@ -1227,6 +1264,7 @@ impl MapRender {
                 }
             }
             if mirror.blitted != filled {
+                mirror.dims = IVec3::new(dx, dy, dz);
                 if let Some(grid) = self.scene.grid_mut(mirror.grid) {
                     grid.set_rect(
                         IVec3::ZERO,
@@ -1265,11 +1303,14 @@ impl MapRender {
                     i
                 } else {
                     let grid = new_prop_grid(&mut self.scene, 1.0);
-                    blit_wheel_cylinder(&mut self.scene, grid, radius * SCALE, WHEEL_HALF_WIDTH);
+                    let r_world = radius * SCALE;
+                    blit_wheel_cylinder(&mut self.scene, grid, r_world, WHEEL_HALF_WIDTH);
+                    #[allow(clippy::cast_possible_truncation)]
                     mirror.wheels.push(WheelMirror {
                         wheel: wheel.id().0,
                         grid,
                         spin: 0.0,
+                        extent: (r_world.ceil() as i32, WHEEL_HALF_WIDTH),
                     });
                     mirror.wheels.len() - 1
                 };
@@ -1278,9 +1319,13 @@ impl MapRender {
                     wm.spin = (wm.spin + speed / radius * dt) % std::f64::consts::TAU;
                 }
                 let steer = wheel.input().steer.to_f64();
-                let center_body =
-                    dvec3(wheel.def().anchor) - DVec3::new(0.0, 0.0, wheel.def().rest_length.to_f64());
-                let center_sim = dvec3(body.position()) + q * center_body;
+                // Seat the wheel on the ACTUAL suspension length (see
+                // `wheel_travel`), not the rest length.
+                let anchor_sim = dvec3(body.position()) + q * dvec3(wheel.def().anchor);
+                let down_sim = q * DVec3::NEG_Z;
+                let rest = wheel.def().rest_length.to_f64();
+                let travel = wheel_travel(&sim.terrain, anchor_sim, down_sim, rest, radius);
+                let center_sim = anchor_sim + down_sim * travel;
                 let wrot = mirror_half_turn()
                     * q
                     * DQuat::from_rotation_z(steer)
@@ -1291,6 +1336,30 @@ impl MapRender {
                 }
             }
         }
+    }
+
+    /// Retire mirrors of bodies the sim no longer has (D3: fully drilled
+    /// away / a destruction split retiring an id): clear their voxels so
+    /// the grids go empty (roxlap skips empty grids), then drop the
+    /// entry. Body ids are never reused, so an id that vanished is gone
+    /// for good.
+    fn retire_dead_mirrors(&mut self, sim: &monada_script::PhysicsSim) {
+        let live: BTreeSet<u64> = sim.world.bodies().iter().map(|b| b.id().0).collect();
+        self.body_mirrors.retain(|id, mirror| {
+            if live.contains(id) {
+                return true;
+            }
+            if let Some(grid) = self.scene.grid_mut(mirror.grid) {
+                grid.set_rect(IVec3::ZERO, mirror.dims - IVec3::ONE, None);
+            }
+            for wm in &mirror.wheels {
+                let (r, hw) = wm.extent;
+                if let Some(grid) = self.scene.grid_mut(wm.grid) {
+                    grid.set_rect(IVec3::new(-r, -hw, -r), IVec3::new(r, hw, r), None);
+                }
+            }
+            false
+        });
     }
 
     /// Pick under a world ray: the sim-space point on the board plane, and
@@ -1966,11 +2035,16 @@ impl HostBridge for MapRender {
 
     #[allow(clippy::too_many_arguments)]
     fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64) {
-        // Mirror into the sim-space terrain store for collision queries.
-        // (On a volume map the HASHED store is the sim-side VolumeStore;
-        // this column copy still answers the bridge's voxel_solid /
-        // ground_height, which volume maps simply shouldn't use.)
-        self.terrain.fill(x0, y0, z0, x1, y1, z1);
+        // Column maps mirror paints into the sim-space column store for
+        // the voxel_solid / ground_height / nav queries. Volume maps do
+        // NOT feed it at all: their hashed store is the sim-side
+        // VolumeStore, the column model cannot represent their clears
+        // (hole punches), and a half-fed copy would answer those queries
+        // with silently divergent state. On a volume map they read an
+        // empty world — by design, not by accident.
+        if !self.volume {
+            self.terrain.fill(x0, y0, z0, x1, y1, z1);
+        }
         let (lo, hi) = if self.volume {
             cell_box_to_volume_grid(x0, y0, z0, x1, y1, z1)
         } else {
@@ -2053,7 +2127,10 @@ impl HostBridge for MapRender {
     }
 
     fn voxel_set(&mut self, x: i64, y: i64, z: i64, color: i64) {
-        self.terrain.set(x, y, z);
+        // Column store: fed on column maps only — see voxel_fill.
+        if !self.volume {
+            self.terrain.set(x, y, z);
+        }
         // One sim CELL layer (SCALE×SCALE×1 world voxels), with the same
         // world-X mirror as voxel_fill — this used to paint a single
         // world voxel at UNMIRRORED +x, i.e. a speck in the void on the
@@ -2600,6 +2677,32 @@ mod tests {
             "rotated shape point off by {:?}",
             w - expect
         );
+    }
+
+    /// The render-side wheel seat: on flat terrain the travel is the
+    /// surface distance minus the radius (clamped to rest); airborne it
+    /// is full extension; bottomed out it clamps to zero.
+    #[test]
+    fn wheel_travel_seats_on_terrain() {
+        let mut terrain = monada_script::VolumeStore::new();
+        // A slab: cells z 0..1 solid, surface at z = 2.
+        terrain.fill(0, 0, 0, 7, 7, 1, monada_script::MaterialId(0));
+        let down = DVec3::NEG_Z;
+        // Anchor 2.0 above the surface: hit at t = 2.0, travel 1.5 → but
+        // radius 0.5 gives 1.5 == rest — full extension, wheel bottom
+        // exactly on the surface.
+        let t = wheel_travel(&terrain, DVec3::new(4.0, 4.0, 4.0), down, 1.5, 0.5);
+        assert!((t - 1.5).abs() < 0.1, "flush contact, got {t}");
+        // The equilibrium stance: chassis sank 0.5, anchor at 3.5 → hit
+        // at 1.5, travel 1.0 — the compression the sim implies.
+        let t = wheel_travel(&terrain, DVec3::new(4.0, 4.0, 3.5), down, 1.5, 0.5);
+        assert!((t - 1.0).abs() < 0.1, "half-compressed, got {t}");
+        // Airborne (off the slab): full extension.
+        let t = wheel_travel(&terrain, DVec3::new(40.0, 40.0, 4.0), down, 1.5, 0.5);
+        assert!((t - 1.5).abs() < 1e-9, "airborne, got {t}");
+        // Bottomed out (anchor at the surface): clamps to zero.
+        let t = wheel_travel(&terrain, DVec3::new(4.0, 4.0, 2.0), down, 1.5, 0.5);
+        assert!(t.abs() < 0.1, "bottomed out, got {t}");
     }
 
     /// The automatic body mirror, end-to-end through the REAL digger map:
