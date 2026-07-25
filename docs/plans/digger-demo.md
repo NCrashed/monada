@@ -1,9 +1,11 @@
 # monada-digger — the physics demo: drive, jump, drill
 
-Status: **in progress — D1 + D2 landed** (D1: volume store,
+Status: **in progress — D1–D3 landed** (D1: volume store,
 physics-in-sim, `phys_*` verbs, `digger@` golden; D2: automatic body
 mirror with full-quaternion grids, wheel cylinders, chase cam, ramp
-field + jump beat); D3–D4 pending. The demo that pays off
+field + jump beat; D3: the drill — pitched `DrillTool`, the
+`phys_drill` loop, debris puffs, mountain + basement, 900-tick golden
+with a pitched descent); D4 pending. The demo that pays off
 `monada-physics` P0–P6
 (docs/plans/voxel-physics.md): a drill-nosed vehicle in a voxel arena —
 drive it, jump it off ramps, and bore tunnels through walls and floor,
@@ -130,6 +132,7 @@ Minimal verb set, mirroring the crate 1:1 where possible:
 | `phys_impulse(body, jx, jy, jz)` | `apply_impulse` |
 | `phys_pos(body) -> vec3` / `phys_vel(body) -> vec3` | pose reads for game logic |
 | `phys_yaw(body) -> fixed` | heading about +z (D2 amendment: the chase cam follows the body's yaw, and the local layer cannot see physics — the sim reads it and aims the camera, the RPG `follow_camera` pattern) |
+| `phys_pitch(body) -> fixed` | attitude pitch (D3 amendment: a gravity-stable bore subtracts the chassis attitude from the commanded drill pitch — otherwise ramming the face noses the body up and the tunnel ratchets upward) |
 | `phys_drill(body, pitch, budget) -> int` | the one-call drill loop (locked decision); returns voxels cut for HUD/score |
 | `phys_carve(body, cells…)` | `remove_voxels` (vehicle damage v2 — stub now) |
 
@@ -183,6 +186,17 @@ from the physics test-suite stance (wheelbase ±3.5, track ±2.5,
 k = 240, c = 80 — already characterized by 10 vehicle tests), drill
 budget ~120/tick. Ramp jumps need no new physics: suspension + ballistic
 flight are P1/P3 territory.
+*(D3 amendments, all trace-derived: budget 80, not 120 — a full cut's
+reaction must stay under the drive train's push (4×25 torque) or boring
+out-brakes the wheels; granite hardness 50, not 100 — a material harder
+than the budget is a softlock, not a challenge; the drill box pivots
+about its REAR-BOTTOM edge in `phys_drill` (a centre pivot lifts the
+near edge off the wheel plane and the vehicle bridges its own ramp
+forever); a level bore's box bottom sits exactly on the wheel-roll
+plane (nicking the floor digs an unclimbable pothole); descent works in
+a narrow commanded-pitch band ~−22° (steeper cuts slots too low to
+enter, shallower never gets down), so the basement vault's ceiling is
+the apron slab itself.)*
 
 ## §2 The map
 
@@ -230,6 +244,15 @@ basement in the map.
 UP to the surface, all human-driven; `digger@` grows a scripted drill
 sequence (including a pitched descent); hash-stable with streaming
 edits (the P6 tunnel test, now through the full engine stack).
+*(D3 note: the golden runs 900 ticks — steer S, jump, level bore
+through a granite vein into the crystal chamber, pitched descent
+breaching the vault ceiling, parked underground; the pitch-UP
+acceptance is a separate automated ascent test (the climb out works,
+z +5 over 15 cells). The vault landing ends belly-down after the
+~4-cell drop — drivable arrival is a D4 feel item. Two physics-plan
+amendments fell out: `DrillTool::orientation`, and POWERED WHEELS
+NEVER SLEEP — a throttle-held vehicle pinned at near-zero velocity by
+the drill reaction must not doze mid-grind.)*
 
 **D4 — objective + polish.**
 Crystals + counter HUD, drill feedback from `phys_drill`'s return

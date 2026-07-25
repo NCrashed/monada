@@ -469,6 +469,15 @@ wake on contact and on nearby voxel edits.
 
 **P5 amendments (approved 2026-07-24).** Surfaced per §7 and folded in:
 
+- **(digger D3, 2026-07-25) POWERED WHEELS NEVER SLEEP**: the sleep
+  bookkeeping skips any body whose wheels retain a nonzero `drive` —
+  retained throttle is intent, and a vehicle pinned at near-zero
+  velocity by an external force (the drill reaction grinding a face)
+  must not doze mid-throttle; nothing would ever wake it to act on the
+  throttle again. Brake/steer at rest still sleep (they hold, they
+  don't move). `phys@` unaffected — its vehicle never idles under
+  power.
+
 - **Pair narrowphase is asymmetric**: the body with the smaller skin
   contributes spheres, the other its voxel grid (queried in its shape
   frame; rotation preserves distances). Ties to the lower id. Known
@@ -533,6 +542,15 @@ penetration rates; vehicle drilling into a wall decelerates by hardness;
 tunnel-scenario golden hash-stable while terrain edits stream in.
 
 **P6 amendments (approved 2026-07-24).** Surfaced per §7 and folded in:
+
+- **(digger D3, 2026-07-25) `DrillTool` grew `orientation: FixedQuat`**
+  (the amendment flagged in docs/plans/digger-demo.md): a tool-in-body
+  rotation composed with the body orientation in `drill_query` — the
+  pitched drill nose. `IDENTITY` is the P6 behaviour bit for bit
+  (`phys@` unchanged); the reaction stays orientation-agnostic (anchor
+  point + hardness). The anchor still pivots with the BODY only; the
+  engine-side drill loop composes its own pivot point when it wants the
+  box to swing about an edge instead of its centre.
 
 - **The drill tool is an oriented box riding the body** (body-frame,
   CoM-relative anchor, like a wheel); overlap tests CELL CENTRES with an

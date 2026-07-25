@@ -165,7 +165,11 @@ vocabulary stays the same, with deeper semantics:
   primitive — instead of truncating a column.
 - **The material-0 contract:** paints without a material id write material
   `0`, so the map's FIRST `phys_material` call is its ground material and
-  must precede any tick that can bring a body into terrain contact.
+  must precede any tick that can bring a body into terrain contact. The
+  same discipline covers every explicit material id: painting terrain
+  with an id `phys_material` never returned panics at the first contact
+  or drill sweep that touches the cell — a map-author bug surfaces
+  loudly, not as a desync.
 - Rendering is *isotropic*: one render voxel per sim cell on all three
   axes (the column convention's unscaled z cannot rotate with a rigid
   body). Physics bodies and their wheels are mirrored to the screen
@@ -182,6 +186,9 @@ vocabulary stays the same, with deeper semantics:
 | `phys_pos(body)` | the body's CoM position (ZERO for an unknown id) |
 | `phys_vel(body)` | the body's linear velocity (ZERO for an unknown id) |
 | `phys_yaw(body)` | the body's heading about +z, radians (the chase-cam read) |
+| `phys_pitch(body)` | the body's attitude pitch, radians, positive = nose up (subtract from a commanded drill pitch for a gravity-stable bore) |
+| `phys_drill_tool(body, ax, ay, az, hx, hy, hz)` | register the body's drill box: anchor at SHAPE coords `(ax, ay, az)`, half-extents `(hx, hy, hz)`; call once at spawn |
+| `phys_drill(body, pitch, budget)` | one drill sweep: overlapped terrain cells cut front-to-back while their summed hardness fits `budget`, carved from the store (with the physics wake/reaction and the render mirror), `pitch` tilts the nose (radians, positive = up); returns voxels cut |
 
 All `phys_*` state — bodies, wheels, materials, the volume terrain — folds
 into the desync hash alongside the entity world; treat it exactly like

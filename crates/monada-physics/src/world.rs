@@ -144,6 +144,23 @@ impl PhysicsWorld {
         MaterialId(id)
     }
 
+    /// A registered material, by id — the read half of
+    /// [`register_material`](PhysicsWorld::register_material). The
+    /// engine-side drill cut policy consumes this (plan §4: physics
+    /// reports overlaps, the ENGINE decides what gets cut from
+    /// hardness — so hardness must be readable across the wall).
+    ///
+    /// # Panics
+    /// Panics on an unregistered id (a cross-crate contract violation,
+    /// like the terrain-material assert in narrowphase).
+    #[must_use]
+    pub fn material(&self, id: MaterialId) -> Material {
+        *self
+            .materials
+            .get(usize::from(id.0))
+            .unwrap_or_else(|| panic!("material {} is not registered", id.0))
+    }
+
     /// Spawn a ghost body — explicit mass properties, **no collision
     /// skin** (it falls through terrain by design; see `BodyDef`).
     ///
@@ -728,7 +745,15 @@ impl PhysicsWorld {
             if body.asleep {
                 continue;
             }
-            if body.linear_velocity.length() < SLEEP_LINEAR
+            // A POWERED wheel keeps its body awake (digger D3): retained
+            // drive is intent — a vehicle grinding against a wall (or a
+            // drill reaction) at near-zero velocity must not doze off
+            // mid-throttle, because nothing would ever wake it to act on
+            // that throttle again. Brake/steer at rest are fine to sleep
+            // through — they hold, they don't move.
+            let powered = body.wheels.iter().any(|w| w.input().drive != Fixed::ZERO);
+            if !powered
+                && body.linear_velocity.length() < SLEEP_LINEAR
                 && body.angular_velocity.length() < SLEEP_ANGULAR
             {
                 body.sleep_timer = body.sleep_timer.saturating_add(1);
@@ -846,10 +871,14 @@ impl PhysicsWorld {
             tool.half_extents
         );
         let center = body.position() + body.orientation() * tool.anchor;
-        let inv_rot = body.orientation().inverse();
+        // The box frame composes the tool-in-body rotation (D3: a
+        // pitched nose) with the body orientation; the anchor point
+        // itself stays body-frame (the tool pivots about it).
+        let box_rot = body.orientation() * tool.orientation;
+        let inv_rot = box_rot.inverse();
         // World AABB of the oriented box: per world axis, the reach is
         // Σ |R column| · half_extent.
-        let rot = FixedMat3::from_quat(body.orientation());
+        let rot = FixedMat3::from_quat(box_rot);
         let reach = |ax: Fixed, ay: Fixed, az: Fixed| {
             ax.abs() * tool.half_extents.x
                 + ay.abs() * tool.half_extents.y

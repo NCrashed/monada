@@ -471,6 +471,20 @@ struct WheelMirror {
 /// Wheel cylinder half-width along its axle, world voxels.
 const WHEEL_HALF_WIDTH: i32 = 3;
 
+/// One debris puff: a dust sprite rising from a carved cell for
+/// [`PUFF_TTL`] seconds. World position is the cell centre at spawn; the
+/// rise is derived from `age` at draw time.
+struct Puff {
+    pos: DVec3,
+    color: u32,
+    age: f64,
+}
+
+/// Puff lifetime, seconds.
+const PUFF_TTL: f64 = 0.45;
+/// Puff rise rate, world voxels per second (upward = −z).
+const PUFF_RISE: f64 = 24.0;
+
 /// The render-side suspension length of a stateless wheel: march the
 /// solver's own ray — from the anchor along body-down through the volume
 /// terrain — and clamp the surface distance minus the wheel radius to
@@ -619,6 +633,18 @@ pub struct MapRender {
     /// only), fed by [`sync_physics`](Self::sync_physics). Map scripts never
     /// hand-mirror a body (plan §1d locked decision).
     body_mirrors: BTreeMap<u64, BodyMirror>,
+    /// Live debris puffs (plan §1d): every volume-map carve spawns a
+    /// short-lived dust sprite at the cell, coloured from the voxel it
+    /// replaced. Render-side only — nothing debris-shaped enters the sim
+    /// (the falling-sand layer stays future work, physics plan §8).
+    puffs: Vec<Puff>,
+    /// Puff sprite models by colour, lazily registered into the STATIC
+    /// sprite set — actor-less maps re-upload that set every frame, so
+    /// static instances are the layer that actually shows there (the
+    /// dynamic ring layer gets reset by that same upload). NB an
+    /// actor-ful volume map would need the dynamic-layer route instead;
+    /// no such map exists yet.
+    puff_models: BTreeMap<u32, usize>,
     /// Grids spawned by the script via `grid_spawn` (e.g. the ship demo's hull).
     /// The script's i64 handle is the index into this Vec; never reordered or
     /// compacted so handles stay stable. Painted by `voxel_fill_in`. Kept
@@ -833,6 +859,8 @@ impl MapRender {
             world_grid: None,
             volume: false,
             body_mirrors: BTreeMap::new(),
+            puffs: Vec::new(),
+            puff_models: BTreeMap::new(),
             grids: Vec::new(),
             vision_grid: None,
             sprites,
@@ -1614,6 +1642,9 @@ impl MapRender {
             }
             self.sky_uploaded = true;
         }
+        // Debris puffs ride the static instance list — append before the
+        // upload below.
+        self.sync_puffs(dt);
         // Upload the static sprite set *before* driving the actors:
         // `set_sprites` resets the dynamic layer (clips + actors), so a map
         // with animated actors uploads its static set exactly once (before any
@@ -1682,6 +1713,57 @@ impl MapRender {
     /// path can't carry them on actor maps). Tear-down + re-add per frame:
     /// selection counts are tiny and `remove_sprite_instance` is an O(1)
     /// swap, so reconciliation would be complexity for nothing.
+    /// Age, cull and draw the debris puffs: each is a static-set sprite
+    /// instance (see `puff_models` on why not the dynamic layer), rising
+    /// from its cell for [`PUFF_TTL`] seconds. Runs before the sprite-set
+    /// upload each frame; `build_instances` has already rebuilt the
+    /// instance list, so appending here survives exactly one frame — the
+    /// immediate-mode contract the rest of the sprite path already lives
+    /// by.
+    fn sync_puffs(&mut self, dt: f64) {
+        if self.puffs.is_empty() {
+            return;
+        }
+        for p in &mut self.puffs {
+            p.age += dt;
+        }
+        self.puffs.retain(|p| p.age < PUFF_TTL);
+        for i in 0..self.puffs.len() {
+            let (color, pos, age) = {
+                let p = &self.puffs[i];
+                (p.color, p.pos, p.age)
+            };
+            let model = if let Some(&m) = self.puff_models.get(&color) {
+                m
+            } else {
+                // A chunky dust ball in the carved voxel's colour, unlit.
+                let c = 3.0;
+                let kv6 = Kv6::from_fn(7, 7, 7, |x, y, z| {
+                    let (dx, dy, dz) = (
+                        f64::from(x) - c,
+                        f64::from(y) - c,
+                        f64::from(z) - c,
+                    );
+                    (dx * dx + dy * dy + dz * dz <= c * c).then_some(VoxColor(color))
+                });
+                let mut s = Sprite::axis_aligned(kv6, [0.0, 0.0, 0.0]);
+                s.flags = SPRITE_FLAG_NO_SHADING;
+                self.sprites.models.push(s);
+                let m = self.sprites.models.len() - 1;
+                self.puff_models.insert(color, m);
+                m
+            };
+            self.sprites.instances.push(SpriteInstanceDesc {
+                model,
+                pos: [
+                    pos.x as f32,
+                    pos.y as f32,
+                    (pos.z - age * PUFF_RISE) as f32,
+                ],
+            });
+        }
+    }
+
     fn sync_rings(&mut self, renderer: &mut SceneRenderer) {
         if self.actors.is_empty() {
             return; // static path (chess) draws the marker itself
@@ -2096,10 +2178,23 @@ impl HostBridge for MapRender {
         if self.volume {
             // A true one-cell hole punch — the tunnel primitive. Matches the
             // sim-side VolumeStore semantics exactly (the D1 column-clear
-            // mismatch, retired).
+            // mismatch, retired). The carved voxel's colour seeds a debris
+            // puff at the cell (plan §1d) — read it BEFORE the punch.
             if let Some(id) = self.world_grid {
                 let (lo, hi) = cell_box_to_volume_grid(x, y, z, x, y, z);
                 if let Some(grid) = self.scene.grid_mut(id) {
+                    if let Some(color) = grid.voxel_color(lo) {
+                        let center = volume_world_of(DVec3::new(
+                            x as f64 + 0.5,
+                            y as f64 + 0.5,
+                            z as f64 + 0.5,
+                        ));
+                        self.puffs.push(Puff {
+                            pos: center,
+                            color: color.0,
+                            age: 0.0,
+                        });
+                    }
                     grid.set_rect(lo, hi, None);
                 }
             }
@@ -2645,6 +2740,26 @@ mod tests {
     //! frame computes for `update_actors` to apply.
     use super::*;
     use monada_sim::World;
+
+    /// A volume-map carve spawns a debris puff carrying the carved
+    /// voxel's colour; clearing air spawns nothing; the puff dies after
+    /// [`PUFF_TTL`].
+    #[test]
+    fn volume_carve_spawns_and_retires_a_puff() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        r.set_volume_terrain();
+        r.voxel_fill(0, 0, 0, 3, 3, 1, 0x8070_5838);
+        r.voxel_clear(1, 1, 1);
+        assert_eq!(r.puffs.len(), 1, "one carve, one puff");
+        assert_eq!(r.puffs[0].color, 0x8070_5838, "puff wears the voxel's colour");
+        // Clearing already-empty cells is silent.
+        r.voxel_clear(1, 1, 1);
+        r.voxel_clear(50, 50, 50);
+        assert_eq!(r.puffs.len(), 1);
+        // Age it out through the draw path.
+        r.sync_puffs(PUFF_TTL + 0.01);
+        assert!(r.puffs.is_empty(), "puffs die after PUFF_TTL");
+    }
 
     /// The body-mirror pose math: grid local = shape cells, so `origin +
     /// rot · (SCALE · l)` must land shape point `l` exactly where the sim

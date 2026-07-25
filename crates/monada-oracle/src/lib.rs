@@ -753,6 +753,7 @@ pub fn phys_checkpoints() -> Vec<Checkpoint> {
     let drill = monada_physics::DrillTool {
         anchor: v3(4, 0, -1),
         half_extents: FixedVec3::new(Fixed::ONE, fx(2), Fixed::ONE),
+        orientation: FixedQuat::IDENTITY,
     };
 
     let mut prev = 0;
@@ -824,33 +825,44 @@ const DIGGER_SCRIPT: &str = include_str!("../../monada-digger/map/scripts/main.r
 /// the manifest to 30 Hz.
 const DIGGER_HZ: u32 = 30;
 /// Hash the demo run at these tick counts (`digger@0` = post-init: apron
-/// painted, vehicle spawned, suspension not yet settled).
-const DIGGER_CHECKPOINTS: &[usize] = &[0, 1, 30, 150, 600];
+/// painted, vehicle spawned, suspension not yet settled; `digger@900` =
+/// parked inside the basement vault).
+const DIGGER_CHECKPOINTS: &[usize] = &[0, 1, 30, 150, 600, 900];
 
-/// The fixed drive schedule (docs/plans/digger-demo.md §4): settle →
-/// straight run over the jump ramp (launch ~t165, land ~t210) → steered
-/// arc → straighten → brake to a stop. Verb 0, `arg.x` = drive, `arg.y` =
-/// steer, `target` bit 0 = brake — one packed command per tick, the rpg
-/// pattern. KEPT IN SYNC with the behaviour test in
+/// The fixed drive schedule (docs/plans/digger-demo.md §4): settle → a
+/// steer S at low speed → straight run over the jump ramp (launch ~t165,
+/// land ~t210) → brake at the mountain → bore level through the granite
+/// vein into the crystal chamber → pitch down ON THE MOVE → ride the
+/// descending bore through the apron slab into the basement vault →
+/// brake underground. Verb 0, `arg.x` = drive, `arg.y` = steer (+1 =
+/// screen right; the script negates into physics yaw), `arg.z` = pitch
+/// nudge, `target` bit 0 = brake, bit 1 = drill — one packed command per
+/// tick, the rpg pattern. KEPT IN SYNC with the behaviour test in
 /// `crates/monada-digger/tests/gameplay.rs`.
 fn digger_input(t: usize) -> Command {
-    // Identical arm bodies are distinct BEATS (straight run vs
-    // straighten-after-the-arc) — merging them would scramble the
-    // schedule's story.
+    // Identical arm bodies are distinct BEATS — merging them would
+    // scramble the schedule's story.
     #[allow(clippy::match_same_arms)]
-    let (drive, steer, brake) = match t {
-        0..=29 => (0, 0, 0),
-        30..=209 => (1, 0, 0),
-        // +1 = steer RIGHT (screen convention; the script negates into
-        // physics yaw).
-        210..=389 => (1, 1, 0),
-        390..=419 => (1, 0, 0),
-        _ => (0, 0, 1),
+    let (drive, steer, pitch, brake, drill) = match t {
+        0..=29 => (0, 0, 0, 0, 0),
+        30..=35 => (1, 1, 0, 0, 0),
+        36..=41 => (1, -1, 0, 0, 0),
+        42..=209 => (1, 0, 0, 0, 0),
+        210..=259 => (0, 0, 0, 1, 0),
+        260..=474 => (1, 0, 0, 0, 1),
+        475..=489 => (1, 0, -1, 0, 1),
+        490..=599 => (1, 0, 0, 0, 1),
+        600..=819 => (1, 0, 0, 0, 0),
+        _ => (0, 0, 0, 1, 0),
     };
     Command::on(
         0,
-        EntityId(brake),
-        FixedVec3::new(Fixed::from_int(drive), Fixed::from_int(steer), Fixed::ZERO),
+        EntityId(brake | (drill << 1)),
+        FixedVec3::new(
+            Fixed::from_int(drive),
+            Fixed::from_int(steer),
+            Fixed::from_int(pitch),
+        ),
     )
 }
 
@@ -882,7 +894,7 @@ pub fn digger_checkpoints() -> Vec<Checkpoint> {
     };
 
     record(&driver, 0);
-    for t in 1..=600usize {
+    for t in 1..=900usize {
         driver.apply_command(P0, &digger_input(t));
         driver.step();
         record(&driver, t);

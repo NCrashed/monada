@@ -94,6 +94,35 @@ fn check(checkpoints: &[Checkpoint]) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         eprintln!("DESYNC: {failures} checkpoint(s) diverged from goldens.");
+        // Flake triage (the one-off unexplained digger@600 mismatch of
+        // 2026-07-25): recompute EVERYTHING in-process and compare run
+        // vs run. A self-disagreement is rare true nondeterminism —
+        // name its first divergent checkpoint; self-agreement means the
+        // divergence is reproducible here (a real code/platform drift
+        // against the goldens, the boring kind).
+        let rerun = all_checkpoints();
+        let unstable: Vec<_> = checkpoints
+            .iter()
+            .zip(rerun.iter())
+            .filter(|(a, b)| a.hash != b.hash)
+            .collect();
+        if unstable.is_empty() {
+            eprintln!(
+                "  self-rerun agrees with the first run — the divergence is \
+                 reproducible in-process (drift vs goldens, not a flake)."
+            );
+        } else {
+            let (first, again) = unstable[0];
+            eprintln!(
+                "  SELF-RERUN DISAGREES — nondeterminism inside this process! \
+                 first divergent checkpoint: {} (run 1: {}, run 2: {}; {} \
+                 checkpoint(s) affected)",
+                first.key(),
+                first.hash,
+                again.hash,
+                unstable.len()
+            );
+        }
         ExitCode::FAILURE
     }
 }

@@ -337,7 +337,7 @@ impl MapSim {
             self.backend.on_tick().expect("map tick");
             if let Some(phys) = &self.phys {
                 let mut sim = phys.lock().expect("physics mutex");
-                let PhysicsSim { world, terrain } = &mut *sim;
+                let PhysicsSim { world, terrain, .. } = &mut *sim;
                 world.step(terrain);
             }
             let commands = self.render.lock().expect("render mutex").drain_commands();

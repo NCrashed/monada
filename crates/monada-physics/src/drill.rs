@@ -12,7 +12,7 @@
 //! [`PhysicsWorld::drill_query`]: crate::PhysicsWorld::drill_query
 //! [`PhysicsWorld::drill_reaction`]: crate::PhysicsWorld::drill_reaction
 
-use monada_fixed::FixedVec3;
+use monada_fixed::{FixedQuat, FixedVec3};
 
 use crate::material::MaterialId;
 
@@ -25,10 +25,20 @@ use crate::material::MaterialId;
 pub struct DrillTool {
     /// Box centre, body frame (CoM-relative).
     pub anchor: FixedVec3,
-    /// Half-extents along the BODY axes. Must be positive — asserted
-    /// at use (a degenerate box is a map-author bug, not a data
-    /// condition).
+    /// Half-extents along the TOOL axes (the body axes rotated by
+    /// [`orientation`](DrillTool::orientation)). Must be positive —
+    /// asserted at use (a degenerate box is a map-author bug, not a
+    /// data condition).
     pub half_extents: FixedVec3,
+    /// Tool-in-body rotation (digger plan §1c, D3 amendment): the box
+    /// pivots about `anchor` — a pitched drill nose — composing with
+    /// the body orientation in [`drill_query`]. `IDENTITY` is the P6
+    /// behaviour, bit for bit. The REACTION stays orientation-agnostic
+    /// (anchor point + hardness — plan §4), so only the query reads
+    /// this.
+    ///
+    /// [`drill_query`]: crate::PhysicsWorld::drill_query
+    pub orientation: FixedQuat,
 }
 
 /// One terrain cell the tool face currently overlaps.

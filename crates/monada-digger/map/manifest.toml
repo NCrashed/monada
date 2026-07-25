@@ -3,8 +3,9 @@
 # tunnels through walls and floor. Manifest schema: monada_format::Manifest.
 name = "monada digger demo"
 engine_version = "0.0.1"
-# Requires the phys_* sim-physics verbs + volume terrain routing.
-host_api = 8
+# Requires the phys_* sim-physics verbs + volume terrain routing + the
+# D3 drill loop.
+host_api = 9
 # Single-player sandbox. The lockstep command stream keeps the LAN door
 # open (plan §6), but the demo ships solo.
 players = 1
@@ -35,3 +36,15 @@ id = "brake"
 kind = "button"
 default = ["Space"]
 label = { en = "Brake" }
+
+[[action]]
+id = "drill"
+kind = "button"
+default = ["KeyE", "MouseLeft"]
+label = { en = "Drill" }
+
+[[action]]
+id = "drill_pitch"
+kind = "axis"
+default = { pos = "KeyR", neg = "KeyF" }
+label = { en = "Drill pitch" }

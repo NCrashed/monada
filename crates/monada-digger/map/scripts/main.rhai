@@ -8,7 +8,8 @@
 //
 // Input packing (the rpg pattern, one command per tick, verb 0):
 //   arg.x = drive in −1..1, arg.y = steer in −1..1 (+1 = steer RIGHT,
-//   the player's view), target bit 0 = brake.
+//   the player's view), arg.z = drill-pitch nudge in −1..1 (+1 tilts
+//   the nose UP), target bit 0 = brake, bit 1 = drill.
 //
 // All gameplay state lives in the World (decision A2): one entity
 // carries the body/wheel ids and the latest input intent as fields.
@@ -19,11 +20,18 @@ fn init() {
     // Gravity −10, the plan §1f stance.
     phys_gravity(fixed(0), fixed(0), fixed(-10));
 
-    // Material 0 — apron ground (what un-materialed voxel_fill paints);
-    // material 1 — the vehicle hull. Hardness matters only from D3 on,
-    // but the apron already declares the plan §2 bedrock value.
+    // Material 0 — apron/bedrock ground (what un-materialed voxel_fill
+    // paints); material 1 — the vehicle hull; then the mountain's
+    // layers (plan §2): soft sandstone, granite veins, and the crystal
+    // the chambers hide.
     let ground = phys_material(fixed(1), ratio(4, 5), fixed(0), fixed(40));
     let hull = phys_material(fixed(1), ratio(1, 2), fixed(0), fixed(100));
+    // Granite is drillable-but-slow, NOT impassable: its hardness must
+    // stay under the drill budget (80), or a vein becomes a softlock
+    // instead of a grind.
+    let sandstone = phys_material(fixed(1), ratio(4, 5), fixed(0), fixed(10));
+    let granite = phys_material(fixed(1), ratio(4, 5), fixed(0), fixed(50));
+    let crystal = phys_material(fixed(1), ratio(1, 2), fixed(0), fixed(25));
 
     // The flat apron: a 160×160 slab, two voxels thick (cells z 0..1,
     // top surface at z = 2) — runway enough for the golden's full
@@ -43,6 +51,25 @@ fn init() {
     voxel_fill(0, 158, 0, 1, 159, 4, 0x80a0_6040);
     voxel_fill(158, 158, 0, 159, 159, 4, 0x80a0_6040);
 
+    // The bedrock underlayer (plan §2, D3): eight cells of solid ground
+    // under the whole apron — what a pitched-down drill descends
+    // through. The BASEMENT vault (x 128..156, y 110..126, z −6..−1 — a
+    // tall undercroft below the mountain whose ceiling is the apron slab
+    // itself, so a ~14° effective bore from the crystal chamber breaks
+    // through within the chamber-to-vault run; steeper shafts cut slots
+    // too low to enter and shallower ones never get down — the D3 trace
+    // lessons) hides inside it, built paint-AROUND — five boxes, the
+    // cavity itself never painted — so init carves nothing (no puff
+    // storm, no wasted rehash).
+    voxel_fill(0, 0, -8, 127, 159, -1, 0x8060_5850);
+    voxel_fill(157, 0, -8, 159, 159, -1, 0x8060_5850);
+    voxel_fill(128, 0, -8, 156, 109, -1, 0x8060_5850);
+    voxel_fill(128, 127, -8, 156, 159, -1, 0x8060_5850);
+    voxel_fill(128, 110, -8, 156, 126, -7, 0x8060_5850);
+    // Crystal pillars on the vault floor.
+    voxel_fill(134, 114, -6, 134, 114, -5, 0x80a0_e8f0, crystal);
+    voxel_fill(150, 120, -6, 150, 119, -5, 0x80a0_e8f0, crystal);
+
     // The ramp field (plan §2, D2): stepped ramps of increasing grade.
     // The JUMP ramp sits on the golden's straight-run path (y 114..126,
     // driving +x from the pad): four 1-cell risers with 4-cell treads
@@ -54,6 +81,37 @@ fn init() {
     ramp(60, 30, 44, 4, 4);
     ramp(90, 30, 44, 3, 4);
     ramp(120, 30, 44, 2, 4);
+
+    // The mountain (plan §2): a sandstone block against the east side of
+    // the golden path, granite veins through it, and a hollow crystal
+    // chamber at the core (x 130..141, y 110..121, z 2..8 — sitting
+    // right above the basement vault). Paint order: veins → bulk →
+    // veins again → crystal pillars; the bulk goes down as five boxes
+    // AROUND the chamber, so the cavity is never filled and the
+    // pillars paint into clean air.
+    let msx = 120;
+    let mex = 159;
+    let msy = 96;
+    let mey = 145;
+    let mz = 15;
+    // Granite veins: the two truths paint in OPPOSITE orders — the
+    // volume store keeps the LAST painter (fills overwrite materials),
+    // the render grid keeps the FIRST (VoxLap inserts never recolour).
+    // So the veins go down twice: before the bulk (their colour) and
+    // after it (their material). Both passes are two thin slabs — cheap.
+    vein(msy, mey, granite);
+    // Sandstone bulk around the chamber cavity (x 130..141, y 110..121,
+    // z 2..8): west slab, east slab, south slab, north slab, roof.
+    voxel_fill(msx, msy, 2, 129, mey, mz, 0x80c8_a860, sandstone);
+    voxel_fill(142, msy, 2, mex, mey, mz, 0x80c8_a860, sandstone);
+    voxel_fill(130, msy, 2, 141, 109, mz, 0x80c8_a860, sandstone);
+    voxel_fill(130, 122, 2, 141, mey, mz, 0x80c8_a860, sandstone);
+    voxel_fill(130, 110, 9, 141, 121, mz, 0x80c8_a860, sandstone);
+    // Second vein pass: store materials (see the order note above).
+    vein(msy, mey, granite);
+    // Crystal pillars inside the mountain chamber.
+    voxel_fill(133, 113, 2, 133, 113, 4, 0x80a0_e8f0, crystal);
+    voxel_fill(137, 117, 2, 137, 116, 3, 0x80a0_e8f0, crystal);
 
     // The vehicle: a 6×4×2 chassis on four wheels — the physics
     // test-suite stance (wheelbase ±3.5, track ±2.5, k = 240, c = 80).
@@ -73,7 +131,23 @@ fn init() {
     let w_rl = phys_wheel(body, ratio(-1, 2), ratio(9, 2), fixed(0), rest, radius, k, c, mu);
     let w_rr = phys_wheel(body, ratio(-1, 2), ratio(-1, 2), fixed(0), rest, radius, k, c, mu);
 
-    let arch = archetype(["body", "w_fl", "w_fr", "w_rl", "w_rr", "drive", "steer", "brake"]);
+    // The drill nose (plan §1c): a box ahead of the chassis front face,
+    // SHAPE coords like the wheel anchors. Vertically the box bottom
+    // sits EXACTLY on the wheel-roll plane at ride height (CoM −2.5 =
+    // the slab top, with the ride's ~0.5 bob as margin) — a level bore
+    // must never nick the floor it drives on: a one-cell pothole under
+    // the wheels is an unclimbable lip from standstill (the P3 lesson,
+    // learned the hard way in the D3 traces).
+    phys_drill_tool(
+        body,
+        ratio(15, 2), fixed(2), fixed(1),
+        fixed(3), fixed(3), ratio(5, 2),
+    );
+
+    let arch = archetype([
+        "body", "w_fl", "w_fr", "w_rl", "w_rr", "drive", "steer", "brake", "drill", "pitch_in",
+        "pitch", "score", "cam",
+    ]);
     let v = entity_create(arch);
     entity_set_field(v, "body", fixed(body));
     entity_set_field(v, "w_fl", fixed(w_fl));
@@ -89,8 +163,15 @@ fn init() {
     camera_focus(phys_pos(body));
     camera_angle(pi() - phys_yaw(body), ratio(1, 2));
     camera_dist(fixed(220));
+    // The view cutout stays ON for the whole map: "am I under a roof"
+    // is not expressible from the sim layer (no z-threshold works —
+    // the crystal chamber floor sits at surface height), and a keyhole
+    // that dissolves rock between camera and vehicle is harmless in
+    // the open. Focus discipline keeps the bored face safe: geometry
+    // beyond the focus distance is never cut.
+    camera_cutout(fixed(5), fixed(2));
     set_light(vec3(fixed(1), fixed(2), fixed(-3)), ratio(9, 10));
-    status("digger: W/S drive, A/D steer, Space brake");
+    status("digger: W/S drive, A/D steer, Space brake, E drill, R/F pitch");
 }
 
 // A stepped ramp climbing +x from `x0`, spanning `y0..=y1`: `steps`
@@ -106,6 +187,14 @@ fn ramp(x0, y0, y1, tread, steps) {
     }
 }
 
+// Two thin vertical granite slabs flanking the mountain's chamber
+// column (x 126..127 west of it, 146..147 east — never inside the
+// cavity), spanning the mountain's y and most of its height.
+fn vein(y0, y1, mat) {
+    voxel_fill(126, y0, 2, 127, y1, 12, 0x8060_6a74, mat);
+    voxel_fill(146, y0, 2, 147, y1, 12, 0x8060_6a74, mat);
+}
+
 // The single vehicle entity (the map spawns exactly one).
 fn vehicle() {
     entities()[0]
@@ -116,7 +205,9 @@ fn command(player, verb, target, arg) {
         let v = vehicle();
         entity_set_field(v, "drive", arg.x);
         entity_set_field(v, "steer", arg.y);
+        entity_set_field(v, "pitch_in", arg.z);
         entity_set_field(v, "brake", fixed(target & 1));
+        entity_set_field(v, "drill", fixed((target >> 1) & 1));
     }
 }
 
@@ -136,21 +227,64 @@ fn tick(dt) {
     phys_wheel_input(body, to_int(entity_field(v, "w_fr")), steer, drive, brake);
     phys_wheel_input(body, to_int(entity_field(v, "w_rl")), fixed(0), drive, brake);
     phys_wheel_input(body, to_int(entity_field(v, "w_rr")), fixed(0), drive, brake);
+    // Drill pitch (plan §1e): the nudge axis integrates into a held
+    // pitch, clamped to ±45° (pi/4). +1 nudges the nose UP at 45°/s.
+    let pitch = entity_field(v, "pitch") + entity_field(v, "pitch_in") * pi() * dt / fixed(4);
+    let lim = pi() / fixed(4);
+    if pitch > lim {
+        pitch = lim;
+    }
+    if pitch < -lim {
+        pitch = -lim;
+    }
+    entity_set_field(v, "pitch", pitch);
+    // The drill (plan §1c): one engine sweep per held tick. Budget 80:
+    // the reaction of a full cut (80) stays under the drive train's
+    // push (4×25 torque ≈ 100-force), so boring never out-brakes the
+    // wheels — 8 sandstone / 2 bedrock / 1 granite cells per tick.
+    // The bore is GRAVITY-STABLE: subtracting the chassis attitude
+    // keeps the cut on the commanded grade even when ramming the face
+    // noses the body up — otherwise the tunnel ratchets upward and the
+    // vehicle beaches on its own steps (the D3 trace lesson #2).
+    if entity_field(v, "drill") > fixed(0) {
+        let cut = phys_drill(body, pitch - phys_pitch(body), fixed(80));
+        entity_set_field(v, "score", entity_field(v, "score") + fixed(cut));
+    }
     // Mirror the pose onto the entity (sensors and game logic read the
     // World, never the physics handle).
     entity_set_position(v, phys_pos(body));
-    // Chase cam (plan §1e): aim AHEAD of the body along its heading so
-    // the road fills the view instead of the wheels, yaw tracks the
-    // heading (world yaw = pi − sim yaw under the render mirror), pitch
-    // fixed and shallow.
+    // Chase cam (plan §1e): yaw tracks the heading (world yaw = pi −
+    // sim yaw under the render mirror), pitch fixed. On the surface the
+    // focus aims AHEAD so the road fills the view; underground / while
+    // drilling the cam pulls in, flattens, and focuses ON the body —
+    // the view cutout then dissolves only what stands between camera
+    // and vehicle, never the face ahead (geometry beyond the focus
+    // distance is untouched). camera_dist is set ONLY when the mode
+    // flips: the host's mouse-wheel zoom adjusts the same distance, and
+    // hammering it every tick would eat the player's zoom.
     let yaw = phys_yaw(body);
     let p = phys_pos(body);
-    camera_focus(vec3(
-        p.x + cos(yaw) * fixed(10),
-        p.y + sin(yaw) * fixed(10),
-        p.z,
-    ));
-    camera_angle(pi() - yaw, ratio(1, 2));
+    let underground = entity_field(v, "drill") > fixed(0) || p.z < fixed(3);
+    let mode = if underground { fixed(1) } else { fixed(0) };
+    if mode != entity_field(v, "cam") {
+        entity_set_field(v, "cam", mode);
+        if underground {
+            camera_dist(fixed(140));
+        } else {
+            camera_dist(fixed(220));
+        }
+    }
+    if underground {
+        camera_focus(p);
+        camera_angle(pi() - yaw, ratio(1, 5));
+    } else {
+        camera_focus(vec3(
+            p.x + cos(yaw) * fixed(10),
+            p.y + sin(yaw) * fixed(10),
+            p.z,
+        ));
+        camera_angle(pi() - yaw, ratio(1, 2));
+    }
 }
 
 // --- local layer (unsynchronized, docs/plans/input-bindings.md) ------
@@ -162,9 +296,16 @@ fn local_tick(dt) {
     if action_down("brake") {
         btn = 1;
     }
+    if action_down("drill") {
+        btn += 2;
+    }
     submit_command(
         0,
         btn,
-        vec3(fixed(action_axis("drive")), fixed(action_axis("steer")), fixed(0)),
+        vec3(
+            fixed(action_axis("drive")),
+            fixed(action_axis("steer")),
+            fixed(action_axis("drill_pitch")),
+        ),
     );
 }

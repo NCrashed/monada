@@ -139,7 +139,7 @@ impl SimDriver for RhaiDriver {
         self.backend.on_tick().expect("script tick trigger");
         if let Some(phys) = &self.phys {
             let mut sim = phys.lock().expect("physics mutex");
-            let PhysicsSim { world, terrain } = &mut *sim;
+            let PhysicsSim { world, terrain, .. } = &mut *sim;
             world.step(terrain);
         }
     }
@@ -147,9 +147,10 @@ impl SimDriver for RhaiDriver {
     fn state_hash(&self) -> u64 {
         // One sim, one digest (docs/plans/digger-demo.md §1b). Append
         // order is FIXED and append-only: entity-world digest, physics
-        // digest, terrain digest, folded in that order into a fresh
-        // FNV. A map without physics hashes exactly as before — the
-        // plain world digest — so pre-volume goldens stay valid.
+        // digest, terrain digest, drill-tool digest (the D3 append),
+        // folded in that order into a fresh FNV. A map without physics
+        // hashes exactly as before — the plain world digest — so
+        // pre-volume goldens stay valid.
         let world = self.world.lock().expect("world mutex").state_hash();
         let Some(phys) = &self.phys else {
             return world;
@@ -159,6 +160,7 @@ impl SimDriver for RhaiDriver {
         h.write_u64(world);
         h.write_u64(sim.world.state_hash());
         h.write_u64(sim.terrain.state_hash());
+        h.write_u64(sim.tools_hash());
         h.finish()
     }
 }

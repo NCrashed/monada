@@ -92,6 +92,7 @@ fn mole(
     let tool = DrillTool {
         anchor: FixedVec3::new(Fixed::from_ratio(5, 2), Fixed::ZERO, Fixed::ZERO),
         half_extents: FixedVec3::new(Fixed::ONE, Fixed::from_ratio(5, 2), Fixed::from_ratio(5, 2)),
+        orientation: FixedQuat::IDENTITY,
     };
     (id, tool)
 }
@@ -162,6 +163,7 @@ fn reaction_closed_form_and_effective_mass_clamp() {
     let tool = DrillTool {
         anchor: FixedVec3::ZERO,
         half_extents: vec3(1, 1, 1),
+        orientation: FixedQuat::IDENTITY,
     };
     let cut = [MaterialId(1); 3]; // Σh = 30
     let applied = world.drill_reaction(id, &tool, &cut);
@@ -185,6 +187,7 @@ fn reaction_closed_form_and_effective_mass_clamp() {
     let nose = DrillTool {
         anchor: vec3(0, 0, 3),
         half_extents: vec3(1, 1, 1),
+        orientation: FixedQuat::IDENTITY,
     };
     let giant = [MaterialId(2); 100]; // Σh = 10 000 — deep past the clamp
     let _ = world.drill_reaction(id, &nose, &giant);
@@ -248,6 +251,7 @@ fn query_geometry_rotation_and_inclusive_boundary() {
     let tool = DrillTool {
         anchor: FixedVec3::ZERO,
         half_extents: FixedVec3::new(Fixed::from_ratio(5, 2), Fixed::HALF, Fixed::HALF),
+        orientation: FixedQuat::IDENTITY,
     };
     // Inclusive boundary bites on EVERY axis: the x face sits on the
     // x = 8 centres, and the ±0.5 y/z faces sit exactly on both
@@ -272,6 +276,7 @@ fn query_geometry_rotation_and_inclusive_boundary() {
     let diag_tool = DrillTool {
         anchor: vec3(2, 0, 0), // reaches into the wall along the yawed x
         half_extents: FixedVec3::new(Fixed::from_int(2), Fixed::HALF, Fixed::HALF),
+        orientation: FixedQuat::IDENTITY,
     };
     let samples = world.drill_query(id, &diag_tool, &field);
     assert!(!samples.is_empty(), "the yawed tool reaches the wall");
@@ -286,6 +291,43 @@ fn query_geometry_rotation_and_inclusive_boundary() {
 /// The acceptance headline: per-material penetration rates. The mole
 /// pushes through alternating soft/hard bands under a constant drive
 /// impulse; soft bands take fewer ticks per cell than hard bands.
+#[test]
+fn pitched_tool_composes_with_the_body_orientation() {
+    // D3 amendment: DrillTool::orientation pivots the box about its
+    // anchor. With the anchor at the CoM, rotating the TOOL must equal
+    // rotating the BODY — the query composes `body ∘ tool` into one box
+    // frame.
+    let pitch = FixedQuat::from_axis_angle(vec3(0, 1, 0), trig::PI / Fixed::from_int(4));
+    let long_thin = |orientation: FixedQuat| DrillTool {
+        anchor: FixedVec3::ZERO,
+        half_extents: FixedVec3::new(Fixed::from_int(4), Fixed::HALF, Fixed::HALF),
+        orientation,
+    };
+    let carved = BTreeSet::new();
+    let field = Layered { carved: &carved };
+
+    let mut world = layered_world();
+    let pitched_body = world.spawn(&BodyDef {
+        position: vec3(6, 2, 2),
+        orientation: pitch,
+        ..BodyDef::default()
+    });
+    let level_body = world.spawn(&BodyDef {
+        position: vec3(6, 2, 2),
+        ..BodyDef::default()
+    });
+
+    let via_body = world.drill_query(pitched_body, &long_thin(FixedQuat::IDENTITY), &field);
+    let via_tool = world.drill_query(level_body, &long_thin(pitch), &field);
+    assert_eq!(via_body, via_tool, "tool pitch ≡ body pitch at the CoM");
+
+    // And the pitch genuinely changes the bite: the level tool stays in
+    // the wall band at nose height; the pitched one leaves it (down the
+    // slope toward the floor).
+    let level = world.drill_query(level_body, &long_thin(FixedQuat::IDENTITY), &field);
+    assert_ne!(level, via_tool, "a pitched nose bites different cells");
+}
+
 #[test]
 fn drill_through_layers_shows_per_material_rates() {
     let mut world = layered_world();
@@ -390,6 +432,7 @@ fn mole_tool() -> DrillTool {
     DrillTool {
         anchor: FixedVec3::new(Fixed::from_ratio(5, 2), Fixed::ZERO, Fixed::ZERO),
         half_extents: FixedVec3::new(Fixed::ONE, Fixed::from_ratio(5, 2), Fixed::from_ratio(5, 2)),
+        orientation: FixedQuat::IDENTITY,
     }
 }
 
@@ -454,6 +497,7 @@ fn zero_extent_tool_panics() {
         &DrillTool {
             anchor: FixedVec3::ZERO,
             half_extents: FixedVec3::ZERO,
+            orientation: FixedQuat::IDENTITY,
         },
         &[],
     );

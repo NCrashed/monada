@@ -41,31 +41,43 @@ fn fresh() -> (RhaiDriver, SharedPhysics) {
 }
 
 /// One packed input command: drive/steer axes + brake bit (the map's
-/// verb-0 contract).
-fn input(drive: i32, steer: i32, brake: u64) -> Command {
+/// verb-0 contract): drive/steer/pitch axes, brake bit 0, drill bit 1.
+fn input(drive: i32, steer: i32, pitch: i32, brake: u64, drill: u64) -> Command {
     Command::on(
         0,
-        EntityId(brake),
-        FixedVec3::new(Fixed::from_int(drive), Fixed::from_int(steer), Fixed::ZERO),
+        EntityId(brake | (drill << 1)),
+        FixedVec3::new(
+            Fixed::from_int(drive),
+            Fixed::from_int(steer),
+            Fixed::from_int(pitch),
+        ),
     )
 }
 
-/// The fixed 600-tick schedule: settle → straight run over the jump ramp
-/// (launch ~t165, land ~t210) → steered arc → straighten → brake. KEEP IN
-/// SYNC with the oracle's `digger_input` — this test asserts the behaviour
-/// the golden hashes.
+/// The fixed 900-tick golden schedule: settle → a steer S at low speed →
+/// straight run over the jump ramp (launch ~t165, land ~t210) → brake at
+/// the mountain → bore level through the granite vein into the crystal
+/// chamber → pitch down ON THE MOVE → ride the descending bore through
+/// the apron slab into the basement vault → brake underground. KEEP IN
+/// SYNC with the oracle's `digger_input` — this test asserts the
+/// behaviour the golden hashes.
 fn schedule(t: u64) -> Command {
-    // Identical arm bodies are distinct beats (straight run vs
-    // straighten-after-the-arc), mirroring the oracle's schedule.
+    // Identical arm bodies are distinct beats, mirroring the oracle's
+    // schedule.
     #[allow(clippy::match_same_arms)]
     match t {
-        0..=29 => input(0, 0, 0),
-        30..=209 => input(1, 0, 0),
+        0..=29 => input(0, 0, 0, 0, 0),
         // +1 = steer RIGHT (the screen convention; the script negates
-        // into physics yaw) — the same right-hand arc as ever.
-        210..=389 => input(1, 1, 0),
-        390..=419 => input(1, 0, 0),
-        _ => input(0, 0, 1),
+        // into physics yaw).
+        30..=35 => input(1, 1, 0, 0, 0),
+        36..=41 => input(1, -1, 0, 0, 0),
+        42..=209 => input(1, 0, 0, 0, 0),
+        210..=259 => input(0, 0, 0, 1, 0),
+        260..=474 => input(1, 0, 0, 0, 1),
+        475..=489 => input(1, 0, -1, 0, 1),
+        490..=599 => input(1, 0, 0, 0, 1),
+        600..=819 => input(1, 0, 0, 0, 0),
+        _ => input(0, 0, 0, 1, 0),
     }
 }
 
@@ -81,7 +93,7 @@ fn manifest_declares_the_volume_map() {
     let map = monada_format::Map::read(&bytes).expect("read digger map");
     assert_eq!(map.manifest.terrain, monada_format::Terrain::Volume);
     assert_eq!(map.manifest.players, 1);
-    assert_eq!(map.manifest.host_api, 8);
+    assert_eq!(map.manifest.host_api, 9);
     // The oracle's digger golden hardcodes the tick rate (it embeds the
     // script via include_str!, not the archive) — this pin is what
     // catches a manifest sim_hz change before the golden silently runs
@@ -90,26 +102,27 @@ fn manifest_declares_the_volume_map() {
 }
 
 #[test]
-fn the_vehicle_settles_drives_arcs_and_brakes() {
+fn the_vehicle_jumps_bores_the_mountain_and_descends_to_the_vault() {
     let (mut driver, phys) = fresh();
     {
         let sim = phys.lock().expect("physics mutex");
         assert_eq!(sim.world.bodies().len(), 1, "init spawns the one vehicle");
         assert_eq!(sim.world.bodies()[0].wheels().len(), 4);
         assert!(!sim.terrain.is_empty(), "init painted the apron");
+        // The mountain face stands where the golden will bore.
+        assert!(
+            sim.terrain.get(125, 120, 4).is_some(),
+            "mountain sandstone at (125, 120, 4)"
+        );
     }
     let start = body_pos(&phys);
     let mut settled = FixedVec3::ZERO;
-    let mut arc_entry = FixedVec3::ZERO;
     let mut apex = Fixed::ZERO;
-    for t in 1..=600u64 {
+    for t in 1..=900u64 {
         driver.apply_command(P0, &schedule(t));
         driver.step();
         if t == 30 {
             settled = body_pos(&phys);
-        }
-        if t == 210 {
-            arc_entry = body_pos(&phys);
         }
         // The jump-ramp flight window: past the launch lip, before landing.
         if (160..=205).contains(&t) {
@@ -125,13 +138,6 @@ fn the_vehicle_settles_drives_arcs_and_brakes() {
         start.z,
         settled.z
     );
-    // The straight run drove the nose (+x) a real distance.
-    assert!(
-        arc_entry.x - start.x > Fixed::from_int(40),
-        "straight run should cover ground: {:?} -> {:?}",
-        start.x,
-        arc_entry.x
-    );
     // The jump: the ramp launches the vehicle well above its ride height
     // (CoM ~4.5 on the flat, ramp top surface at z 6) — ballistic flight
     // through the full engine stack.
@@ -139,14 +145,44 @@ fn the_vehicle_settles_drives_arcs_and_brakes() {
         apex > Fixed::from_int(8),
         "the ramp should launch the vehicle: flight apex z {apex:?}"
     );
-    // The steered arc bent the path off the start row.
+    // The bore: the mountain face cell the vehicle drilled through is
+    // carved out of the HASHED volume store.
+    {
+        let sim = phys.lock().expect("physics mutex");
+        assert!(
+            sim.terrain.get(125, 120, 4).is_none(),
+            "the level bore should carve the mountain face at (125, 120, 4)"
+        );
+    }
+    // The pitched descent: parked INSIDE the basement vault, underground.
     assert!(
-        (end.y - start.y).abs() > Fixed::from_int(2),
-        "steering should curve the track: y {:?} -> {:?}",
-        start.y,
+        end.z < Fixed::ZERO,
+        "the descent should end underground, got z {:?}",
+        end.z
+    );
+    assert!(
+        end.x > Fixed::from_int(128) && end.x < Fixed::from_int(157),
+        "parked inside the vault x-range, got x {:?}",
+        end.x
+    );
+    assert!(
+        end.y > Fixed::from_int(110) && end.y < Fixed::from_int(127),
+        "parked inside the vault y-range, got y {:?}",
         end.y
     );
-    // Braked to (nearly) a stop, still on the floor.
+    // The drill fed the score (the D4 HUD's "bite" number).
+    let entity = driver.world().lock().expect("world mutex").all_entities()[0];
+    let score = driver
+        .world()
+        .lock()
+        .expect("world mutex")
+        .field(entity, "score")
+        .expect("score field");
+    assert!(
+        score > Fixed::from_int(400),
+        "the bore should cut hundreds of voxels, scored {score:?}"
+    );
+    // Braked to (nearly) a stop in the vault.
     let vel = {
         let sim = phys.lock().expect("physics mutex");
         sim.world.bodies()[0].linear_velocity()
@@ -156,15 +192,13 @@ fn the_vehicle_settles_drives_arcs_and_brakes() {
         "the brake phase should stop the vehicle, got |v| = {:?}",
         vel.length()
     );
-    assert!(end.z > Fixed::from_int(2) && end.z < Fixed::from_int(8));
 
     // The script mirrors the pose onto its entity every tick — one
     // physics step BEHIND by construction (per-tick order is script
     // `tick` first, then `physics.step`). So after one more tick the
-    // entity carries exactly the pose we sampled at t = 600.
-    driver.apply_command(P0, &schedule(601));
+    // entity carries exactly the pose we sampled at t = 900.
+    driver.apply_command(P0, &schedule(901));
     driver.step();
-    let entity = driver.world().lock().expect("world mutex").all_entities()[0];
     let mirrored = driver
         .world()
         .lock()
@@ -181,7 +215,7 @@ fn identical_runs_hash_identically() {
     let (mut a, _pa) = fresh();
     let (mut b, _pb) = fresh();
     assert_eq!(a.state_hash(), b.state_hash(), "init state diverged");
-    for t in 1..=600u64 {
+    for t in 1..=900u64 {
         a.apply_command(P0, &schedule(t));
         b.apply_command(P0, &schedule(t));
         a.step();
@@ -256,4 +290,36 @@ fn snapshot_round_trip_is_bit_equal_and_steps_identically() {
     original.world.step(&original.terrain);
     restored.world.step(&restored.terrain);
     assert_eq!(original.world.state_hash(), restored.world.state_hash());
+}
+
+#[test]
+fn a_pitched_up_bore_climbs_back_toward_the_surface() {
+    // The other half of the D3 pitch acceptance: from the level bore, an
+    // UP-pitched drill cuts an ascending shaft the vehicle climbs — z
+    // rises well above the tunnel level before the schedule ends.
+    let (mut driver, phys) = fresh();
+    let mut apex = Fixed::ZERO;
+    for t in 1..=780u64 {
+        // Identical arm bodies are distinct beats (level bore vs the
+        // post-nudge ascending bore).
+        #[allow(clippy::match_same_arms)]
+        let cmd = match t {
+            0..=29 => input(0, 0, 0, 0, 0),
+            30..=209 => input(1, 0, 0, 0, 0),
+            210..=259 => input(0, 0, 0, 1, 0),
+            260..=474 => input(1, 0, 0, 0, 1),
+            475..=489 => input(1, 0, 1, 0, 1),
+            _ => input(1, 0, 0, 0, 1),
+        };
+        driver.apply_command(P0, &cmd);
+        driver.step();
+        if t > 490 {
+            apex = apex.max(body_pos(&phys).z);
+        }
+    }
+    assert!(
+        apex > Fixed::from_int(8),
+        "the ascending bore should climb the vehicle well above the \
+         tunnel level (z ~4.7), got apex {apex:?}"
+    );
 }

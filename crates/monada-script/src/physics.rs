@@ -23,24 +23,57 @@
     clippy::cast_sign_loss
 )]
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use monada_fixed::{Fixed, FixedQuat, FixedVec3};
 use monada_physics::{
-    BodyId, Material, MaterialId, PhysicsWorld, VoxelBodyDef, VoxelShape, WheelDef, WheelId,
-    WheelInput,
+    BodyId, DrillTool, Material, MaterialId, PhysicsWorld, VoxelBodyDef, VoxelShape, WheelDef,
+    WheelId, WheelInput,
 };
+use monada_sim::{StateHash, StateHasher};
 use rhai::Engine;
 
 use crate::{SharedBridge, VolumeStore};
 
-/// The physics side of a volume map's sim state: the rigid-body world
-/// and the terrain it collides with. Snapshots serialize it whole; the
-/// driver folds both digests into the combined `state_hash`.
+/// A body's drill-tool geometry (plan §1c): set once at vehicle spawn
+/// via `phys_drill_tool`, in BODY coordinates (the shape→body rebase
+/// happens at registration, like wheel anchors). Pitch is the per-call
+/// degree of freedom of `phys_drill`, not stored here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DrillToolDef {
+    pub anchor: FixedVec3,
+    pub half_extents: FixedVec3,
+}
+
+/// The physics side of a volume map's sim state: the rigid-body world,
+/// the terrain it collides with, and the per-body drill tools. Snapshots
+/// serialize it whole; the driver folds its digests into the combined
+/// `state_hash`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PhysicsSim {
     pub world: PhysicsWorld,
     pub terrain: VolumeStore,
+    /// Drill tools by body id (D3). Sim state like everything else here:
+    /// registered deterministically, serialized, and folded into the
+    /// driver hash via [`tools_hash`](PhysicsSim::tools_hash).
+    pub tools: BTreeMap<u64, DrillToolDef>,
+}
+
+impl PhysicsSim {
+    /// Canonical digest of the drill-tool table (count, then per entry:
+    /// body id, anchor, half-extents, in `BTreeMap` order).
+    #[must_use]
+    pub fn tools_hash(&self) -> u64 {
+        let mut h = StateHasher::new();
+        h.write_u64(self.tools.len() as u64);
+        for (&body, def) in &self.tools {
+            h.write_u64(body);
+            def.anchor.hash(&mut h);
+            def.half_extents.hash(&mut h);
+        }
+        h.finish()
+    }
 }
 
 /// The shared physics handle — `Arc<Mutex<…>>` for the same reason as
@@ -58,6 +91,7 @@ pub fn shared_physics(sim_hz: u32) -> SharedPhysics {
     Arc::new(Mutex::new(PhysicsSim {
         world: PhysicsWorld::new(sim_hz),
         terrain: VolumeStore::new(),
+        tools: BTreeMap::new(),
     }))
 }
 
@@ -242,6 +276,145 @@ pub(crate) fn register_physics_api(
                 monada_fixed::trig::atan2(nose.y, nose.x)
             })
     });
+
+    // The body's attitude pitch (radians; positive = nose above the
+    // horizon). The D3 drill companion to phys_yaw: a map that wants a
+    // gravity-stable bore subtracts this from its commanded drill pitch,
+    // so a chassis nosing up against the face doesn't ratchet its own
+    // tunnel upward.
+    let p = phys.clone();
+    engine.register_fn("phys_pitch", move |body: i64| -> Fixed {
+        lock(&p)
+            .world
+            .body(BodyId(body as u64))
+            .map_or(Fixed::ZERO, |b| {
+                let nose = b.orientation() * FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
+                let flat = FixedVec3::new(nose.x, nose.y, Fixed::ZERO).length();
+                monada_fixed::trig::atan2(nose.z, flat)
+            })
+    });
+
+    // --- the drill (plan §1c, D3) -------------------------------------
+
+    // Tool geometry, set once at vehicle spawn. SHAPE coordinates, like
+    // wheel anchors — the engine rebases via the derived CoM.
+    let p = phys.clone();
+    engine.register_fn(
+        "phys_drill_tool",
+        move |body: i64, ax: Fixed, ay: Fixed, az: Fixed, hx: Fixed, hy: Fixed, hz: Fixed| {
+            let mut sim = lock(&p);
+            let com = sim
+                .world
+                .body(BodyId(body as u64))
+                .expect("phys_drill_tool: unknown body")
+                .com_in_shape();
+            sim.tools.insert(
+                body as u64,
+                DrillToolDef {
+                    anchor: FixedVec3::new(ax, ay, az) - com,
+                    half_extents: FixedVec3::new(hx, hy, hz),
+                },
+            );
+        },
+    );
+
+    // The one-call drill loop (locked decision, plan §4 of the physics
+    // plan satisfied engine-side): query → cut policy → carve store →
+    // notify → reaction, one deterministic sweep. The POLICY is
+    // front-to-back within a hardness budget: overlapped cells sorted by
+    // their projection onto the drill axis (ties broken by cell coords —
+    // fully deterministic), cut while the summed hardness fits `budget`.
+    // `pitch` tilts the nose about the body's Y axle, positive = UP,
+    // clamping is the map's business. Returns the number of voxels cut
+    // (HUD/score feedback). Carves mirror to the render bridge cell by
+    // cell — the same path scripted `voxel_clear`s take.
+    let p = phys.clone();
+    let b = bridge.cloned();
+    engine.register_fn(
+        "phys_drill",
+        move |body: i64, pitch: Fixed, budget: Fixed| -> i64 {
+            let cut = {
+                let mut sim = lock(&p);
+                let id = BodyId(body as u64);
+                let def = *sim
+                    .tools
+                    .get(&(body as u64))
+                    .expect("phys_drill: no tool registered (call phys_drill_tool at spawn)");
+                // Positive pitch = nose UP: a rotation about +y carries
+                // +x toward −z (right-hand rule), so negate. The box
+                // pivots about its REAR-BOTTOM edge, not its centre: a
+                // centre pivot lifts the near-bottom corner above the
+                // wheel plane when pitched down, so the cut ramp starts
+                // ahead of the wheels and the vehicle bridges it forever
+                // (the D3 descent stall). Pivoted at the rear-bottom
+                // edge — the wheels' contact plane — a pitched-down box
+                // sweeps the FAR end down and the ramp begins exactly
+                // under the wheels. Identity pitch is unchanged.
+                let orientation = FixedQuat::from_axis_angle(
+                    FixedVec3::new(Fixed::ZERO, Fixed::ONE, Fixed::ZERO),
+                    -pitch,
+                );
+                let pivot = def.anchor
+                    - FixedVec3::new(def.half_extents.x, Fixed::ZERO, def.half_extents.z);
+                let tool = DrillTool {
+                    anchor: pivot + orientation * (def.anchor - pivot),
+                    half_extents: def.half_extents,
+                    orientation,
+                };
+                let PhysicsSim { world, terrain, .. } = &mut *sim;
+                let body_ref = world.body(id).expect("phys_drill: unknown body");
+                let axis = body_ref.orientation() * (tool.orientation * FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO));
+                let center = body_ref.position() + body_ref.orientation() * tool.anchor;
+                let mut samples: Vec<(Fixed, (i64, i64, i64), MaterialId)> = world
+                    .drill_query(id, &tool, terrain)
+                    .into_iter()
+                    .map(|s| {
+                        let c = FixedVec3::new(
+                            Fixed::from_int(s.cell.0 as i32) + Fixed::HALF,
+                            Fixed::from_int(s.cell.1 as i32) + Fixed::HALF,
+                            Fixed::from_int(s.cell.2 as i32) + Fixed::HALF,
+                        );
+                        ((c - center).dot(axis), s.cell, s.material)
+                    })
+                    .collect();
+                samples.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+                let mut spent = Fixed::ZERO;
+                let mut cells: Vec<(i64, i64, i64)> = Vec::new();
+                let mut mats: Vec<MaterialId> = Vec::new();
+                for (_, cell, mat) in samples {
+                    let hardness = world.material(mat).hardness;
+                    if spent + hardness > budget {
+                        break;
+                    }
+                    spent += hardness;
+                    cells.push(cell);
+                    mats.push(mat);
+                }
+                if !cells.is_empty() {
+                    let mut lo = cells[0];
+                    let mut hi = cells[0];
+                    for &(x, y, z) in &cells {
+                        terrain.clear(x, y, z);
+                        lo = (lo.0.min(x), lo.1.min(y), lo.2.min(z));
+                        hi = (hi.0.max(x), hi.1.max(y), hi.2.max(z));
+                    }
+                    world.notify_terrain_edit(lo, hi);
+                    let _ = world.drill_reaction(id, &tool, &mats);
+                }
+                cells
+            };
+            // Mirror the carve to the render world-grid (and its debris
+            // puffs) outside the physics lock.
+            if let Some(b) = &b {
+                let mut bridge = b.lock().expect("bridge mutex");
+                for &(x, y, z) in &cut {
+                    bridge.voxel_clear(x, y, z);
+                }
+            }
+            cut.len() as i64
+        },
+    );
 
     // --- terrain paints, volume-routed (plan §1a) ---------------------
     // Same names and arities the bridge registered, plus a trailing
