@@ -1,12 +1,14 @@
 # monada-digger — the physics demo: drive, jump, drill
 
-Status: **in progress — D1–D3 landed** (D1: volume store,
+Status: **COMPLETE 2026-07-25 — D1–D4 landed** (D1: volume store,
 physics-in-sim, `phys_*` verbs, `digger@` golden; D2: automatic body
 mirror with full-quaternion grids, wheel cylinders, chase cam, ramp
 field + jump beat; D3: the drill — pitched `DrillTool`, the
 `phys_drill` loop, debris puffs, mountain + basement, 900-tick golden
-with a pitched descent); D4 pending. The demo that pays off
-`monada-physics` P0–P6
+with a pitched descent; D4: crystal objective + counter/bite HUD,
+material colours via `phys_material_color`, perimeter walls, a
+jump-class vault arrival, chase-yaw lerp, README demo entry). The demo
+that pays off `monada-physics` P0–P6
 (docs/plans/voxel-physics.md): a drill-nosed vehicle in a voxel arena —
 drive it, jump it off ramps, and bore tunnels through walls and floor,
 pitching the drill up and down to slope the tunnel. Neutral naming
@@ -261,6 +263,14 @@ tuning.
 *Accept:* the demo is completable start-to-crystals; `digger@`
 re-blessed once with the final map; README paragraph + demo entry in
 the workspace table.
+*(D4 note: crystals are entities with radius-4 `phys_pos` sensors
+(ramp-top / chamber / vault; the golden route collects two of three);
+the HUD is the status line — counter + per-tick bite. The colours pass
+landed as `phys_material_color` (render-side material→colour binding
+for the body mirror) plus `atan2` for the script layer (host_api 10);
+feel: chase-yaw lerp (1/6 per tick, atan2-wrapped), the vault floor
+raised to a jump-class ~3-cell drop so the arrival stays on wheels,
+and perimeter walls replacing the endless off-edge fall.)*
 
 ## §4 Determinism
 

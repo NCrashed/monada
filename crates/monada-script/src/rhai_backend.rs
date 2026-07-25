@@ -253,9 +253,12 @@ pub(crate) fn register_number_types(engine: &mut Engine) {
     engine.register_fn(">=", |a: Fixed, b: Fixed| a >= b);
 
     // Fixed-point trig + the turn constant (the circle scenario's only
-    // transcendentals).
+    // transcendentals). atan2 joined for angle work a map can't fake
+    // with sin/cos alone — wrapping an angle difference for a smooth
+    // chase-cam lerp (digger D4).
     engine.register_fn("sin", trig::sin);
     engine.register_fn("cos", trig::cos);
+    engine.register_fn("atan2", trig::atan2);
     engine.register_fn("tau", || trig::TAU);
     engine.register_fn("pi", || trig::PI);
     engine.register_fn("pi_2", || trig::FRAC_PI_2);

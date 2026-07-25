@@ -45,6 +45,7 @@ script (there are no float literals).
 | `to_debug(a)` | a debug string for a fixed-point value (diagnostics) |
 | `sin(a)` | fixed-point sine of `a` radians |
 | `cos(a)` | fixed-point cosine of `a` radians |
+| `atan2(y, x)` | fixed-point full-quadrant arctangent, radians (angle work: headings, wrapping an angle difference) |
 | `tau()` | the constant τ (2π) |
 | `pi()` | the constant π |
 | `pi_2()` | the constant π/2 |
@@ -189,6 +190,7 @@ vocabulary stays the same, with deeper semantics:
 | `phys_pitch(body)` | the body's attitude pitch, radians, positive = nose up (subtract from a commanded drill pitch for a gravity-stable bore) |
 | `phys_drill_tool(body, ax, ay, az, hx, hy, hz)` | register the body's drill box: anchor at SHAPE coords `(ax, ay, az)`, half-extents `(hx, hy, hz)`; call once at spawn |
 | `phys_drill(body, pitch, budget)` | one drill sweep: overlapped terrain cells cut front-to-back while their summed hardness fits `budget`, carved from the store (with the physics wake/reaction and the render mirror), `pitch` tilts the nose (radians, positive = up); returns voxels cut |
+| `phys_material_color(mat, color)` | bind a render colour (`0xBB_RR_GG_BB`) to a material id — the automatic body mirror paints that material's voxels with it (render-side; the engine palette is the fallback) |
 
 All `phys_*` state — bodies, wheels, materials, the volume terrain — folds
 into the desync hash alongside the entity world; treat it exactly like

@@ -62,8 +62,8 @@ pub use volume::VolumeStore;
 /// first `phys_material` call is its ground material and must precede
 /// terrain contact (the material-0 contract on `register_physics_api`);
 /// 9 = `phys_drill_tool`/`phys_drill` (the one-call drill loop, digger
-/// D3).
-pub const HOST_API_VERSION: u32 = 9;
+/// D3); 10 = `atan2` + `phys_material_color` (digger D4 polish).
+pub const HOST_API_VERSION: u32 = 10;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -355,6 +355,15 @@ pub trait HostBridge: Send {
     /// something" — live data, remembered styling); `loudness` in `0..1`. Pairs
     /// with `play_sound`. Render-side only; the default ignores it.
     fn vision_hear(&mut self, _x: i64, _y: i64, _z: i64, _loudness: Fixed) {}
+
+    /// Bind a render colour (roxlap-packed `0xBB_RR_GG_BB`, like
+    /// [`voxel_fill`](Self::voxel_fill)) to a physics material id: the
+    /// automatic body mirror blits shape voxels of that material in this
+    /// colour instead of the engine's fallback palette. Render-side only
+    /// — material ids and their PHYSICAL properties stay hashed sim
+    /// state; this is their look. Call at init, before bodies first
+    /// appear on screen. The default ignores it.
+    fn phys_material_color(&mut self, _mat: i64, _color: i64) {}
 
     /// Queue a sim command for the host to route through the command path
     /// after the current trigger returns (never applied re-entrantly).

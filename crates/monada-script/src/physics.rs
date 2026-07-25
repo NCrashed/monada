@@ -416,6 +416,18 @@ pub(crate) fn register_physics_api(
         },
     );
 
+    // The body mirror's material→colour binding (D4): a straight bridge
+    // forward, registered here rather than in the bridge API because
+    // only volume maps have mirrored bodies to colour.
+    let b = bridge.cloned();
+    engine.register_fn("phys_material_color", move |mat: i64, color: i64| {
+        if let Some(b) = &b {
+            b.lock()
+                .expect("bridge mutex")
+                .phys_material_color(mat, color);
+        }
+    });
+
     // --- terrain paints, volume-routed (plan §1a) ---------------------
     // Same names and arities the bridge registered, plus a trailing
     // material-id overload; these registrations shadow the bridge-only

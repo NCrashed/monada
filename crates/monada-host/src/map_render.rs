@@ -645,6 +645,10 @@ pub struct MapRender {
     /// actor-ful volume map would need the dynamic-layer route instead;
     /// no such map exists yet.
     puff_models: BTreeMap<u32, usize>,
+    /// Map-declared physics-material colours (`phys_material_color`,
+    /// D4): the body mirror consults this before the engine's fallback
+    /// palette. Render-side only.
+    phys_colors: BTreeMap<u16, u32>,
     /// Grids spawned by the script via `grid_spawn` (e.g. the ship demo's hull).
     /// The script's i64 handle is the index into this Vec; never reordered or
     /// compacted so handles stay stable. Painted by `voxel_fill_in`. Kept
@@ -861,6 +865,7 @@ impl MapRender {
             body_mirrors: BTreeMap::new(),
             puffs: Vec::new(),
             puff_models: BTreeMap::new(),
+            phys_colors: BTreeMap::new(),
             grids: Vec::new(),
             vision_grid: None,
             sprites,
@@ -1304,7 +1309,12 @@ impl MapRender {
                             for x in 0..dx {
                                 if let Some(mat) = shape.get(x, y, z) {
                                     let c = IVec3::new(x, y, z);
-                                    grid.set_rect(c, c, Some(VoxColor(material_color(mat.0))));
+                                    let color = self
+                                        .phys_colors
+                                        .get(&mat.0)
+                                        .copied()
+                                        .unwrap_or_else(|| material_color(mat.0));
+                                    grid.set_rect(c, c, Some(VoxColor(color)));
                                 }
                             }
                         }
@@ -2608,6 +2618,10 @@ impl HostBridge for MapRender {
     fn vision_hear(&mut self, x: i64, y: i64, z: i64, loudness: Fixed) {
         self.vision_hears
             .push((x, y, z, loudness.to_f64().clamp(0.0, 1.0) as f32));
+    }
+
+    fn phys_material_color(&mut self, mat: i64, color: i64) {
+        self.phys_colors.insert(mat as u16, color as u32);
     }
 
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3) {

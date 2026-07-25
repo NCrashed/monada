@@ -53,22 +53,33 @@ fn init() {
 
     // The bedrock underlayer (plan §2, D3): eight cells of solid ground
     // under the whole apron — what a pitched-down drill descends
-    // through. The BASEMENT vault (x 128..156, y 110..126, z −6..−1 — a
-    // tall undercroft below the mountain whose ceiling is the apron slab
+    // through. The BASEMENT vault (x 128..156, y 110..126, z −4..−1 — a
+    // long undercroft below the mountain whose ceiling is the apron slab
     // itself, so a ~14° effective bore from the crystal chamber breaks
     // through within the chamber-to-vault run; steeper shafts cut slots
     // too low to enter and shallower ones never get down — the D3 trace
-    // lessons) hides inside it, built paint-AROUND — five boxes, the
-    // cavity itself never painted — so init carves nothing (no puff
-    // storm, no wasted rehash).
+    // lessons; the floor sits a jump-class ~3-cell drop below the
+    // breach, so the arrival lands on wheels, D4) hides inside it,
+    // built paint-AROUND — five boxes, the cavity itself never painted —
+    // so init carves nothing (no puff storm, no wasted rehash).
     voxel_fill(0, 0, -8, 127, 159, -1, 0x8060_5850);
     voxel_fill(157, 0, -8, 159, 159, -1, 0x8060_5850);
     voxel_fill(128, 0, -8, 156, 109, -1, 0x8060_5850);
     voxel_fill(128, 127, -8, 156, 159, -1, 0x8060_5850);
-    voxel_fill(128, 110, -8, 156, 126, -7, 0x8060_5850);
-    // Crystal pillars on the vault floor.
-    voxel_fill(134, 114, -6, 134, 114, -5, 0x80a0_e8f0, crystal);
-    voxel_fill(150, 120, -6, 150, 119, -5, 0x80a0_e8f0, crystal);
+    voxel_fill(128, 110, -8, 156, 126, -5, 0x8060_5850);
+    // Crystal pillars on the vault floor (decoration; the OBJECTIVE
+    // crystals are entities, below).
+    voxel_fill(134, 114, -4, 134, 114, -3, 0x80a0_e8f0, crystal);
+    voxel_fill(143, 121, -4, 143, 120, -3, 0x80a0_e8f0, crystal);
+
+    // Perimeter walls (D4): the sandbox has no kill-plane, and driving
+    // off the world edge was an endless fall — now it's a wall. The
+    // east side is walled only OUTSIDE the mountain's footprint.
+    voxel_fill(0, 0, 2, 1, 159, 4, 0x80a0_6040);
+    voxel_fill(0, 0, 2, 159, 1, 4, 0x80a0_6040);
+    voxel_fill(0, 158, 2, 159, 159, 4, 0x80a0_6040);
+    voxel_fill(158, 0, 2, 159, 95, 4, 0x80a0_6040);
+    voxel_fill(158, 146, 2, 159, 157, 4, 0x80a0_6040);
 
     // The ramp field (plan §2, D2): stepped ramps of increasing grade.
     // The JUMP ramp sits on the golden's straight-run path (y 114..126,
@@ -146,7 +157,7 @@ fn init() {
 
     let arch = archetype([
         "body", "w_fl", "w_fr", "w_rl", "w_rr", "drive", "steer", "brake", "drill", "pitch_in",
-        "pitch", "score", "cam",
+        "pitch", "score", "cam", "bite", "cyaw", "found",
     ]);
     let v = entity_create(arch);
     entity_set_field(v, "body", fixed(body));
@@ -155,6 +166,29 @@ fn init() {
     entity_set_field(v, "w_rl", fixed(w_rl));
     entity_set_field(v, "w_rr", fixed(w_rr));
     entity_set_position(v, phys_pos(body));
+
+    // The objective (plan §2): three crystals — ramp-top, chamber,
+    // vault — as ENTITIES with proximity sensors on phys_pos (the tick
+    // below), not terrain. No fail state: a sandbox with a finish line.
+    let cr = archetype(["got"]);
+    let cm = model_box(10, 10, 14, 0x80a0_e8f0);
+    let c1 = entity_create(cr);
+    entity_set_position(c1, vec3(fixed(124), fixed(37), fixed(6)));
+    entity_set_model(c1, cm);
+    let c2 = entity_create(cr);
+    entity_set_position(c2, vec3(fixed(137), fixed(119), fixed(3)));
+    entity_set_model(c2, cm);
+    let c3 = entity_create(cr);
+    entity_set_position(c3, vec3(fixed(150), fixed(118), fixed(-4)));
+    entity_set_model(c3, cm);
+
+    // The body mirror wears the map's own material colours (D4) —
+    // matching the terrain paints, so carved faces and hull agree.
+    phys_material_color(ground, 0x8060_5850);
+    phys_material_color(hull, 0x8078_8290);
+    phys_material_color(sandstone, 0x80c8_a860);
+    phys_material_color(granite, 0x8060_6a74);
+    phys_material_color(crystal, 0x80a0_e8f0);
 
     // Render-side dressing (no-ops headless). The engine's automatic body
     // mirror draws the vehicle (plan §1d) — the map never hand-mirrors it.
@@ -246,13 +280,38 @@ fn tick(dt) {
     // keeps the cut on the commanded grade even when ramming the face
     // noses the body up — otherwise the tunnel ratchets upward and the
     // vehicle beaches on its own steps (the D3 trace lesson #2).
+    // `bite` = this tick's cut count, the plan §3 D4 feedback: the HUD
+    // reads it as a crude "how hard is this rock" indicator.
+    let bite = 0;
     if entity_field(v, "drill") > fixed(0) {
-        let cut = phys_drill(body, pitch - phys_pitch(body), fixed(80));
-        entity_set_field(v, "score", entity_field(v, "score") + fixed(cut));
+        bite = phys_drill(body, pitch - phys_pitch(body), fixed(80));
+        entity_set_field(v, "score", entity_field(v, "score") + fixed(bite));
     }
+    entity_set_field(v, "bite", fixed(bite));
     // Mirror the pose onto the entity (sensors and game logic read the
     // World, never the physics handle).
-    entity_set_position(v, phys_pos(body));
+    let p0 = phys_pos(body);
+    entity_set_position(v, p0);
+    // Crystal sensors (plan §2): touch = proximity of the body's CoM,
+    // radius 4. A touched crystal despawns (its sprite with it) and the
+    // persistent counter lives on the vehicle entity ("found") — all
+    // state in the World, decision A2.
+    let found = entity_field(v, "found");
+    for c in entities_of(1) {
+        let cp = entity_position(c);
+        let dx = cp.x - p0.x;
+        let dy = cp.y - p0.y;
+        let dz = cp.z - p0.z;
+        if dx * dx + dy * dy + dz * dz < fixed(16) {
+            entity_despawn(c);
+            // A bright pickup chime (synthesised — no asset).
+            play_blip(3, 900, 150, ratio(1, 2));
+            found += fixed(1);
+        }
+    }
+    entity_set_field(v, "found", found);
+    // HUD line: objective counter + the drill bite (render-side).
+    status("crystals " + to_int(found) + "/3 | bite " + bite + " | W/S drive, A/D steer, Space brake, E drill, R/F pitch");
     // Chase cam (plan §1e): yaw tracks the heading (world yaw = pi −
     // sim yaw under the render mirror), pitch fixed. On the surface the
     // focus aims AHEAD so the road fills the view; underground / while
@@ -262,7 +321,14 @@ fn tick(dt) {
     // distance is untouched). camera_dist is set ONLY when the mode
     // flips: the host's mouse-wheel zoom adjusts the same distance, and
     // hammering it every tick would eat the player's zoom.
+    // Smooth the chase yaw (D4): wrap the difference through atan2 so
+    // ±pi never snaps, then close a sixth of the gap per tick. The
+    // smoothed value is World state ("cyaw") — deterministic, like the
+    // pose mirror; the camera it drives stays render-side.
     let yaw = phys_yaw(body);
+    let cyaw = entity_field(v, "cyaw");
+    cyaw += atan2(sin(yaw - cyaw), cos(yaw - cyaw)) / fixed(6);
+    entity_set_field(v, "cyaw", cyaw);
     let p = phys_pos(body);
     let underground = entity_field(v, "drill") > fixed(0) || p.z < fixed(3);
     let mode = if underground { fixed(1) } else { fixed(0) };
@@ -276,14 +342,14 @@ fn tick(dt) {
     }
     if underground {
         camera_focus(p);
-        camera_angle(pi() - yaw, ratio(1, 5));
+        camera_angle(pi() - cyaw, ratio(1, 5));
     } else {
         camera_focus(vec3(
-            p.x + cos(yaw) * fixed(10),
-            p.y + sin(yaw) * fixed(10),
+            p.x + cos(cyaw) * fixed(10),
+            p.y + sin(cyaw) * fixed(10),
             p.z,
         ));
-        camera_angle(pi() - yaw, ratio(1, 2));
+        camera_angle(pi() - cyaw, ratio(1, 2));
     }
 }
 

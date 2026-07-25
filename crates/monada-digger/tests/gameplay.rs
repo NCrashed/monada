@@ -93,7 +93,7 @@ fn manifest_declares_the_volume_map() {
     let map = monada_format::Map::read(&bytes).expect("read digger map");
     assert_eq!(map.manifest.terrain, monada_format::Terrain::Volume);
     assert_eq!(map.manifest.players, 1);
-    assert_eq!(map.manifest.host_api, 9);
+    assert_eq!(map.manifest.host_api, 10);
     // The oracle's digger golden hardcodes the tick rate (it embeds the
     // script via include_str!, not the archive) — this pin is what
     // catches a manifest sim_hz change before the golden silently runs
@@ -102,6 +102,7 @@ fn manifest_declares_the_volume_map() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one linear story, one assert per beat
 fn the_vehicle_jumps_bores_the_mountain_and_descends_to_the_vault() {
     let (mut driver, phys) = fresh();
     {
@@ -181,6 +182,26 @@ fn the_vehicle_jumps_bores_the_mountain_and_descends_to_the_vault() {
     assert!(
         score > Fixed::from_int(400),
         "the bore should cut hundreds of voxels, scored {score:?}"
+    );
+    // The objective (D4): the golden's route touches the chamber crystal
+    // (during the bore) and the vault crystal (at the arrival) — two of
+    // three collected, their entities despawned; the ramp-top crystal
+    // stays for the human.
+    let found = driver
+        .world()
+        .lock()
+        .expect("world mutex")
+        .field(entity, "found")
+        .expect("found field");
+    assert_eq!(
+        found,
+        Fixed::from_int(2),
+        "the golden route collects the chamber + vault crystals"
+    );
+    assert_eq!(
+        driver.world().lock().expect("world mutex").all_entities().len(),
+        2,
+        "vehicle + the one uncollected crystal remain"
     );
     // Braked to (nearly) a stop in the vault.
     let vel = {
