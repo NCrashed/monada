@@ -415,6 +415,26 @@ fn place_in(
     }
 }
 
+/// What a `grid_spawn` grid turns about. `GridTransform` rotates about the
+/// grid's own local origin, which for a hull painted from sim cell `(0,0,0)`
+/// up is a CORNER — and `GROUND_Z` above the deck at that, so a hull orienting
+/// about it swings through an arc wider than the hull. A pivot fixes a chosen
+/// grid-local point instead: rotating about `pivot` is rotating about the local
+/// origin and then translating so `pivot` lands back where it started, i.e.
+/// `origin = spawn_origin + (I − R)·pivot` — see [`MapRender::apply_grid_pose`].
+/// Both fields are world-space, and both are needed because `transform.origin`
+/// becomes derived state once a pivot is in play.
+#[derive(Clone, Copy)]
+struct GridAnchor {
+    /// The origin `grid_spawn` placed the grid at — its pose at zero rotation,
+    /// and what `transform.origin` equals whenever the rotation is identity.
+    spawn_origin: DVec3,
+    /// The point held still, in the grid's LOCAL frame (`world_of` of the sim
+    /// cell the map named). `ZERO` — the grid's local origin — until the map
+    /// calls `grid_pivot`, so an unset pivot is exactly the old behaviour.
+    pivot: DVec3,
+}
+
 /// The world-frame pose of a physics body's render grid. The grid's voxels
 /// are the body's SHAPE cells 1:1 (`voxel_world_size = SCALE`), so the pose
 /// must compose the shape→body rebase (the derived CoM, physics P3's
@@ -836,6 +856,11 @@ pub struct MapRender {
     /// separate from [`world_grid`](Self::world_grid) so terrain/fog never attach
     /// to a decorative grid.
     grids: Vec<GridId>,
+    /// Per-`grids` rotation anchor, keyed by `GridId`. Once `grid_orient` can
+    /// turn a grid about a pivot, `transform.origin` is DERIVED (spawn origin
+    /// composed with the pivot swing), so the spawn origin can no longer be
+    /// read back out of it — it lives here instead. See [`GridAnchor`].
+    grid_anchors: BTreeMap<GridId, GridAnchor>,
     /// The grid a map NAMED on `vision_observer`'s 2-arg overload (`host_api` 7):
     /// fog + `deck_clip` ride it instead of the world grid, for a map whose
     /// observer entity is not itself bound to a grid. A fallback only — an
@@ -1059,6 +1084,7 @@ impl MapRender {
             body_decos: BTreeMap::new(),
             drill_vis: BTreeMap::new(),
             grids: Vec::new(),
+            grid_anchors: BTreeMap::new(),
             named_vision_grid: None,
             sprites,
             model_refs: Vec::new(),
@@ -1481,6 +1507,24 @@ impl MapRender {
         place_in(&self.entity_grid, &self.scene, self.volume, e, p)
     }
 
+    /// Write a `grid_spawn` grid's pose: `rotation`, plus the origin that keeps
+    /// its [`GridAnchor::pivot`] where it was. `origin + R·pivot` is where the
+    /// pivot lands, and we want it at `spawn_origin + pivot` (where zero
+    /// rotation puts it), so `origin = spawn_origin + (I − R)·pivot`. With the
+    /// default `ZERO` pivot this collapses to `origin = spawn_origin` — the
+    /// grid turns about its local origin exactly as it did before pivots
+    /// existed. The single writer for both `grid_orient` and `grid_pivot`, so
+    /// the two can be called in either order and land the same pose.
+    fn apply_grid_pose(&mut self, id: GridId, rotation: DQuat) {
+        let Some(anchor) = self.grid_anchors.get(&id).copied() else {
+            return;
+        };
+        if let Some(g) = self.scene.grid_mut(id) {
+            g.transform.rotation = rotation;
+            g.transform.origin = anchor.spawn_origin + anchor.pivot - rotation * anchor.pivot;
+        }
+    }
+
     /// A bound entity's billboard facing turned by its grid's *full* 3D
     /// rotation: the billboard's world facing direction rotated by the grid
     /// quaternion, then re-projected onto the horizontal plane. Honest for any
@@ -1878,11 +1922,7 @@ impl MapRender {
         let z_clip = grid.z_clip;
         let solid = |p: DVec3| {
             let l = (p - origin) / vws;
-            let v = IVec3::new(
-                l.x.floor() as i32,
-                l.y.floor() as i32,
-                l.z.floor() as i32,
-            );
+            let v = IVec3::new(l.x.floor() as i32, l.y.floor() as i32, l.z.floor() as i32);
             !z_clip.is_some_and(|zc| v.z < zc) && grid.voxel_solid(v)
         };
         if !solid(eye) {
@@ -2598,16 +2638,13 @@ impl HostBridge for MapRender {
         // glam requires a unit axis, so normalise here and drop a zero-length one
         // (leaves the pose unchanged). The whole pose is replaced each call, so
         // the script drives orientation from hashed sim state and never
-        // accumulates float drift render-side. Origin is untouched — the grid
-        // still turns about its local origin (pivot compensation is a later
-        // concern).
+        // accumulates float drift render-side. The turn is about the grid's
+        // `grid_pivot` point — its local origin unless the map named one.
         let a = DVec3::new(-axis.x.to_f64(), axis.y.to_f64(), -axis.z.to_f64());
         let Some(unit) = a.try_normalize() else {
             return;
         };
-        if let Some(g) = self.scene.grid_mut(id) {
-            g.transform.rotation = DQuat::from_axis_angle(unit, angle.to_f64());
-        }
+        self.apply_grid_pose(id, DQuat::from_axis_angle(unit, angle.to_f64()));
     }
 
     fn entity_set_anim(&mut self, entity: i64, state: &str) {
@@ -2708,7 +2745,37 @@ impl HostBridge for MapRender {
         let id = self.scene.add_grid(GridTransform::at(pos));
         let idx = self.grids.len() as i64;
         self.grids.push(id);
+        // A fresh grid turns about its own local origin until the map names a
+        // pivot — the pose `GridTransform::at` just set.
+        self.grid_anchors.insert(
+            id,
+            GridAnchor {
+                spawn_origin: pos,
+                pivot: DVec3::ZERO,
+            },
+        );
         idx
+    }
+
+    fn grid_pivot(&mut self, grid: i64, point: FixedVec3) {
+        let Some(&id) = usize::try_from(grid).ok().and_then(|i| self.grids.get(i)) else {
+            return;
+        };
+        // `point` is a grid-local SIM cell, the frame `voxel_fill_in` paints in,
+        // so map it with `world_of` — the same transform that put those voxels
+        // where they are. (Not `entity_world_of`: the pivot is a point on the
+        // HULL, and `voxel_fill_in` keeps the column z convention on every map.)
+        let Some(anchor) = self.grid_anchors.get_mut(&id) else {
+            return;
+        };
+        anchor.pivot = world_of(point);
+        // Re-derive the origin so a pivot named after the grid is already
+        // turned lands the same as one named before it.
+        let rotation = self
+            .scene
+            .grid(id)
+            .map_or(DQuat::IDENTITY, |g| g.transform.rotation);
+        self.apply_grid_pose(id, rotation);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3674,6 +3741,86 @@ mod tests {
         assert!(
             (after - turned).length() < 1e-9,
             "a zero-length axis is ignored — pose unchanged"
+        );
+    }
+
+    /// `grid_pivot` names the grid-local point `grid_orient` turns about, so a
+    /// hull turns IN PLACE: the pivot cell holds still under any rotation while
+    /// the rest of the hull sweeps around it. Without it a grid turns about its
+    /// local origin, which for a hull painted up from cell `(0,0,0)` is a corner
+    /// (and `GROUND_Z` above the deck), so the whole ship swings through an arc
+    /// wider than itself. Proven through `place`, the seat everything renders
+    /// from — and the two call orders must land the same pose.
+    #[test]
+    fn grid_pivot_holds_its_cell_still_under_rotation() {
+        let quarter = Fixed::from_f64(std::f64::consts::FRAC_PI_2);
+        let sim_z = FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::from_int(1));
+        // The hull's middle cell, and a corner cell that must move.
+        let mid = FixedVec3::new(Fixed::from_f64(9.5), Fixed::from_f64(9.5), Fixed::ZERO);
+        let corner = FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ZERO);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let at_mid = world.spawn(arch);
+        let at_corner = world.spawn(arch);
+
+        // Pivot first, then orient.
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn(4, 3, 0);
+        r.entity_set_grid(at_mid.0 as i64, g);
+        r.entity_set_grid(at_corner.0 as i64, g);
+        let seated_mid = r.place(at_mid, mid);
+        let seated_corner = r.place(at_corner, corner);
+        r.grid_pivot(g, mid);
+        r.grid_orient(g, sim_z, quarter);
+
+        assert!(
+            (r.place(at_mid, mid) - seated_mid).length() < 1e-9,
+            "the pivot cell must not move when the hull turns about it"
+        );
+        let swung = r.place(at_corner, corner);
+        assert!(
+            (swung - seated_corner).length() > 1.0,
+            "the rest of the hull still sweeps around the pivot"
+        );
+        // Turning in place: the pivot is the centre of the swing, so a corner
+        // keeps its distance from it.
+        let radius = |p: DVec3| (p - seated_mid).length();
+        assert!(
+            (radius(swung) - radius(seated_corner)).abs() < 1e-9,
+            "a turn about the pivot preserves every cell's distance to it"
+        );
+
+        // Orient first, then pivot — the same pose.
+        let mut r2 = MapRender::new(BTreeMap::new(), None, &[]);
+        let g2 = r2.grid_spawn(4, 3, 0);
+        r2.entity_set_grid(at_corner.0 as i64, g2);
+        r2.grid_orient(g2, sim_z, quarter);
+        r2.grid_pivot(g2, mid);
+        assert!(
+            (r2.place(at_corner, corner) - swung).length() < 1e-9,
+            "grid_pivot and grid_orient must commute"
+        );
+    }
+
+    /// A grid nobody pivots keeps turning about its own local origin — the
+    /// pre-`grid_pivot` behaviour, so the verb is purely opt-in and a map
+    /// written before it is unaffected.
+    #[test]
+    fn an_unpivoted_grid_still_turns_about_its_local_origin() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn(4, 3, 0);
+        let gid = r.grids[g as usize];
+        let spawned = r.scene.grid(gid).expect("grid").transform.origin;
+        r.grid_orient(
+            g,
+            FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::from_int(1)),
+            Fixed::from_f64(std::f64::consts::FRAC_PI_2),
+        );
+        assert_eq!(
+            r.scene.grid(gid).expect("grid").transform.origin,
+            spawned,
+            "with no pivot the origin is untouched — the grid turns about it"
         );
     }
 

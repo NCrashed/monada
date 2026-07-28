@@ -243,13 +243,19 @@ fn init() {
     // ride the crew's own grid. grid_spawn returns a render-side handle; (0,0,0)
     // places it at the world voxel origin. As the first (only) grid_spawn its
     // handle is `hull_grid()` (== 0); a `< 0` return means a host without
-    // multi-grid support (host_api < 7) — the manifest requires 7, so bail loud.
+    // multi-grid support (host_api < 7) — the manifest requires 13, so bail
+    // loud rather than paint the hull into nothing.
     let ship_grid = grid_spawn(0, 0, 0);
     if ship_grid < 0 {
-        status("this host lacks multi-grid support (host_api 7 required)");
+        status("this host lacks multi-grid support (host_api 7+ required)");
         return;
     }
     build_hull(ship_grid);
+    // Turn the hull about its own middle, not the corner its local origin sits
+    // on. `build_hull` spans sim cells 0..=19 in x/y and 0..=52 in z, so the
+    // centre is (9.5, 9.5, 26) — without this the whole ship swings through an
+    // arc wider than itself every time `step_ship` re-orients it.
+    grid_pivot(ship_grid, vec3(ratio(19, 2), ratio(19, 2), fixed(26)));
 
     // The animated billboard crew actor (id 0 by call order). The 3rd arg is
     // the rendered height in cells; the host scales the art to it. Reuses the
@@ -388,9 +394,8 @@ fn tick() {
 /// (an entity field), so every peer turns the hull identically; the crew ride it
 /// via grid-local coords, so this is real shared motion, not decoration. The
 /// hull tumbles slowly about a TILTED axis (not pure yaw) to exercise full 3D
-/// orientation — pitch/roll, not merely a flat spin. It turns about the grid's
-/// local origin (a hull corner) for now; spinning about the hull centre is a
-/// later pivot-compensation pass (see docs/plans/ship-visibility.md).
+/// orientation — pitch/roll, not merely a flat spin. It turns in place about
+/// the hull's centre, the pivot `init` names via `grid_pivot`.
 fn step_ship() {
     // The ship is a known singleton (`ship_entity()`), so skip the per-tick
     // `entities_of(1)` Array allocation and address it directly.

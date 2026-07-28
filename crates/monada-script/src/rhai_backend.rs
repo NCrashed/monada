@@ -530,6 +530,11 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     );
 
     let b = bridge.clone();
+    engine.register_fn("grid_pivot", move |grid: i64, point: FixedVec3| {
+        b.lock().expect("bridge mutex").grid_pivot(grid, point);
+    });
+
+    let b = bridge.clone();
     engine.register_fn("voxel_set", move |x: i64, y: i64, z: i64, color: i64| {
         b.lock().expect("bridge mutex").voxel_set(x, y, z, color);
     });

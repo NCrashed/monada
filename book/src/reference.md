@@ -209,6 +209,7 @@ Spawn and paint additional voxel grids independent of the world grid (e.g. ships
 | `grid_spawn(wx, wy, wz)` | spawn a grid offset by sim cell `(wx, wy, wz)` from the world origin (`(0,0,0)` = world origin); returns a grid handle (i64), or `< 0` if unsupported |
 | `voxel_fill_in(grid, x0, y0, z0, x1, y1, z1, color)` | fill a solid box of voxels in the given dynamic grid (same coords as `voxel_fill`) |
 | `grid_orient(grid, axis, angle)` | turn a grid to a 3D orientation: `angle` radians about the (auto-normalised) `axis` in SIM coordinates (+z up), replacing its rotation — entities riding it and its fog/`deck_clip` follow; a zero-length axis is ignored |
+| `grid_pivot(grid, point)` | the grid-local sim-cell `point` `grid_orient` turns the grid about — a hull spanning cells `0..=19` turns in place about `9.5`, not about the corner its local origin sits on. Sticky; call once at spawn |
 | `vision_observer(entity, grid)` | fog/`deck_clip` overload that rides the given dynamic grid instead of the world grid (movable hull). Names the fog's grid only — it does not bind the entity, and an observer bound via `entity_set_grid` fogs the grid it rides instead |
 
 ## Camera, lighting, sky — *presentation*

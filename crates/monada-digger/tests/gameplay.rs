@@ -96,10 +96,11 @@ fn manifest_declares_the_volume_map() {
     let map = monada_format::Map::read(&bytes).expect("read digger map");
     assert_eq!(map.manifest.terrain, monada_format::Terrain::Volume);
     assert_eq!(map.manifest.players, 1);
-    // The map's verbs are the v11 set, but the declaration must sit inside
-    // the host's supported range — v12 broke the grid semantics and took
-    // the floor with it, so a stale 11 here is a map the host refuses.
-    assert_eq!(map.manifest.host_api, 12);
+    // The map declares the verb set it actually calls — the v11 feel-polish
+    // surface (`body_deco_box` / `drill_indicator` / `phys_solid`) — not
+    // whatever the host's newest version happens to be. Growth is additive,
+    // so a newer host still runs it.
+    assert_eq!(map.manifest.host_api, 11);
     assert!(monada_script::check_host_api(map.manifest.host_api).is_ok());
     // The oracle's digger golden hardcodes the tick rate (it embeds the
     // script via include_str!, not the archive) — this pin is what

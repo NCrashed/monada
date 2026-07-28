@@ -73,8 +73,10 @@ pub use volume::VolumeStore;
 /// `entity_set_grid` alone, so a grid a map never binds an entity to
 /// and never orients stays the static offset v7 gave it, and every verb
 /// that reads one — fog, the deck cutaway, picking, the camera —
-/// composes against an identity transform exactly as before.
-pub const HOST_API_VERSION: u32 = 12;
+/// composes against an identity transform exactly as before; 13 =
+/// `grid_pivot` (the grid-local point `grid_orient` turns about, so a
+/// hull turns in place instead of swinging about a corner).
+pub const HOST_API_VERSION: u32 = 13;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -284,8 +286,20 @@ pub trait HostBridge: Send {
     /// up, the frame every other verb takes), right-handed about it — the host
     /// maps it through the same sim→world transform the grid's voxels are
     /// painted with. Render-side, not hashed; a zero-length axis or out-of-range
-    /// handle is ignored. The default ignores it.
+    /// handle is ignored. The turn is about the grid's
+    /// [`grid_pivot`](Self::grid_pivot) point. The default ignores it.
     fn grid_orient(&mut self, _grid: i64, _axis: FixedVec3, _angle: Fixed) {}
+
+    /// Name the grid-local point [`grid_orient`](Self::grid_orient) turns a
+    /// `grid_spawn` grid about, in SIM cells — the frame `voxel_fill_in` paints
+    /// in, so a hull spanning cells `0..=19` turns about its middle at `9.5`.
+    /// Without this a grid turns about its own local origin, which for a hull
+    /// painted up from cell `(0,0,0)` is a CORNER: the whole hull then swings
+    /// through an arc wider than itself instead of turning in place. Sticky —
+    /// call it once at spawn; both orders work (`grid_pivot` before or after
+    /// `grid_orient` land the same pose). Render-side, not hashed; an
+    /// out-of-range handle is ignored. The default ignores it.
+    fn grid_pivot(&mut self, _grid: i64, _point: FixedVec3) {}
 
     /// Mark `entity` as the locally selected one (a highlight overlay),
     /// REPLACING any current selection (single-select semantics — the
