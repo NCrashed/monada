@@ -277,6 +277,15 @@ pub(crate) fn register_physics_api(
             })
     });
 
+    // A deterministic solidity read of the VOLUME store (the sim-side
+    // "is there a roof over me" predicate — the column voxel_solid reads
+    // an empty world on volume maps by design). Hashed-state read, safe
+    // to steer hashed tick decisions AND render verbs alike.
+    let p = phys.clone();
+    engine.register_fn("phys_solid", move |x: i64, y: i64, z: i64| -> bool {
+        lock(&p).terrain.get(x, y, z).is_some()
+    });
+
     // The body's attitude pitch (radians; positive = nose above the
     // horizon). The D3 drill companion to phys_yaw: a map that wants a
     // gravity-stable bore subtracts this from its commanded drill pitch,
@@ -428,6 +437,32 @@ pub(crate) fn register_physics_api(
                 .phys_material_color(mat, color);
         }
     });
+
+    // Body-mirror trim + the drill telltale (feel polish): straight
+    // bridge forwards, volume-map-only for the same reason.
+    let b = bridge.cloned();
+    engine.register_fn(
+        "body_deco_box",
+        move |body: i64, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64| {
+            if let Some(b) = &b {
+                b.lock()
+                    .expect("bridge mutex")
+                    .body_deco_box(body, x0, y0, z0, x1, y1, z1, color);
+            }
+        },
+    );
+
+    let b = bridge.cloned();
+    engine.register_fn(
+        "drill_indicator",
+        move |body: i64, pitch: Fixed, spinning: bool| {
+            if let Some(b) = &b {
+                b.lock()
+                    .expect("bridge mutex")
+                    .drill_indicator(body, pitch, spinning);
+            }
+        },
+    );
 
     // --- terrain paints, volume-routed (plan §1a) ---------------------
     // Same names and arities the bridge registered, plus a trailing

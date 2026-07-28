@@ -185,6 +185,7 @@ vocabulary stays the same, with deeper semantics:
 | `phys_wheel(body, ax, ay, az, rest, radius, k, c, mu)` | attach a wheel at SHAPE coords `(ax, ay, az)`; returns a wheel id |
 | `phys_wheel_input(body, wheel, steer, drive, brake)` | set a wheel's retained steering/drive/brake |
 | `phys_impulse(body, jx, jy, jz)` | apply an impulse at the CoM |
+| `phys_solid(x, y, z)` | whether the VOLUME store holds a solid cell there — the deterministic terrain read on volume maps (the column `voxel_solid` reads an empty world here by design) |
 | `phys_pos(body)` | the body's CoM position (ZERO for an unknown id) |
 | `phys_vel(body)` | the body's linear velocity (ZERO for an unknown id) |
 | `phys_yaw(body)` | the body's heading about +z, radians (the chase-cam read) |
@@ -192,6 +193,8 @@ vocabulary stays the same, with deeper semantics:
 | `phys_drill_tool(body, ax, ay, az, hx, hy, hz)` | register the body's drill box: anchor at SHAPE coords `(ax, ay, az)`, half-extents `(hx, hy, hz)`; call once at spawn |
 | `phys_drill(body, pitch, budget)` | one drill sweep: overlapped terrain cells cut front-to-back while their summed hardness fits `budget`, carved from the store (with the physics wake/reaction and the render mirror), `pitch` tilts the nose (radians, positive = up); returns voxels cut |
 | `phys_material_color(mat, color)` | bind a render colour (`0xBB_RR_GG_BB`) to a material id — the automatic body mirror paints that material's voxels with it (render-side; the engine palette is the fallback) |
+| `body_deco_box(body, x0, y0, z0, x1, y1, z1, color)` | render-only trim on the body mirror, in FINE voxels (16 per cell), shape-local — skirts, fenders, a cockpit; rides the physics pose, never enters the hashed shape |
+| `drill_indicator(body, pitch, spinning)` | drive the body's drill-cone telltale: tilted by `pitch` like the bore, spinning while `spinning`; call every tick like the camera verbs |
 
 All `phys_*` state — bodies, wheels, materials, the volume terrain — folds
 into the desync hash alongside the entity world; treat it exactly like

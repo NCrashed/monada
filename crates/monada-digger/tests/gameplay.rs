@@ -72,11 +72,14 @@ fn schedule(t: u64) -> Command {
         30..=35 => input(1, 1, 0, 0, 0),
         36..=41 => input(1, -1, 0, 0, 0),
         42..=209 => input(1, 0, 0, 0, 0),
-        210..=259 => input(0, 0, 0, 1, 0),
-        260..=474 => input(1, 0, 0, 0, 1),
-        475..=489 => input(1, 0, -1, 0, 1),
-        490..=599 => input(1, 0, 0, 0, 1),
+        // Reverse torque brakes; coast settles the nose at the face.
+        210..=242 => input(-1, 0, 0, 0, 0),
+        243..=259 => input(0, 0, 0, 0, 0),
+        260..=434 => input(1, 0, 0, 0, 1),
+        435..=449 => input(1, 0, -1, 0, 1),
+        450..=599 => input(1, 0, 0, 0, 1),
         600..=819 => input(1, 0, 0, 0, 0),
+        // Park on the handbrake.
         _ => input(0, 0, 0, 1, 0),
     }
 }
@@ -93,10 +96,10 @@ fn manifest_declares_the_volume_map() {
     let map = monada_format::Map::read(&bytes).expect("read digger map");
     assert_eq!(map.manifest.terrain, monada_format::Terrain::Volume);
     assert_eq!(map.manifest.players, 1);
-    // The map's verbs are the v10 set, but the declaration must sit inside
-    // the host's supported range — v11 broke the grid semantics and took
-    // the floor with it, so a stale 10 here is a map the host refuses.
-    assert_eq!(map.manifest.host_api, 11);
+    // The map's verbs are the v11 set, but the declaration must sit inside
+    // the host's supported range — v12 broke the grid semantics and took
+    // the floor with it, so a stale 11 here is a map the host refuses.
+    assert_eq!(map.manifest.host_api, 12);
     assert!(monada_script::check_host_api(map.manifest.host_api).is_ok());
     // The oracle's digger golden hardcodes the tick rate (it embeds the
     // script via include_str!, not the archive) — this pin is what
@@ -336,9 +339,10 @@ fn a_pitched_up_bore_climbs_back_toward_the_surface() {
         let cmd = match t {
             0..=29 => input(0, 0, 0, 0, 0),
             30..=209 => input(1, 0, 0, 0, 0),
-            210..=259 => input(0, 0, 0, 1, 0),
-            260..=474 => input(1, 0, 0, 0, 1),
-            475..=489 => input(1, 0, 1, 0, 1),
+            210..=242 => input(-1, 0, 0, 0, 0),
+            243..=259 => input(0, 0, 0, 0, 0),
+            260..=434 => input(1, 0, 0, 0, 1),
+            435..=449 => input(1, 0, 1, 0, 1),
             _ => input(1, 0, 0, 0, 1),
         };
         driver.apply_command(P0, &cmd);

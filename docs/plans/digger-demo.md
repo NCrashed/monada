@@ -276,6 +276,23 @@ field, so any camera-feel tweak re-blesses the golden; if that ever
 grates, the lerp can migrate to the local layer, which sees the
 mirrored pose in the World even though it cannot see physics.)*
 
+*(Feel-polish pass, post-D4 (host_api 11): `body_deco_box` — render
+trim in fine voxels riding the body mirror (fenders over the floating
+wheels, side skirts, a glass cockpit) — and `drill_indicator` — a
+spinning cone mirroring the registered tool, tilted with the commanded
+bore. One camera mode replaces the surface/underground switch: a
+fixed chase frame while the WORLD adapts through a follow-the-vehicle
+`deck_clip` (isotropic conversion added for volume maps), so a tunnel
+shows itself, its walls, and the face ahead. Drive torque 40 with S as
+natural reverse-brake and Space as a rear-axle handbrake (250).
+Volume maps light through roxlap's dynamic `LightRig` — the map's
+`set_light` sun over the baked ambient/AO channel with stylized
+shadows — instead of flat side-shades. The underlayer deepened to 20
+drillable cells over an UNBREAKABLE core (hardness 100000 ≫ any
+budget: the front-to-back policy stops dead, so the world has a floor
+you cannot drill out of). Golden re-tuned for the new drive: reverse
+braking beat, earlier descent pitch.)*
+
 ## §4 Determinism
 
 `digger@` joins the oracle at the standard checkpoints, driven like

@@ -62,23 +62,26 @@ pub use volume::VolumeStore;
 /// first `phys_material` call is its ground material and must precede
 /// terrain contact (the material-0 contract on `register_physics_api`);
 /// 9 = `phys_drill_tool`/`phys_drill` (the one-call drill loop, digger
-/// D3); 10 = `atan2` + `phys_material_color` (digger D4 polish);
-/// 11 = `entity_set_grid` + `grid_orient` (entities ride a grid's
-/// transform, which can turn to any 3D orientation — crew stay put on a
-/// moving/rotating hull) — **breaking**: a grid is no longer a static
-/// offset, so every verb that reads one moved with it. `grid_spawn`
-/// grids now carry a rotation (`grid_orient`) that the fog twin, the
-/// deck cutaway and picking all compose against, and a grid-riding
-/// entity's `position` is read as grid-local rather than world. Maps
-/// written against the v7..v10 grid surface are refused rather than
-/// silently re-framed, so `HOST_API_OLDEST` catches up here.
-pub const HOST_API_VERSION: u32 = 11;
+/// D3); 10 = `atan2` + `phys_material_color` (digger D4 polish); 11 =
+/// `body_deco_box` + `drill_indicator` (digger feel polish — render
+/// trim and the spinning-bore telltale on the body mirror) +
+/// `phys_solid` (the volume-store solidity read — the "roof over me"
+/// predicate); 12 = `entity_set_grid` + `grid_orient` (entities ride a
+/// grid's transform, which can turn to any 3D orientation — crew stay
+/// put on a moving/rotating hull) — **breaking**: a grid is no longer a
+/// static offset, so every verb that reads one moved with it.
+/// `grid_spawn` grids now carry a rotation (`grid_orient`) that the fog
+/// twin, the deck cutaway and picking all compose against, and a
+/// grid-riding entity's `position` is read as grid-local rather than
+/// world. Maps written against the v7..v11 grid surface are refused
+/// rather than silently re-framed, so `HOST_API_OLDEST` catches up here.
+pub const HOST_API_VERSION: u32 = 12;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
-/// breaking change catches it up — as v11 did (see the history above),
-/// so this build runs v11 maps only.
-pub const HOST_API_OLDEST: u32 = 11;
+/// breaking change catches it up — as v12 did (see the history above),
+/// so this build runs v12 maps only.
+pub const HOST_API_OLDEST: u32 = 12;
 
 /// Check a map's declared `host_api` requirement against this build's
 /// supported range. The one gate every map-loading path shares.
@@ -224,7 +227,7 @@ pub trait HostBridge: Send {
     /// never disagree about which hull they are on. Render-side, not hashed; an
     /// out-of-range handle is ignored, and a binding is dropped when its entity
     /// despawns. Unbound entities render in the global frame as before
-    /// (`host_api` 11).
+    /// (`host_api` 12).
     fn entity_set_grid(&mut self, _entity: i64, _grid: i64) {}
     /// Paint a solid voxel box into the world grid, in sim coordinates.
     /// (Two corners + colour reads naturally as separate args for scripts.)
@@ -411,6 +414,33 @@ pub trait HostBridge: Send {
     /// only on that body's next re-blit (a carve — none exists until
     /// `phys_carve` lands). The default ignores it.
     fn phys_material_color(&mut self, _mat: i64, _color: i64) {}
+
+    /// Paint a render-only decoration box into a body's mirror, in FINE
+    /// voxels (16 per sim cell), SHAPE-local coordinates — the box may
+    /// extend beyond the shape (skirts under the hull, a cockpit on
+    /// top, fenders over the wheels). Rides the physics pose
+    /// automatically; never enters the hashed shape. Call at init. The
+    /// default ignores it.
+    #[allow(clippy::too_many_arguments)]
+    fn body_deco_box(
+        &mut self,
+        _body: i64,
+        _x0: i64,
+        _y0: i64,
+        _z0: i64,
+        _x1: i64,
+        _y1: i64,
+        _z1: i64,
+        _color: i64,
+    ) {
+    }
+
+    /// Drive a body's drill indicator: a cone mirroring the registered
+    /// drill tool, tilted by `pitch` (radians, the same value the map
+    /// passes to `phys_drill`) and spinning while `spinning` — the
+    /// "drilling is working" telltale. Call every tick, like the camera
+    /// verbs. Render-side only; the default ignores it.
+    fn drill_indicator(&mut self, _body: i64, _pitch: Fixed, _spinning: bool) {}
 
     /// Queue a sim command for the host to route through the command path
     /// after the current trigger returns (never applied re-entrantly).
