@@ -32,13 +32,14 @@ fn crew_speed() { ratio(16, 100) } // sim cells / tick (30 Hz)
 // pure functions can't see top-level consts. Fog + deck_clip ride this grid.
 fn hull_grid() { 0 }
 
-// The ship entity's id. It is the FIRST entity `init` creates (before any crew),
-// and ids are allocated strictly increasing from 0, so it is deterministically 0
-// — written as a literal the same way `hull_grid()` is, since the rhai backend
-// rewinds its scope between ticks (a real per-tick cache can't persist) and pure
-// functions can't read a top-level const. Lets `step_ship` skip an `entities_of`
-// Array allocation every tick for this singleton.
-fn ship_entity() { 0 }
+// The ship entity: the only member of archetype SHIP (1), created by `init`.
+// Looked up rather than written as a literal, unlike `hull_grid()`: which id
+// `entity_create` hands out is an ordering detail of `init`, and id 0 is also
+// the engine's conventional "no target" for `Command::target` — pinning the
+// singleton there invites a collision the day a verb starts reading `target`.
+// One small Array per tick is a fair price for an invariant the engine keeps
+// instead of a comment.
+fn ship_entity() { entities_of(1)[0] }
 
 fn absf(x) { if x < fixed(0) { -x } else { x } }
 
@@ -397,8 +398,6 @@ fn tick() {
 /// orientation — pitch/roll, not merely a flat spin. It turns in place about
 /// the hull's centre, the pivot `init` names via `grid_pivot`.
 fn step_ship() {
-    // The ship is a known singleton (`ship_entity()`), so skip the per-tick
-    // `entities_of(1)` Array allocation and address it directly.
     let ship = ship_entity();
     let spin = entity_field(ship, "spin") + ratio(2, 100); // rad / tick (30 Hz)
     // Wrap so the fixed-point angle never grows without bound.

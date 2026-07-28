@@ -1393,6 +1393,15 @@ impl MapRender {
     /// thresholds, or a change to any of them lands on a grid that never draws.
     /// Authoring / sim state (the flags, streaming, water, bake lights) is
     /// deliberately NOT mirrored, exactly as `TwinMirror` leaves it.
+    ///
+    /// **Retire this with the roxlap bump.** Replicating a private struct is a
+    /// standing hazard — a field added to `TwinMirror` upstream diverges here
+    /// silently — so it was fixed at the source instead: post-0.31 roxlap runs
+    /// the mirror on every `sync`, with the quiet-frame early-out gating only
+    /// the chunk copies (which is all it was ever meant to skip). The moment
+    /// this crate's roxlap pin carries that, delete this method and its call
+    /// site; `deck_clip_reaches_the_twin_on_a_quiet_frame` then regresses
+    /// roxlap's own behaviour and must stay green through the removal.
     fn mirror_twin(&mut self, real: GridId, twin: GridId) {
         let Some(m) = self.scene.grid(real).map(|g| {
             (

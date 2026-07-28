@@ -348,6 +348,13 @@ pub trait HostBridge: Send {
     /// Aim the camera at an entity's `point` (sim coordinates), composed through
     /// the grid the entity rides — so following a crew member on a moving or
     /// rotating hull tracks its true world seat, not the un-transformed cell.
+    ///
+    /// `point` looks redundant next to `entity` — it is what the map would get
+    /// from `entity_position(entity)` — but a bridge is a RENDER-side sink with
+    /// no handle on the sim world, so it cannot read the position itself; the
+    /// entity is here only to name whose grid to compose through. That also
+    /// leaves the door open for aiming somewhere else in the entity's frame (a
+    /// point ahead of the crew, a turret mount) without a second verb.
     /// Render-side only; the default no-ops (headless bridges have no camera).
     fn camera_focus_entity(&mut self, _entity: i64, _point: FixedVec3) {}
     /// Orient the camera: `yaw`/`pitch` in radians — the orbit angles the
