@@ -1664,8 +1664,58 @@ impl MapRender {
                     }
                 }
             }
+            self.unbury_eye(&mut cam, center);
         }
         cam
+    }
+
+    /// Second camera-collision pass: dig the EYE itself out of terrain.
+    /// The focus→eye march above stops at its FIRST hit, and when that
+    /// hit is one of the vehicle's own mirror grids (the ray passes
+    /// backward through the hull) the wall behind the vehicle is never
+    /// seen — so a digger breaking out of a mountain face leaves the eye
+    /// inside the face it just exited, and with open sky above the
+    /// cockpit there is no roof-detect deck clip to cut that rock away.
+    /// Sample the volume grid's voxels from the eye toward the focus and
+    /// step past the whole solid run (a raycast can't do this: born in
+    /// rock, it hits at t≈0). Deck-clipped voxels (`z < z_clip`) render
+    /// as air, so sitting inside them is fine and skipping them keeps
+    /// the underground camera steady. Render-side only, like the pull.
+    fn unbury_eye(&self, cam: &mut Camera, center: DVec3) {
+        let Some(grid) = self.world_grid.and_then(|id| self.scene.grid(id)) else {
+            return;
+        };
+        let eye = DVec3::from_array(cam.pos);
+        let toward = center - eye;
+        let len = toward.length();
+        if len <= 1e-6 {
+            return;
+        }
+        let origin = grid.transform.origin;
+        let vws = grid.transform.voxel_world_size;
+        let z_clip = grid.z_clip;
+        let solid = |p: DVec3| {
+            let l = (p - origin) / vws;
+            let v = IVec3::new(
+                l.x.floor() as i32,
+                l.y.floor() as i32,
+                l.z.floor() as i32,
+            );
+            !z_clip.is_some_and(|zc| v.z < zc) && grid.voxel_solid(v)
+        };
+        if !solid(eye) {
+            return;
+        }
+        // Half-voxel steps toward the focus until the eye clears rock,
+        // never closer than the 24-unit floor the pull pass also keeps;
+        // +12 margin so the near plane doesn't kiss the exit face.
+        let dirn = toward / len;
+        let max_t = (len - 24.0).max(0.0);
+        let mut t = 0.0;
+        while t < max_t && solid(eye + dirn * t) {
+            t += vws * 0.5;
+        }
+        cam.pos = (eye + dirn * (t + 12.0).min(max_t)).to_array();
     }
 
     /// Whether `id` is one of the physics-mirror grids (hull, deco,

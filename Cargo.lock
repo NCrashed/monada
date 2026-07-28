@@ -2684,7 +2684,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2916,18 +2916,18 @@ dependencies = [
 
 [[package]]
 name = "roxlap-cavegen"
-version = "0.30.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0338dea3b63fbafd1d5c17c700e3f2f807e1319f0b36c5ae7e2f33de396ba9e0"
+checksum = "7b9f1ed2da3311546621af9b6efaecd21a4acdcd8b09a15230e517be0d1446b7"
 dependencies = [
  "roxlap-formats",
 ]
 
 [[package]]
 name = "roxlap-core"
-version = "0.30.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "124e1dcb63da3869fc73f3c583a645458de3b1d8ea28e18df00d66904781c511"
+checksum = "3fd95637b9c9ff2c406b82bffd2e3f9e635446b9bafb39b81ae278716c84f3e2"
 dependencies = [
  "rayon",
  "roxlap-formats",
@@ -2935,9 +2935,9 @@ dependencies = [
 
 [[package]]
 name = "roxlap-formats"
-version = "0.30.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33d96b3a923cde02626d6884c6c2a745ffb064cee98eb59329fe51bc2b927e9e"
+checksum = "753e5dfcf1b6ec6471e9fb2261cca33b88b0ef8ee214abc0cae1cf0f7028abf2"
 dependencies = [
  "gif 0.13.3",
  "miniz_oxide",
@@ -2945,9 +2945,9 @@ dependencies = [
 
 [[package]]
 name = "roxlap-gpu"
-version = "0.30.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80be5d60a0c34f44f58c39cecf80a2bb1a49b80a7de4908b0eba93b50158f0c8"
+checksum = "c1a3fee57b74edbcf007de5657c45e538d72b393ea2c28c92982ded1b3f6f0be"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2963,9 +2963,9 @@ dependencies = [
 
 [[package]]
 name = "roxlap-render"
-version = "0.30.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9b6d57d6c8f91665162b82aeeedd0efa3eea69960e36c01e8bdbbe704088360"
+checksum = "a367da24d2e00e20430697b32b307f2181b250491a0a30feebce5e3d2a1e1fd0"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2984,9 +2984,9 @@ dependencies = [
 
 [[package]]
 name = "roxlap-scene"
-version = "0.30.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5301f7e68431b0729555a9e31c400dc67e9d71f331039a24a5f738da8f47032"
+checksum = "b11f263d96695c668a0d04b4b353ef3e0af355ab496a0b00a87741983a892666"
 dependencies = [
  "bincode",
  "crossbeam-channel",
@@ -3030,7 +3030,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4338,15 +4338,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]

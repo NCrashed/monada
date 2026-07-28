@@ -62,7 +62,9 @@ use roxlap_core::Camera;
 // egui itself comes through roxlap-render's re-export so the version
 // matches the one `paint_egui` rasterises with.
 use roxlap_formats::Rgb;
-use roxlap_render::{egui, BackendPreference, FrameParams, RenderOptions, SceneRenderer};
+use roxlap_render::{
+    egui, BackendPreference, FrameParams, RenderOptions, RenderResolution, SceneRenderer,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent};
@@ -686,6 +688,9 @@ impl SceneKind {
     }
 }
 
+// Four independent on/off latches (debug HUD, one-shot dump, rebind modal,
+// profiler) — not a state machine in disguise.
+#[allow(clippy::struct_excessive_bools)]
 struct App {
     // Field order matters for GPU teardown: the renderer owns the wgpu
     // surface/device, which must drop *before* the window it was created from.
@@ -749,6 +754,10 @@ struct App {
     debug_hud: bool,
     /// One-shot coordinate dump (set `MONADA_DEBUG=1`).
     debug_done: bool,
+    /// Slow-frame breakdown to stderr (set `MONADA_PROFILE=1`): any frame
+    /// over 20 ms logs how the time split across sim / scene-sync / render /
+    /// present, to localize stutter without a profiler attached.
+    profile: bool,
 }
 
 impl App {
@@ -814,6 +823,7 @@ impl App {
             epoch: Instant::now(),
             debug_hud: false,
             debug_done: false,
+            profile: std::env::var_os("MONADA_PROFILE").is_some_and(|v| !v.is_empty() && v != "0"),
         }
     }
 
@@ -1636,6 +1646,10 @@ impl App {
         }
     }
 
+    // Long by nature: the whole frame protocol (input → sim → sync → HUD →
+    // render → present) lives here so the profile section timers can bracket
+    // each stage in one place.
+    #[allow(clippy::too_many_lines)]
     fn redraw(&mut self) {
         let Some(window) = self.window.clone() else {
             return;
@@ -1652,6 +1666,8 @@ impl App {
             // Exponential smoothing so the HUD reading is steady.
             self.fps = self.fps.mul_add(0.9, (1.0 / dt) as f32 * 0.1);
         }
+
+        let t0 = Instant::now();
 
         // Refresh the mouse-aim direction, then advance. A real-time map paces
         // its `tick` on the wall clock with the per-tick input snapshot; a
@@ -1688,9 +1704,11 @@ impl App {
 
         // Play whatever sound the map queued in this frame's tick(s).
         self.play_pending_audio(now);
+        let t_sim = t0.elapsed();
 
         self.drive_camera(dt);
         self.update_scene(alpha, dt);
+        let t_sync = t0.elapsed().saturating_sub(t_sim);
 
         if !self.debug_done && std::env::var_os("MONADA_DEBUG").is_some() {
             self.debug_done = true;
@@ -1716,7 +1734,9 @@ impl App {
         }
 
         // Build the HUD before borrowing the renderer / `self.lighting`.
+        let t_pre_hud = t0.elapsed();
         let hud = self.run_hud(&window);
+        let t_hud = t0.elapsed().saturating_sub(t_pre_hud);
 
         let mut settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
         // The ray march (and its derived GPU step budget) is bounded by
@@ -1743,6 +1763,7 @@ impl App {
         // finished by exactly one of paint_egui (HUD) or present. The map
         // scene lives behind a Mutex, so set + render under one lock.
         let debug = self.debug_hud;
+        let t_pre_render = t0.elapsed();
         match &mut self.scene {
             SceneKind::Circle(scene) => {
                 renderer.set_sprites(scene.sprites());
@@ -1758,9 +1779,29 @@ impl App {
                     .render_into(renderer, &camera, &settings, SKY_COLOR, dt, debug);
             }
         }
+        let t_render = t0.elapsed().saturating_sub(t_pre_render);
+        let t_pre_present = t0.elapsed();
         match hud {
             Some((jobs, textures, ppp)) => renderer.paint_egui(&jobs, &textures, ppp),
             None => renderer.present(),
+        }
+
+        if self.profile {
+            let total = t0.elapsed();
+            if total.as_secs_f64() > 0.020 {
+                let t_present = total.saturating_sub(t_pre_present);
+                eprintln!(
+                    "[profile] t={:7.2}s frame {:6.1}ms — sim {:6.1} sync {:6.1} \
+                     hud {:6.1} render {:6.1} present {:6.1}",
+                    self.epoch.elapsed().as_secs_f64(),
+                    total.as_secs_f64() * 1e3,
+                    t_sim.as_secs_f64() * 1e3,
+                    t_sync.as_secs_f64() * 1e3,
+                    t_hud.as_secs_f64() * 1e3,
+                    t_render.as_secs_f64() * 1e3,
+                    t_present.as_secs_f64() * 1e3,
+                );
+            }
         }
 
         window.request_redraw();
@@ -1805,10 +1846,17 @@ impl ApplicationHandler for App {
         // roxlap-render is now decoupled from winit: it takes any
         // raw-window-handle provider plus an explicit initial size.
         let size = window.inner_size();
-        let renderer = SceneRenderer::new(window.clone(), (size.width, size.height), &opts);
-        match renderer.adapter_info() {
-            Some(info) => eprintln!("monada-host: GPU backend — {info}"),
-            None => eprintln!("monada-host: CPU backend"),
+        let mut renderer = SceneRenderer::new(window.clone(), (size.width, size.height), &opts);
+        if let Some(info) = renderer.adapter_info() {
+            eprintln!("monada-host: GPU backend — {info}");
+        } else {
+            // The software marcher's cost scales with the pixel count and
+            // it can't hold the window's native resolution on the volume
+            // maps. Half the logical resolution (a quarter of the rays,
+            // nearest-upscaled to the window, RP.0) keeps it playable;
+            // the GPU backend stays at native.
+            renderer.set_render_resolution(RenderResolution::Scale(0.5));
+            eprintln!("monada-host: CPU backend (rendering at half resolution)");
         }
 
         // egui input bridge bound to this window (clipboard / display
