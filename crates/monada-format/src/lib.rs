@@ -195,10 +195,7 @@ impl ActionDecl {
 }
 
 /// Serde default for [`Manifest::host_api`]: maps that predate the
-/// declaration require v1. The format keeps that reading — parsing is
-/// not gating — but v1 now sits below the host's supported floor
-/// (`monada_script::HOST_API_OLDEST`), so such a map is refused at load
-/// with a version message rather than a missing-field one.
+/// declaration require v1.
 fn default_host_api() -> u32 {
     1
 }

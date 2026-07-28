@@ -66,22 +66,20 @@ pub use volume::VolumeStore;
 /// `body_deco_box` + `drill_indicator` (digger feel polish — render
 /// trim and the spinning-bore telltale on the body mirror) +
 /// `phys_solid` (the volume-store solidity read — the "roof over me"
-/// predicate); 12 = `entity_set_grid` + `grid_orient` (entities ride a
-/// grid's transform, which can turn to any 3D orientation — crew stay
-/// put on a moving/rotating hull) — **breaking**: a grid is no longer a
-/// static offset, so every verb that reads one moved with it.
-/// `grid_spawn` grids now carry a rotation (`grid_orient`) that the fog
-/// twin, the deck cutaway and picking all compose against, and a
-/// grid-riding entity's `position` is read as grid-local rather than
-/// world. Maps written against the v7..v11 grid surface are refused
-/// rather than silently re-framed, so `HOST_API_OLDEST` catches up here.
+/// predicate); 12 = `entity_set_grid` + `grid_orient` +
+/// `camera_focus_entity` (entities ride a grid's transform, which can
+/// turn to any 3D orientation — crew stay put on a moving/rotating
+/// hull). Additive, deliberately: riding a grid is opt-in through
+/// `entity_set_grid` alone, so a grid a map never binds an entity to
+/// and never orients stays the static offset v7 gave it, and every verb
+/// that reads one — fog, the deck cutaway, picking, the camera —
+/// composes against an identity transform exactly as before.
 pub const HOST_API_VERSION: u32 = 12;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
-/// breaking change catches it up — as v12 did (see the history above),
-/// so this build runs v12 maps only.
-pub const HOST_API_OLDEST: u32 = 12;
+/// breaking change catches it up.
+pub const HOST_API_OLDEST: u32 = 1;
 
 /// Check a map's declared `host_api` requirement against this build's
 /// supported range. The one gate every map-loading path shares.

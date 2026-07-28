@@ -5,10 +5,8 @@ name = "monada digger demo"
 engine_version = "0.0.1"
 # Requires the phys_* sim-physics verbs + volume terrain routing, the
 # D3 drill loop, the D4 polish surface (atan2, phys_material_color),
-# and the feel-polish surface (body_deco_box, drill_indicator) — the v11
-# set. Declared 12 because v12 broke the grid semantics and carried the
-# supported floor with it: 12 is the oldest a host runs.
-host_api = 12
+# and the feel-polish surface (body_deco_box, drill_indicator).
+host_api = 11
 # Single-player sandbox. The lockstep command stream keeps the LAN door
 # open (plan §6), but the demo ships solo.
 players = 1

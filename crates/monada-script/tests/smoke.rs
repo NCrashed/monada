@@ -157,12 +157,9 @@ fn host_api_gate_accepts_only_the_supported_range() {
     use monada_script::{check_host_api, HOST_API_OLDEST, HOST_API_VERSION};
     assert!(check_host_api(HOST_API_OLDEST).is_ok());
     assert!(check_host_api(HOST_API_VERSION).is_ok());
-    // v0 never existed, and the future is by definition unsupported.
-    assert!(check_host_api(0).is_err());
-    // The floor is a real refusal, not decoration: the version below it
-    // is a map written against a surface this build broke (v12 re-framed
-    // grids), so it is turned away instead of silently re-interpreted.
-    let too_old = check_host_api(HOST_API_OLDEST - 1).unwrap_err();
+    // v0 never existed (it is `HOST_API_OLDEST - 1` while the floor
+    // trails at 1), and the future is by definition unsupported.
+    let too_old = check_host_api(0).unwrap_err();
     assert!(too_old.contains("requires host API"), "{too_old}");
     let too_new = check_host_api(HOST_API_VERSION + 1).unwrap_err();
     assert!(too_new.contains("requires host API"), "{too_new}");
