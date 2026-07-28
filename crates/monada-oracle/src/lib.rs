@@ -1069,6 +1069,36 @@ mod tests {
         assert!(ran > 0, "no book examples under {}", root.display());
     }
 
+    /// Every map shipped in this repo — the demo crates' `map/` dirs and
+    /// the book's examples — declares a `host_api` the shipped host still
+    /// runs. A breaking bump moves `HOST_API_OLDEST`, which silently
+    /// strands every manifest left behind; this is what turns that into a
+    /// failing test instead of a map that refuses to load at runtime.
+    #[test]
+    fn shipped_manifests_declare_a_supported_host_api() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        for parent in [root.join("crates"), root.join("book/examples")] {
+            for entry in std::fs::read_dir(&parent).expect("crate / example dir") {
+                let path = entry.expect("dir entry").path();
+                // A demo crate keeps its map under `map/`; a book example
+                // IS the map directory.
+                for candidate in [path.join("map"), path] {
+                    if candidate.join("manifest.toml").exists() {
+                        dirs.push(candidate);
+                    }
+                }
+            }
+        }
+        assert!(dirs.len() >= 6, "found only {} shipped maps", dirs.len());
+        for dir in dirs {
+            let bytes = pack_dir(&dir).unwrap_or_else(|e| panic!("pack {}: {e}", dir.display()));
+            let map = Map::read(&bytes).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+            monada_script::check_host_api(map.manifest.host_api)
+                .unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+        }
+    }
+
     /// A script-facing name: lowercase / digits / underscore, leading
     /// alpha or `_`. Excludes the operator overloads (`+`, `<`, …) that
     /// are also registered via `register_fn` but aren't documented API.

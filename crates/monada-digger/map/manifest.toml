@@ -4,8 +4,10 @@
 name = "monada digger demo"
 engine_version = "0.0.1"
 # Requires the phys_* sim-physics verbs + volume terrain routing, the
-# D3 drill loop, and the D4 polish surface (atan2, phys_material_color).
-host_api = 10
+# D3 drill loop, and the D4 polish surface (atan2, phys_material_color)
+# — the v10 set. Declared 11 because v11 broke the grid semantics and
+# carried the supported floor with it: 11 is the oldest a host runs.
+host_api = 11
 # Single-player sandbox. The lockstep command stream keeps the LAN door
 # open (plan §6), but the demo ships solo.
 players = 1

@@ -93,7 +93,11 @@ fn manifest_declares_the_volume_map() {
     let map = monada_format::Map::read(&bytes).expect("read digger map");
     assert_eq!(map.manifest.terrain, monada_format::Terrain::Volume);
     assert_eq!(map.manifest.players, 1);
-    assert_eq!(map.manifest.host_api, 10);
+    // The map's verbs are the v10 set, but the declaration must sit inside
+    // the host's supported range — v11 broke the grid semantics and took
+    // the floor with it, so a stale 10 here is a map the host refuses.
+    assert_eq!(map.manifest.host_api, 11);
+    assert!(monada_script::check_host_api(map.manifest.host_api).is_ok());
     // The oracle's digger golden hardcodes the tick rate (it embeds the
     // script via include_str!, not the archive) — this pin is what
     // catches a manifest sim_hz change before the golden silently runs
@@ -199,7 +203,12 @@ fn the_vehicle_jumps_bores_the_mountain_and_descends_to_the_vault() {
         "the golden route collects the chamber + vault crystals"
     );
     assert_eq!(
-        driver.world().lock().expect("world mutex").all_entities().len(),
+        driver
+            .world()
+            .lock()
+            .expect("world mutex")
+            .all_entities()
+            .len(),
         2,
         "vehicle + the one uncollected crystal remain"
     );

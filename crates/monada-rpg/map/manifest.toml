@@ -4,8 +4,10 @@
 name = "monada RPG demo"
 engine_version = "0.0.1"
 # Script-API version required (monada-script HOST_API_VERSION); a host
-# outside its supported range refuses the map instead of desyncing.
-host_api = 1
+# outside its supported range refuses the map instead of desyncing. The
+# map only calls the v1 surface, but v11 broke the grid semantics and
+# carried the supported floor with it, so 11 is the oldest a host runs.
+host_api = 11
 # Co-op: two players over LAN lockstep (--listen host = player 0, --connect
 # client = player 1). No PvP — both fight the waves together, sharing one
 # deterministic sim. Runs solo too (no flag = hotseat player 0).

@@ -65,13 +65,20 @@ pub use volume::VolumeStore;
 /// D3); 10 = `atan2` + `phys_material_color` (digger D4 polish);
 /// 11 = `entity_set_grid` + `grid_orient` (entities ride a grid's
 /// transform, which can turn to any 3D orientation — crew stay put on a
-/// moving/rotating hull).
+/// moving/rotating hull) — **breaking**: a grid is no longer a static
+/// offset, so every verb that reads one moved with it. `grid_spawn`
+/// grids now carry a rotation (`grid_orient`) that the fog twin, the
+/// deck cutaway and picking all compose against, and a grid-riding
+/// entity's `position` is read as grid-local rather than world. Maps
+/// written against the v7..v10 grid surface are refused rather than
+/// silently re-framed, so `HOST_API_OLDEST` catches up here.
 pub const HOST_API_VERSION: u32 = 11;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
-/// breaking change catches it up.
-pub const HOST_API_OLDEST: u32 = 1;
+/// breaking change catches it up — as v11 did (see the history above),
+/// so this build runs v11 maps only.
+pub const HOST_API_OLDEST: u32 = 11;
 
 /// Check a map's declared `host_api` requirement against this build's
 /// supported range. The one gate every map-loading path shares.
