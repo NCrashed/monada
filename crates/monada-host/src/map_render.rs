@@ -392,6 +392,36 @@ fn volume_world_of(p: DVec3) -> DVec3 {
     DVec3::new(-SCALE * p.x, SCALE * p.y, GROUND_Z - SCALE * p.z)
 }
 
+/// [`world_of`] with a map's z convention: a volume map scales z by `SCALE`
+/// (isotropic cells — see [`MapRender::volume`]), a column map keeps the
+/// unscaled-z convention. Free function over the flag rather than a method, so
+/// a caller mutating a disjoint `MapRender` field can still use it.
+fn entity_world_of_in(volume: bool, p: FixedVec3) -> DVec3 {
+    let mut w = world_of(p);
+    if volume {
+        w.z = GROUND_Z - p.z.to_f64() * SCALE;
+    }
+    w
+}
+
+/// [`MapRender::place`] over explicitly borrowed fields: seat sim position `p`
+/// in world space, composed through the grid entity `e` rides (if any). Split
+/// out of the method so `build_instances` can compose a seat while pushing into
+/// the disjoint `sprites` field — a `&self` method would borrow all of it.
+fn place_in(
+    entity_grid: &BTreeMap<EntityId, GridId>,
+    scene: &Scene,
+    volume: bool,
+    e: EntityId,
+    p: FixedVec3,
+) -> DVec3 {
+    let local = entity_world_of_in(volume, p);
+    match entity_grid.get(&e).and_then(|&g| scene.grid(g)) {
+        Some(grid) => grid.transform.rotation * local + grid.transform.origin,
+        None => local,
+    }
+}
+
 /// The world-frame pose of a physics body's render grid. The grid's voxels
 /// are the body's SHAPE cells 1:1 (`voxel_world_size = SCALE`), so the pose
 /// must compose the shape→body rebase (the derived CoM, physics P3's
@@ -655,10 +685,12 @@ pub struct MapRender {
     /// separate from [`world_grid`](Self::world_grid) so terrain/fog never attach
     /// to a decorative grid.
     grids: Vec<GridId>,
-    /// The grid the fog of war and `deck_clip` cutaway attach to — the local
-    /// observer's hull (a `grids` entry the ship names via `vision_observer`), or
-    /// `world_grid` for the legacy single-grid maps. `None` ⇒ no fog / no clip.
-    vision_grid: Option<GridId>,
+    /// The grid a map NAMED on `vision_observer`'s 2-arg overload (`host_api` 7):
+    /// fog + `deck_clip` ride it instead of the world grid, for a map whose
+    /// observer entity is not itself bound to a grid. A fallback only — an
+    /// observer WITH an [`entity_grid`](Self::entity_grid) binding rides that
+    /// instead (see [`MapRender::vision_grid`]).
+    named_vision_grid: Option<GridId>,
     /// Sprite model registry (index 0 = highlight marker) + per-frame
     /// instances. Holds the box/kv6 models; actor models live in `actors`.
     sprites: SpriteSet,
@@ -873,7 +905,7 @@ impl MapRender {
             puff_models: BTreeMap::new(),
             phys_colors: BTreeMap::new(),
             grids: Vec::new(),
-            vision_grid: None,
+            named_vision_grid: None,
             sprites,
             model_refs: Vec::new(),
             actors: Vec::new(),
@@ -961,33 +993,51 @@ impl MapRender {
         self.volume = true;
     }
 
-    /// The grid the fog / deck cutaway attach to: the observer's hull if the map
-    /// named one via `vision_observer`, else the world grid. `None` only when a
-    /// map has neither — i.e. never painted terrain nor named a vision grid.
+    /// The grid the fog / deck cutaway attach to, DERIVED in this order:
+    ///
+    /// 1. the grid the observer entity explicitly rides (`entity_set_grid`) —
+    ///    the same binding [`place`](Self::place) seats its sprite through, so
+    ///    the cone and the crew member can never disagree about which hull they
+    ///    are on. Binding is opt-in: naming a fog grid never binds an entity.
+    /// 2. else the grid the map named on `vision_observer`'s 2-arg overload
+    ///    (`host_api` 7) — fog on a hull nobody rides.
+    /// 3. else the world grid.
+    ///
+    /// `None` only when a map has none of them — i.e. never painted terrain nor
+    /// named a vision grid.
     fn vision_grid(&self) -> Option<GridId> {
-        self.vision_grid.or(self.world_grid)
+        self.vision_entity
+            .and_then(|e| self.entity_grid.get(&e).copied())
+            .or(self.named_vision_grid)
+            .or(self.world_grid)
     }
 
-    /// Set the fog observer entity and the grid its mask rides. Rebuilds the mask
-    /// (drops it, so it re-arms next frame) whenever either changes — a new
-    /// observer or a switch to another hull grid both invalidate the old mask.
+    /// Set the fog observer entity and (optionally) the grid its mask falls back
+    /// to. Rebuilds the mask (drops it, so it re-arms next frame) whenever the
+    /// observer or the *derived* [`vision_grid`](Self::vision_grid) changes — a
+    /// new observer or a switch to another hull both invalidate the old mask.
     fn set_observer(&mut self, entity: i64, grid: Option<GridId>) {
         let e = (entity >= 0).then_some(EntityId(entity as u64));
-        if e != self.vision_entity || grid != self.vision_grid {
-            self.vision_entity = e;
-            self.vision_grid = grid;
-            self.drop_fow();
+        let before = self.vision_grid();
+        let changed_entity = e != self.vision_entity;
+        self.vision_entity = e;
+        self.named_vision_grid = grid;
+        if changed_entity || self.vision_grid() != before {
+            self.retarget_vision(before);
         }
-        // The fog mask re-bases the observer through `vision_grid` while `place`
-        // seats the same crew through `entity_grid` — if a map bound the observer
-        // to a different hull than the crew rides, the cone and the sprite would
-        // silently disagree. Derive one from the other rather than trusting the
-        // author: the observer entity always rides its own vision grid. A `None`
-        // (legacy world) grid leaves the binding to the identity world transform,
-        // which `place` already assumes for an unbound entity.
-        if let (Some(e), Some(g)) = (e, grid) {
-            self.entity_grid.insert(e, g);
+    }
+
+    /// React to the vision grid moving off `before`: drop the mask (it is
+    /// grid-local, so it means nothing on another grid) and un-clip the grid we
+    /// are leaving — `apply_deck_clip` only ever writes the CURRENT vision grid,
+    /// so a hull left behind would keep the last crew's cutaway forever.
+    fn retarget_vision(&mut self, before: Option<GridId>) {
+        if before != self.vision_grid() {
+            if let Some(grid) = before.and_then(|id| self.scene.grid_mut(id)) {
+                grid.z_clip = None;
+            }
         }
+        self.drop_fow();
     }
 
     /// Push the current deck cutaway onto the vision grid's `z_clip` (the render
@@ -1130,25 +1180,56 @@ impl MapRender {
             out
         };
         // The twin renders the hull (the real grid is `render_excluded`), but
-        // `sync` only mirrors the real grid's transform in its Phase 2 — which it
-        // SKIPS on a "quiet" frame (mask version + real mutation counter
-        // unchanged). A hull that merely ROTATES each tick bumps neither:
-        // `grid_orient` is not a voxel edit (no mutation) and turns no cell
-        // visible/dark (no mask change). So on an idle frame `sync` early-outs and
-        // the twin's transform freezes while the real grid keeps turning — the
-        // rendered hull stalls, and the crew (placed from the live real transform
-        // in `place`) visibly slides off it. Force the twin to track the real
-        // transform every frame — on both the synced and the just-re-armed twin —
-        // so the hull turns smoothly regardless of fog activity or rollback.
+        // `sync` only mirrors the real grid's render config in its Phase 2 —
+        // which it SKIPS on a "quiet" frame (mask version + real mutation counter
+        // unchanged). Two render-side verbs move that config without touching
+        // either: `grid_orient` (not a voxel edit, and it turns no cell
+        // visible/dark) and `deck_clip` (a `z_clip` write). So on an idle frame
+        // `sync` early-outs, the twin freezes, and the hull stalls mid-turn while
+        // the crew — placed from the live real transform in `place` — slides off
+        // it, or the crew climbs a deck and the cutaway never opens. Mirror the
+        // real grid every frame instead, on both the synced and the just-re-armed
+        // twin.
         if let Some(id) = out {
-            if let Some(t) = self.scene.grid(main_grid).map(|g| g.transform) {
-                if let Some(tw) = self.scene.grid_mut(id) {
-                    tw.transform = t;
-                }
-            }
+            self.mirror_twin(main_grid, id);
         }
         self.fow = Some(fow);
         out
+    }
+
+    /// Copy the real grid's render config onto its fog twin — roxlap's private
+    /// `TwinMirror`, replicated because we run on the frames its `sync` skips.
+    /// Mirror the WHOLE set it does, not just the transform: `z_clip` (the
+    /// `deck_clip` cutaway), `render_sky`, `mip_levels_override` and the LOD
+    /// thresholds, or a change to any of them lands on a grid that never draws.
+    /// Authoring / sim state (the flags, streaming, water, bake lights) is
+    /// deliberately NOT mirrored, exactly as `TwinMirror` leaves it.
+    fn mirror_twin(&mut self, real: GridId, twin: GridId) {
+        let Some(m) = self.scene.grid(real).map(|g| {
+            (
+                g.transform,
+                g.render_sky,
+                g.mip_levels_override,
+                g.lod_thresholds,
+                g.z_clip,
+            )
+        }) else {
+            return;
+        };
+        let (transform, render_sky, mip_levels_override, mut lod_thresholds, z_clip) = m;
+        // The twin must never reach the Far tier: Far blits a `BillboardCache`
+        // impostor built from the raw twin with no per-cell fog styling, so the
+        // whole known+unseen hull would flash fully visible at exactly the range
+        // where concealment matters. `r_mid = INFINITY` extends Mid to any
+        // distance — the same override `TwinMirror::apply` makes.
+        lod_thresholds.r_mid = f64::INFINITY;
+        if let Some(tw) = self.scene.grid_mut(twin) {
+            tw.transform = transform;
+            tw.render_sky = render_sky;
+            tw.mip_levels_override = mip_levels_override;
+            tw.lod_thresholds = lod_thresholds;
+            tw.z_clip = z_clip;
+        }
     }
 
     /// Apply one input edge to a declared action's live value (the host's
@@ -1223,11 +1304,7 @@ impl MapRender {
     /// the unscaled-z convention. Everything that seats render state on an
     /// entity/sim position goes through here.
     fn entity_world_of(&self, p: FixedVec3) -> DVec3 {
-        let mut w = world_of(p);
-        if self.volume {
-            w.z = GROUND_Z - p.z.to_f64() * SCALE;
-        }
-        w
+        entity_world_of_in(self.volume, p)
     }
 
     /// Seat sim position `p` in world space, composed through the grid the
@@ -1238,11 +1315,7 @@ impl MapRender {
     /// entities have an identity transform, i.e. `entity_world_of(p)`
     /// unchanged (chess/RPG/RTS).
     fn place(&self, e: EntityId, p: FixedVec3) -> DVec3 {
-        let local = self.entity_world_of(p);
-        match self.entity_grid.get(&e).and_then(|&g| self.scene.grid(g)) {
-            Some(grid) => grid.transform.rotation * local + grid.transform.origin,
-            None => local,
-        }
+        place_in(&self.entity_grid, &self.scene, self.volume, e, p)
     }
 
     /// A bound entity's billboard facing turned by its grid's *full* 3D
@@ -1341,18 +1414,27 @@ impl MapRender {
         // (killed / captured since selection) silently drop out of the set,
         // so `highlighted_all` never hands the map a stale id.
         self.highlighted.retain(|e| world.position(*e).is_some());
-        // Compose each marker's seat inline rather than snapshotting the set into
-        // a fresh `Vec` every frame: `place` borrows the whole `&self`, which
-        // would clash with pushing into `self.sprites`, but inlining its grid
-        // composition touches only the disjoint `entity_grid` / `scene` fields the
-        // borrow checker can split from `sprites`.
+        // Grid bindings are per-entity render state, so retire them with their
+        // entity: a despawned id left bound would leak (a long session churning
+        // crew grows the map forever) and could seat a LATER entity on a hull it
+        // never asked to ride if the world reuses the id. Losing the OBSERVER's
+        // binding moves the fog off that hull, so route it through the same
+        // re-target the explicit verbs use (drop the grid-local mask, un-clip the
+        // hull left behind) instead of letting the derivation shift silently.
+        let fog_grid = self.vision_grid();
+        self.entity_grid.retain(|e, _| world.position(*e).is_some());
+        if self.vision_grid() != fog_grid {
+            self.retarget_vision(fog_grid);
+        }
+        // Compose each marker's seat through `place_in` (the field-explicit twin
+        // of `place`) rather than snapshotting the set into a fresh `Vec` every
+        // frame: the `&self` method would clash with pushing into `self.sprites`,
+        // while passing the disjoint `entity_grid` / `scene` fields the borrow
+        // checker can split from `sprites` costs no allocation — and keeps the
+        // volume map's z convention the inlined `world_of` used to drop.
         for &h in &self.highlighted {
             if let Some(p) = world.position(h) {
-                let local = world_of(p);
-                let w = match self.entity_grid.get(&h).and_then(|&g| self.scene.grid(g)) {
-                    Some(grid) => grid.transform.rotation * local + grid.transform.origin,
-                    None => local,
-                };
+                let w = place_in(&self.entity_grid, &self.scene, self.volume, h, p);
                 self.sprites.instances.push(SpriteInstanceDesc {
                     // Seat the tile flush on the ground the entity stands
                     // on (its own w.z, not the z=0 board plane — a unit up
@@ -2171,10 +2253,23 @@ impl HostBridge for MapRender {
 
     fn entity_set_grid(&mut self, entity: i64, grid: i64) {
         let e = EntityId(entity as u64);
-        // Resolve the script's grid handle (index into `grids`) to a GridId;
-        // an out-of-range handle is ignored, matching `voxel_fill_in`.
-        if let Some(&id) = usize::try_from(grid).ok().and_then(|i| self.grids.get(i)) {
+        let before = self.vision_grid();
+        if grid < 0 {
+            // Unbind (`-1`, the same "no target" convention `vision_observer`
+            // uses): the entity returns to the global frame — a crew member who
+            // steps off the hull, a prop released from a platform.
+            self.entity_grid.remove(&e);
+        } else if let Some(&id) = usize::try_from(grid).ok().and_then(|i| self.grids.get(i)) {
+            // Resolve the script's grid handle (index into `grids`) to a GridId;
+            // an out-of-range handle is ignored, matching `voxel_fill_in`.
             self.entity_grid.insert(e, id);
+        } else {
+            return;
+        }
+        // Binding the OBSERVER moves the fog: `vision_grid` derives from this map,
+        // so re-arm the (grid-local) mask on the new hull.
+        if self.vision_grid() != before {
+            self.retarget_vision(before);
         }
     }
 
@@ -2183,14 +2278,28 @@ impl HostBridge for MapRender {
         let Some(&id) = usize::try_from(grid).ok().and_then(|i| self.grids.get(i)) else {
             return;
         };
-        // Build a full 3D rotation from axis + angle. The axis is in the grid's
-        // LOCAL frame (the same frame `voxel_fill_in` paints in); glam requires a
-        // unit axis, so normalise here and drop a zero-length one (leaves the
-        // pose unchanged). The whole pose is replaced each call, so the script
-        // drives orientation from hashed sim state and never accumulates float
-        // drift render-side. Origin is untouched — the grid still turns about its
-        // local origin (pivot compensation is a later concern).
-        let a = DVec3::new(axis.x.to_f64(), axis.y.to_f64(), axis.z.to_f64());
+        // Build a full 3D rotation from axis + angle. The axis arrives in SIM
+        // coordinates — the frame the script thinks in, where +z is up — but the
+        // grid transform rotates world space, so map the axis the way `world_of`
+        // maps a direction: its linear part is `diag(-SCALE, SCALE, -1)`, i.e.
+        // sim +x → world −x and sim +z (up) → world −z (down). Up to scale that
+        // is `diag(-1, 1, -1)`, itself a 180° turn about y and therefore a PROPER
+        // rotation (det +1) — so conjugating by it carries a rotation to a
+        // rotation, mapping the axis to `(−x, y, −z)` and leaving the angle
+        // alone. Without this a "quarter turn about sim +z" renders as a turn the
+        // other way. NB the x/y and z scales differ on a column map (SCALE vs 1),
+        // so only the yaw part is scale-exact there; a TILTED axis is honest as a
+        // world rotation about the mapped axis, which is what the fog twin, the
+        // crew seats and `grid_facing_yaw` all compose against. Volume maps scale
+        // z by SCALE too and are exact for any axis.
+        //
+        // glam requires a unit axis, so normalise here and drop a zero-length one
+        // (leaves the pose unchanged). The whole pose is replaced each call, so
+        // the script drives orientation from hashed sim state and never
+        // accumulates float drift render-side. Origin is untouched — the grid
+        // still turns about its local origin (pivot compensation is a later
+        // concern).
+        let a = DVec3::new(-axis.x.to_f64(), axis.y.to_f64(), -axis.z.to_f64());
         let Some(unit) = a.try_normalize() else {
             return;
         };
@@ -3225,6 +3334,154 @@ mod tests {
         );
     }
 
+    /// `grid_orient`'s axis is in SIM coordinates, so the host must map it
+    /// through the same sim→world transform the grid's voxels are painted with
+    /// (`world_of`: sim +x → world −x, sim +z up → world −z down). Ask for a
+    /// quarter-turn about sim +z and require that it carries the sim +x
+    /// DIRECTION onto the sim +y direction — right-handed in the frame the
+    /// script thinks in. Feeding the axis through un-mapped (the pre-fix bug)
+    /// turns the hull the other way, landing on sim −y.
+    #[test]
+    fn grid_orient_axis_is_in_sim_coordinates() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn(0, 0, 0);
+        let gid = r.grids[g as usize];
+        r.grid_orient(
+            g,
+            FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::from_int(1)),
+            Fixed::from_f64(std::f64::consts::FRAC_PI_2),
+        );
+        let rot = r.scene.grid(gid).expect("grid").transform.rotation;
+        // Sim directions in world, per `world_of`'s linear part (x/y scale by
+        // SCALE, so use unit directions — only the heading is asserted).
+        let sim_x = DVec3::new(-1.0, 0.0, 0.0);
+        let sim_y = DVec3::new(0.0, 1.0, 0.0);
+        let turned = rot * sim_x;
+        assert!(
+            (turned - sim_y).length() < 1e-9,
+            "a quarter-turn about sim +z carries sim +x onto sim +y, got {turned:?} \
+             (mirrored ⇒ the axis was not mapped sim→world)"
+        );
+    }
+
+    /// The grid binding is per-entity render state with a full lifecycle: `-1`
+    /// unbinds (a crew member steps off the hull and seats in the global frame
+    /// again), and a despawned entity's binding is retired rather than leaking —
+    /// or a long session churning crew grows the map forever, and a reused id
+    /// would inherit a hull it never asked to ride.
+    #[test]
+    fn entity_set_grid_unbinds_and_retires_with_its_entity() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn(6, 4, 0); // off-origin ⇒ bound ≠ global seat
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let e = world.spawn(arch);
+        let p = FixedVec3::new(Fixed::from_int(2), Fixed::from_int(1), Fixed::ZERO);
+        world.set_position(e, p);
+
+        r.entity_set_grid(e.0 as i64, g);
+        let bound = r.place(e, p);
+        assert!(
+            (bound - world_of(p)).length() > 1.0,
+            "the bound seat must differ from the global one for this to be decisive"
+        );
+
+        // `-1` unbinds: back to the global frame.
+        r.entity_set_grid(e.0 as i64, -1);
+        assert!(
+            (r.place(e, p) - world_of(p)).length() < 1e-9,
+            "an unbound entity seats in the global frame"
+        );
+
+        // Re-bind, then despawn: the next frame's `build_instances` retires it.
+        r.entity_set_grid(e.0 as i64, g);
+        world.despawn(e);
+        r.build_instances(&world);
+        assert!(
+            r.entity_grid.is_empty(),
+            "a despawned entity's grid binding is retired, not leaked"
+        );
+    }
+
+    /// The selection marker sits under the entity on a VOLUME map too. Volume
+    /// maps scale sim z by `SCALE` (isotropic cells) while column maps leave it
+    /// unscaled, and every seat goes through `entity_world_of` for exactly that
+    /// reason — a marker composed from the bare `world_of` floats `(SCALE−1)·z`
+    /// world units above the digger it marks.
+    #[test]
+    fn highlight_marker_honors_the_volume_z_scale() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        r.set_volume_terrain();
+        let model = r.model_box(2, 2, 2, 0x8055_5555);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let e = world.spawn(arch);
+        let p = FixedVec3::new(Fixed::from_int(1), Fixed::from_int(1), Fixed::from_int(3));
+        world.set_position(e, p);
+        r.entity_set_model(e.0 as i64, model);
+        r.highlight(e.0 as i64);
+
+        r.build_instances(&world);
+        let marker = r
+            .sprites
+            .instances
+            .iter()
+            .find(|i| i.model == HIGHLIGHT_MODEL)
+            .expect("the selected entity has a marker");
+        let want = (GROUND_Z - 3.0 * SCALE - 1.0) as f32;
+        assert!(
+            (marker.pos[2] - want).abs() < 0.01,
+            "marker seats on the entity's volume-scaled height (want {want}, got {})",
+            marker.pos[2]
+        );
+    }
+
+    /// Binding is opt-in and one-directional: naming a grid on `vision_observer`
+    /// says where the FOG rides, never that the observer is seated on it (a v7
+    /// map that named a fog grid must keep placing its entities in the global
+    /// frame — the auto-binding this replaces silently moved them). Binding the
+    /// observer with `entity_set_grid` is what moves the fog, so the cone and
+    /// the crew member can never disagree about which hull they are on.
+    #[test]
+    fn naming_a_fog_grid_never_binds_the_observer() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let named = r.grid_spawn(6, 4, 0);
+        let named_id = r.grids[named as usize];
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let observer = world.spawn(arch);
+        let seat = FixedVec3::new(Fixed::from_int(2), Fixed::from_int(1), Fixed::ZERO);
+        world.set_position(observer, seat);
+
+        // v7 semantics: the fog rides the named grid, the entity does not.
+        r.vision_observer_in(observer.0 as i64, named);
+        assert_eq!(
+            r.vision_grid(),
+            Some(named_id),
+            "the named grid carries the fog"
+        );
+        assert!(
+            (r.place(observer, seat) - world_of(seat)).length() < 1e-9,
+            "naming a fog grid must not seat the entity on it"
+        );
+
+        // The explicit binding is what seats the crew — and the fog derives from
+        // it, so a second hull can't disagree with the one the crew rides.
+        let hull = r.grid_spawn(1, 9, 0);
+        let hull_id = r.grids[hull as usize];
+        r.entity_set_grid(observer.0 as i64, hull);
+        assert_eq!(
+            r.vision_grid(),
+            Some(hull_id),
+            "the grid the observer rides carries the fog, whatever was named"
+        );
+        let origin = r.scene.grid(hull_id).expect("hull").transform.origin;
+        assert!(
+            (r.place(observer, seat) - (world_of(seat) + origin)).length() < 1e-9,
+            "the entity now seats through the grid it was bound to"
+        );
+    }
+
     /// Fog rides an OFF-ORIGIN `grid_spawn` hull: the observer's world pose and
     /// any heard cell must be re-based into the grid's LOCAL voxels, or the mask
     /// stamps empty space at the grid's world offset instead of on the hull. A
@@ -3248,7 +3505,8 @@ mod tests {
         r.deck_clip(0, 3); // sets the deck band the mask needs
 
         // Observer entity at GRID-LOCAL sim (4, 4, 0) — as real crew are stored.
-        // `vision_observer_in` binds it to grid `g`, so `place` composes this
+        // `entity_set_grid` binds it to grid `g` (the explicit opt-in; naming the
+        // grid on `vision_observer` would NOT bind it), so `place` composes this
         // through the hull transform to the true world seat (== WORLD sim
         // (wx+4, wy+4, wz)); `update_fow` then rebases back to grid-local.
         let mut world = World::new(0);
@@ -3258,6 +3516,7 @@ mod tests {
             e,
             FixedVec3::new(Fixed::from_int(4), Fixed::from_int(4), Fixed::ZERO),
         );
+        r.entity_set_grid(e.0 as i64, g);
         r.vision_observer_in(e.0 as i64, g);
 
         // A sound at WORLD sim (wx+2, wy+6): its grid-local column is sim (2, 6).
@@ -3500,6 +3759,62 @@ mod tests {
              (twin rotated {probe:?} to {:?}, expected {:?})",
             twin_rot * probe,
             turned * probe,
+        );
+    }
+
+    /// The deck cutaway must reach the grid that actually DRAWS. `apply_deck_clip`
+    /// writes `z_clip` on the real grid, but the real grid is `render_excluded`
+    /// once fog arms — the twin renders — and `FowTwin::sync` mirrors the render
+    /// config only on a non-quiet frame. A crew member climbing a deck changes
+    /// `z_clip` without touching a voxel or a visible cell, so on a settled frame
+    /// the cutaway would never open. Regression: flip the deck band on a quiet
+    /// frame and confirm the twin carries the new clip (the host mirrors the full
+    /// `TwinMirror` set, not just the transform).
+    #[test]
+    fn deck_clip_reaches_the_twin_on_a_quiet_frame() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn(0, 0, 0);
+        r.voxel_fill_in(g, -40, -40, 0, 40, 40, 0, 0x8055_5f6b);
+        r.vision_config(110, 6, 3);
+        r.deck_clip(0, 3);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let e = world.spawn(arch);
+        // Mid-cell, as in `fog_twin_tracks_hull_rotation_on_a_quiet_frame`: the
+        // re-basing round-trip can't tip `floor` to a neighbouring cell, so the
+        // mask provably settles.
+        let off = Fixed::from_f64(1.0 / 32.0);
+        world.set_position(e, FixedVec3::new(off, off, Fixed::ZERO));
+        r.entity_set_grid(e.0 as i64, g);
+        r.vision_observer(e.0 as i64);
+
+        // Settle the mask so `sync` reaches its quiet-frame early-out.
+        for _ in 0..4 {
+            r.build_instances(&world);
+            r.apply_deck_clip();
+            let _ = r.update_fow(0.016);
+        }
+        let settled_ver = r.fow.as_ref().expect("mask built").mask_version();
+
+        // The crew climbs: a new band ⇒ a new `z_clip`, nothing else.
+        r.deck_clip(4, 7);
+        let want = deck_clip_world_z(7);
+        r.build_instances(&world);
+        r.apply_deck_clip(); // the order `render_into` uses (clip, then fog)
+        let _ = r.update_fow(0.016);
+
+        assert_eq!(
+            r.fow.as_ref().expect("mask built").mask_version(),
+            settled_ver,
+            "a deck flip must not perturb the mask — otherwise this isn't the \
+             quiet-frame path the fix targets"
+        );
+        let twin_id = r.fow_twin.as_ref().expect("twin armed").twin();
+        assert_eq!(
+            r.scene.grid(twin_id).expect("twin grid").z_clip,
+            Some(want),
+            "the rendered twin carries the new deck cutaway"
         );
     }
 

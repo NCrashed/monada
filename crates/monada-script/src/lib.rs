@@ -208,9 +208,16 @@ pub trait HostBridge: Send {
     /// Bind an entity to a `grid_spawn` grid (by its handle), so it rides
     /// that grid's transform: its sim `position` is read as grid-local and
     /// composed through the grid's origin + rotation when rendered — a crew
-    /// stays seated on a hull that moves or turns. Render-side, not hashed;
-    /// an out-of-range handle is ignored. Unbound entities render in the
-    /// global frame as before (`host_api` 8).
+    /// stays seated on a hull that moves or turns. Pass `-1` to UNBIND (the
+    /// entity returns to the global frame — stepping off the hull). This is the
+    /// only verb that binds an entity: naming a grid on
+    /// [`vision_observer_in`](Self::vision_observer_in) never binds anything, it
+    /// only says which grid the fog rides. Binding the fog OBSERVER also moves
+    /// the fog/`deck_clip` onto that grid, so the cone and the crew member can
+    /// never disagree about which hull they are on. Render-side, not hashed; an
+    /// out-of-range handle is ignored, and a binding is dropped when its entity
+    /// despawns. Unbound entities render in the global frame as before
+    /// (`host_api` 11).
     fn entity_set_grid(&mut self, _entity: i64, _grid: i64) {}
     /// Paint a solid voxel box into the world grid, in sim coordinates.
     /// (Two corners + colour reads naturally as separate args for scripts.)
@@ -265,8 +272,11 @@ pub trait HostBridge: Send {
     /// (unit-normalised) `axis`, replacing the grid's current rotation — so a
     /// hull can pitch, roll and yaw, not merely spin about vertical. Entities
     /// bound to the grid via [`entity_set_grid`](Self::entity_set_grid) and its
-    /// fog/`deck_clip` ride the new pose. Render-side, not hashed; a zero-length
-    /// axis or out-of-range handle is ignored. The default ignores it.
+    /// fog/`deck_clip` ride the new pose. The `axis` is in SIM coordinates (+z
+    /// up, the frame every other verb takes), right-handed about it — the host
+    /// maps it through the same sim→world transform the grid's voxels are
+    /// painted with. Render-side, not hashed; a zero-length axis or out-of-range
+    /// handle is ignored. The default ignores it.
     fn grid_orient(&mut self, _grid: i64, _axis: FixedVec3, _angle: Fixed) {}
 
     /// Mark `entity` as the locally selected one (a highlight overlay),
@@ -366,8 +376,12 @@ pub trait HostBridge: Send {
     /// Like [`vision_observer`](Self::vision_observer) but against a specific
     /// [`grid_spawn`](Self::grid_spawn) grid (`grid` handle) instead of the world
     /// grid — the ship demo's hull, so fog + `deck_clip` ride the crew's own
-    /// (movable) grid. The mask is grid-local. `host_api` 7. Render-side only;
-    /// the default delegates to [`vision_observer`](Self::vision_observer).
+    /// (movable) grid. The mask is grid-local. This names the fog's grid ONLY —
+    /// it does not bind the observer entity to it (bind explicitly with
+    /// [`entity_set_grid`](Self::entity_set_grid), which also takes precedence
+    /// here: an observer that rides a grid fogs that grid, whatever this named).
+    /// `host_api` 7. Render-side only; the default delegates to
+    /// [`vision_observer`](Self::vision_observer).
     fn vision_observer_in(&mut self, entity: i64, _grid: i64) {
         self.vision_observer(entity);
     }

@@ -346,7 +346,9 @@ fn ensure_crew(player) {
         entity_set_model(c, 0); // crew actor model
         // Ride the hull grid: the crew's sim position is grid-local, composed
         // through the hull's transform when drawn, so they stay seated as the
-        // hull turns (`step_ship` spins it in 3D; host_api 8).
+        // hull turns (`step_ship` spins it in 3D; host_api 11). This binding is
+        // also what puts the FOG on the hull — `vision_observer` names a grid but
+        // never binds one, so the cone and the crew always ride the same hull.
         entity_set_grid(c, hull_grid());
         entity_set_anim(c, "idle");
     }
