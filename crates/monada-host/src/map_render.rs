@@ -368,14 +368,7 @@ fn sim_box_to_world(x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64) -> (IV
 /// `(-x-1, y, -z-1)` — the same world-X mirror and z-down flip as
 /// `sim_box_to_world`, but in cells, not world voxels.
 #[allow(clippy::cast_possible_truncation)]
-fn cell_box_to_volume_grid(
-    x0: i64,
-    y0: i64,
-    z0: i64,
-    x1: i64,
-    y1: i64,
-    z1: i64,
-) -> (IVec3, IVec3) {
+fn cell_box_to_volume_grid(x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64) -> (IVec3, IVec3) {
     let (xa, xb) = (x0.min(x1), x0.max(x1));
     let (ya, yb) = (y0.min(y1), y0.max(y1));
     let (za, zb) = (z0.min(z1), z0.max(z1));
@@ -1458,11 +1451,8 @@ impl MapRender {
         self.retire_dead_mirrors(sim);
         for body in sim.world.bodies() {
             let Some(shape) = body.shape() else { continue };
-            let (origin, rot) = body_grid_pose(
-                body.position(),
-                body.orientation(),
-                body.com_in_shape(),
-            );
+            let (origin, rot) =
+                body_grid_pose(body.position(), body.orientation(), body.com_in_shape());
             let mirror = self.body_mirrors.entry(body.id().0).or_insert_with(|| {
                 let grid = new_prop_grid(&mut self.scene, SCALE);
                 BodyMirror {
@@ -1487,11 +1477,7 @@ impl MapRender {
             if mirror.blitted != filled {
                 mirror.dims = IVec3::new(dx, dy, dz);
                 if let Some(grid) = self.scene.grid_mut(mirror.grid) {
-                    grid.set_rect(
-                        IVec3::ZERO,
-                        IVec3::new(dx - 1, dy - 1, dz - 1),
-                        None,
-                    );
+                    grid.set_rect(IVec3::ZERO, IVec3::new(dx - 1, dy - 1, dz - 1), None);
                     for z in 0..dz {
                         for y in 0..dy {
                             for x in 0..dx {
@@ -1940,11 +1926,7 @@ impl MapRender {
                 // A chunky dust ball in the carved voxel's colour, unlit.
                 let c = 3.0;
                 let kv6 = Kv6::from_fn(7, 7, 7, |x, y, z| {
-                    let (dx, dy, dz) = (
-                        f64::from(x) - c,
-                        f64::from(y) - c,
-                        f64::from(z) - c,
-                    );
+                    let (dx, dy, dz) = (f64::from(x) - c, f64::from(y) - c, f64::from(z) - c);
                     (dx * dx + dy * dy + dz * dz <= c * c).then_some(VoxColor(color))
                 });
                 let mut s = Sprite::axis_aligned(kv6, [0.0, 0.0, 0.0]);
@@ -1956,11 +1938,7 @@ impl MapRender {
             };
             self.sprites.instances.push(SpriteInstanceDesc {
                 model,
-                pos: [
-                    pos.x as f32,
-                    pos.y as f32,
-                    (pos.z - age * PUFF_RISE) as f32,
-                ],
+                pos: [pos.x as f32, pos.y as f32, (pos.z - age * PUFF_RISE) as f32],
             });
         }
     }
@@ -3020,7 +2998,10 @@ mod tests {
         r.voxel_fill(0, 0, 0, 3, 3, 1, 0x8070_5838);
         r.voxel_clear(1, 1, 1);
         assert_eq!(r.puffs.len(), 1, "one carve, one puff");
-        assert_eq!(r.puffs[0].color, 0x8070_5838, "puff wears the voxel's colour");
+        assert_eq!(
+            r.puffs[0].color, 0x8070_5838,
+            "puff wears the voxel's colour"
+        );
         // Clearing already-empty cells is silent.
         r.voxel_clear(1, 1, 1);
         r.voxel_clear(50, 50, 50);
