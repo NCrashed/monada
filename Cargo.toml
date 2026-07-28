@@ -58,8 +58,15 @@ monada-voxvideo = { path = "crates/monada-voxvideo", version = "0.0.1" }
 monada-physics = { path = "crates/monada-physics", version = "0.0.1" }
 monada-format = { path = "crates/monada-format", version = "0.0.1" }
 
-# roxlap voxel engine 0.31.0 (crates.io, CI-safe). The 0.30→0.31 bump (CT
-# series) fixes the digger demo's "invisible walls": carving a column at a
+# roxlap voxel engine 0.31.1 (crates.io, CI-safe). 0.31.1 fixes the fog
+# twin freezing its render config on quiet frames: `FowTwin::sync` mirrored
+# the real grid's transform / `z_clip` / sky / LOD behind its quiet-frame
+# early-out, whose key moves on neither a re-pose nor a cutaway, so the
+# twin — the only grid that draws — stalled at its last busy frame. That is
+# the ship demo's rotating hull and its deck cutaway, and it retires the
+# `MapRender::mirror_twin` workaround that copied the set host-side.
+# The 0.30→0.31 bump (CT series) fixes the digger demo's "invisible
+# walls": carving a column at a
 # chunk-z boundary left an undeletable solid layer both backends rendered
 # while collision said air (voxlap's historical bedrock placeholder at
 # chunk-local z 255) — columns now empty fully via the empty-column
@@ -81,10 +88,10 @@ monada-format = { path = "crates/monada-format", version = "0.0.1" }
 # Oracle goldens are byte-identical across the bump. Still the unified
 # SceneRenderer facade over CPU/GPU. crates.io rather than the sibling path so
 # the author's in-progress roxlap working copy doesn't perturb monada's build.
-roxlap-core = "0.31.0"
-roxlap-render = "0.31.0"
-roxlap-scene = "0.31.0"
-roxlap-formats = "0.31.0"
+roxlap-core = "0.31.1"
+roxlap-render = "0.31.1"
+roxlap-scene = "0.31.1"
+roxlap-formats = "0.31.1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

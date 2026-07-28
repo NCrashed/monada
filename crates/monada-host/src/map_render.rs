@@ -1368,66 +1368,19 @@ impl MapRender {
             self.fow_twin = Some(fresh);
             out
         };
-        // The twin renders the hull (the real grid is `render_excluded`), but
-        // `sync` only mirrors the real grid's render config in its Phase 2 —
-        // which it SKIPS on a "quiet" frame (mask version + real mutation counter
-        // unchanged). Two render-side verbs move that config without touching
-        // either: `grid_orient` (not a voxel edit, and it turns no cell
-        // visible/dark) and `deck_clip` (a `z_clip` write). So on an idle frame
-        // `sync` early-outs, the twin freezes, and the hull stalls mid-turn while
-        // the crew — placed from the live real transform in `place` — slides off
-        // it, or the crew climbs a deck and the cutaway never opens. Mirror the
-        // real grid every frame instead, on both the synced and the just-re-armed
-        // twin.
-        if let Some(id) = out {
-            self.mirror_twin(main_grid, id);
-        }
+        // The twin renders the hull (the real grid is `render_excluded`), and
+        // `sync` mirrors the real grid's render config onto it on EVERY call —
+        // including quiet frames, which matters because two render-side verbs
+        // move that config without touching either of `sync`'s gates:
+        // `grid_orient` (not a voxel edit, and it turns no cell visible/dark)
+        // and `deck_clip` (a `z_clip` write). roxlap ≤ 0.31.0 gated the mirror
+        // behind its quiet-frame early-out, so the hull stalled mid-turn while
+        // the crew — placed from the live real transform in `place` — slid off
+        // it, and a deck cutaway raised on a settled frame never opened; this
+        // host mirrored the set itself to compensate. 0.31.1 fixed it at the
+        // source, so nothing is needed here.
         self.fow = Some(fow);
         out
-    }
-
-    /// Copy the real grid's render config onto its fog twin — roxlap's private
-    /// `TwinMirror`, replicated because we run on the frames its `sync` skips.
-    /// Mirror the WHOLE set it does, not just the transform: `z_clip` (the
-    /// `deck_clip` cutaway), `render_sky`, `mip_levels_override` and the LOD
-    /// thresholds, or a change to any of them lands on a grid that never draws.
-    /// Authoring / sim state (the flags, streaming, water, bake lights) is
-    /// deliberately NOT mirrored, exactly as `TwinMirror` leaves it.
-    ///
-    /// **Retire this with the roxlap bump.** Replicating a private struct is a
-    /// standing hazard — a field added to `TwinMirror` upstream diverges here
-    /// silently — so it was fixed at the source instead: post-0.31 roxlap runs
-    /// the mirror on every `sync`, with the quiet-frame early-out gating only
-    /// the chunk copies (which is all it was ever meant to skip). The moment
-    /// this crate's roxlap pin carries that, delete this method and its call
-    /// site; `deck_clip_reaches_the_twin_on_a_quiet_frame` then regresses
-    /// roxlap's own behaviour and must stay green through the removal.
-    fn mirror_twin(&mut self, real: GridId, twin: GridId) {
-        let Some(m) = self.scene.grid(real).map(|g| {
-            (
-                g.transform,
-                g.render_sky,
-                g.mip_levels_override,
-                g.lod_thresholds,
-                g.z_clip,
-            )
-        }) else {
-            return;
-        };
-        let (transform, render_sky, mip_levels_override, mut lod_thresholds, z_clip) = m;
-        // The twin must never reach the Far tier: Far blits a `BillboardCache`
-        // impostor built from the raw twin with no per-cell fog styling, so the
-        // whole known+unseen hull would flash fully visible at exactly the range
-        // where concealment matters. `r_mid = INFINITY` extends Mid to any
-        // distance — the same override `TwinMirror::apply` makes.
-        lod_thresholds.r_mid = f64::INFINITY;
-        if let Some(tw) = self.scene.grid_mut(twin) {
-            tw.transform = transform;
-            tw.render_sky = render_sky;
-            tw.mip_levels_override = mip_levels_override;
-            tw.lod_thresholds = lod_thresholds;
-            tw.z_clip = z_clip;
-        }
     }
 
     /// Apply one input edge to a declared action's live value (the host's
@@ -4183,14 +4136,14 @@ mod tests {
 
     /// The rendered hull (the twin grid) must keep turning even on a frame where
     /// the fog mask does not change. The twin — not the real grid, which is
-    /// `render_excluded` — draws the hull, and `FowTwin::sync` only mirrors the
-    /// real grid's transform on a NON-quiet frame (mask version or voxel mutation
-    /// changed). A hull that merely rotates bumps neither, so once the crew is
-    /// idle and the mask settles, `sync` early-outs and — without the host's
-    /// per-frame transform copy — the twin freezes while the real grid keeps
-    /// turning: the hull stalls on screen and the crew slides off it. Regression
-    /// for that: rotate the real grid on a settled (quiet) frame and confirm the
-    /// twin tracks it.
+    /// `render_excluded` — draws the hull, and a hull that merely rotates bumps
+    /// neither of `FowTwin::sync`'s gates (mask version, voxel mutation), so
+    /// once the crew is idle and the mask settles every frame is a quiet one.
+    /// roxlap ≤ 0.31.0 gated its render-config mirror on those gates, and the
+    /// twin froze while the real grid kept turning: the hull stalled on screen
+    /// and the crew — seated from the live real transform — slid off it. This
+    /// pins the contract monada depends on (roxlap 0.31.1 mirrors on every
+    /// `sync`): rotate the real grid on a settled frame, the twin tracks it.
     #[test]
     fn fog_twin_tracks_hull_rotation_on_a_quiet_frame() {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
@@ -4263,12 +4216,13 @@ mod tests {
 
     /// The deck cutaway must reach the grid that actually DRAWS. `apply_deck_clip`
     /// writes `z_clip` on the real grid, but the real grid is `render_excluded`
-    /// once fog arms — the twin renders — and `FowTwin::sync` mirrors the render
-    /// config only on a non-quiet frame. A crew member climbing a deck changes
-    /// `z_clip` without touching a voxel or a visible cell, so on a settled frame
-    /// the cutaway would never open. Regression: flip the deck band on a quiet
-    /// frame and confirm the twin carries the new clip (the host mirrors the full
-    /// `TwinMirror` set, not just the transform).
+    /// once fog arms — the twin renders. A crew member climbing a deck changes
+    /// `z_clip` without touching a voxel or a visible cell, so the frame is a
+    /// quiet one, and under roxlap ≤ 0.31.0 — which gated the render-config
+    /// mirror on that — the cutaway never opened. This pins the contract
+    /// monada depends on: flip the deck band on a quiet frame and confirm the
+    /// twin carries the new clip. Guards the WHOLE mirrored set, not just the
+    /// transform the sibling rotation test covers.
     #[test]
     fn deck_clip_reaches_the_twin_on_a_quiet_frame() {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
