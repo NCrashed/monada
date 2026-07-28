@@ -66,13 +66,22 @@ pub use volume::VolumeStore;
 /// `body_deco_box` + `drill_indicator` (digger feel polish — render
 /// trim and the spinning-bore telltale on the body mirror) +
 /// `phys_solid` (the volume-store solidity read — the "roof over me"
-/// predicate).
-pub const HOST_API_VERSION: u32 = 11;
+/// predicate); 12 = `entity_set_grid` + `grid_orient` (entities ride a
+/// grid's transform, which can turn to any 3D orientation — crew stay
+/// put on a moving/rotating hull) — **breaking**: a grid is no longer a
+/// static offset, so every verb that reads one moved with it.
+/// `grid_spawn` grids now carry a rotation (`grid_orient`) that the fog
+/// twin, the deck cutaway and picking all compose against, and a
+/// grid-riding entity's `position` is read as grid-local rather than
+/// world. Maps written against the v7..v11 grid surface are refused
+/// rather than silently re-framed, so `HOST_API_OLDEST` catches up here.
+pub const HOST_API_VERSION: u32 = 12;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
-/// breaking change catches it up.
-pub const HOST_API_OLDEST: u32 = 1;
+/// breaking change catches it up — as v12 did (see the history above),
+/// so this build runs v12 maps only.
+pub const HOST_API_OLDEST: u32 = 12;
 
 /// Check a map's declared `host_api` requirement against this build's
 /// supported range. The one gate every map-loading path shares.
@@ -206,6 +215,20 @@ pub trait HostBridge: Send {
     fn model_kv6(&mut self, asset_path: &str, turns: i64) -> i64;
     /// Bind an entity to a base render model (render-side, not hashed).
     fn entity_set_model(&mut self, entity: i64, model: i64);
+    /// Bind an entity to a `grid_spawn` grid (by its handle), so it rides
+    /// that grid's transform: its sim `position` is read as grid-local and
+    /// composed through the grid's origin + rotation when rendered — a crew
+    /// stays seated on a hull that moves or turns. Pass `-1` to UNBIND (the
+    /// entity returns to the global frame — stepping off the hull). This is the
+    /// only verb that binds an entity: naming a grid on
+    /// [`vision_observer_in`](Self::vision_observer_in) never binds anything, it
+    /// only says which grid the fog rides. Binding the fog OBSERVER also moves
+    /// the fog/`deck_clip` onto that grid, so the cone and the crew member can
+    /// never disagree about which hull they are on. Render-side, not hashed; an
+    /// out-of-range handle is ignored, and a binding is dropped when its entity
+    /// despawns. Unbound entities render in the global frame as before
+    /// (`host_api` 12).
+    fn entity_set_grid(&mut self, _entity: i64, _grid: i64) {}
     /// Paint a solid voxel box into the world grid, in sim coordinates.
     /// (Two corners + colour reads naturally as separate args for scripts.)
     /// `color` is roxlap-packed `0xBB_RR_GG_BB` — the HIGH byte is
@@ -254,6 +277,18 @@ pub trait HostBridge: Send {
         _color: i64,
     ) {
     }
+
+    /// Turn a `grid_spawn` grid to a 3D orientation: `angle` radians about the
+    /// (unit-normalised) `axis`, replacing the grid's current rotation — so a
+    /// hull can pitch, roll and yaw, not merely spin about vertical. Entities
+    /// bound to the grid via [`entity_set_grid`](Self::entity_set_grid) and its
+    /// fog/`deck_clip` ride the new pose. The `axis` is in SIM coordinates (+z
+    /// up, the frame every other verb takes), right-handed about it — the host
+    /// maps it through the same sim→world transform the grid's voxels are
+    /// painted with. Render-side, not hashed; a zero-length axis or out-of-range
+    /// handle is ignored. The default ignores it.
+    fn grid_orient(&mut self, _grid: i64, _axis: FixedVec3, _angle: Fixed) {}
+
     /// Mark `entity` as the locally selected one (a highlight overlay),
     /// REPLACING any current selection (single-select semantics — the
     /// chess-era contract).
@@ -298,6 +333,11 @@ pub trait HostBridge: Send {
     fn status(&mut self, text: &str);
     /// Aim the camera at a point (sim coordinates).
     fn camera_focus(&mut self, point: FixedVec3);
+    /// Aim the camera at an entity's `point` (sim coordinates), composed through
+    /// the grid the entity rides — so following a crew member on a moving or
+    /// rotating hull tracks its true world seat, not the un-transformed cell.
+    /// Render-side only; the default no-ops (headless bridges have no camera).
+    fn camera_focus_entity(&mut self, _entity: i64, _point: FixedVec3) {}
     /// Orient the camera: `yaw`/`pitch` in radians — the orbit angles the
     /// view should start at. Lets a map face the scene its own way instead
     /// of inheriting the host's default angle.
@@ -346,8 +386,12 @@ pub trait HostBridge: Send {
     /// Like [`vision_observer`](Self::vision_observer) but against a specific
     /// [`grid_spawn`](Self::grid_spawn) grid (`grid` handle) instead of the world
     /// grid — the ship demo's hull, so fog + `deck_clip` ride the crew's own
-    /// (movable) grid. The mask is grid-local. `host_api` 7. Render-side only;
-    /// the default delegates to [`vision_observer`](Self::vision_observer).
+    /// (movable) grid. The mask is grid-local. This names the fog's grid ONLY —
+    /// it does not bind the observer entity to it (bind explicitly with
+    /// [`entity_set_grid`](Self::entity_set_grid), which also takes precedence
+    /// here: an observer that rides a grid fogs that grid, whatever this named).
+    /// `host_api` 7. Render-side only; the default delegates to
+    /// [`vision_observer`](Self::vision_observer).
     fn vision_observer_in(&mut self, entity: i64, _grid: i64) {
         self.vision_observer(entity);
     }

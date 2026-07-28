@@ -27,7 +27,7 @@ opaque data the script refers to by its archive-relative path.
 ```toml
 name = "Hello Voxels"
 engine_version = "0.0.1"
-host_api = 1
+host_api = 12
 players = 1
 sim_hz = "30hz"
 script_runtime = "rhai"
@@ -38,7 +38,7 @@ entry = "scripts/main.rhai"
 |---|---|
 | `name` | Human-readable title, shown in the host and used as the key for saved key bindings. |
 | `engine_version` | The engine version the map was authored against. |
-| `host_api` | The script-API version the map requires — the version of the function set your scripts call (`entity_create`, `voxel_set`, …). A host that does not carry that version refuses the map up front instead of failing mid-game. Omitted = `1`. |
+| `host_api` | The script-API version the map requires — the version of the function set your scripts call (`entity_create`, `voxel_set`, …). A host runs only a version inside its supported range (`12..=12` today) and refuses the map up front instead of failing mid-game. Growth is additive, so the range's top moves with each new verb; a *breaking* change moves the bottom too, which is what makes an old map's declaration a loud refusal rather than a quiet re-interpretation. Omitted = `1` — below today's floor, so declare the version. |
 | `players` | Player count (a two-player map is `2`). |
 | `sim_hz` | The tick model — see below. |
 | `script_runtime` | The scripting backend; `"rhai"` in v0. |

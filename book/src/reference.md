@@ -132,6 +132,7 @@ to place in a command payload.
 | `model_actor(path, states, height)` | define an animated 8-direction billboard; returns a model id |
 | `model_drop(model, cells)` | nudge an actor model's sprites down/up by `cells` |
 | `entity_set_model(entity, model)` | bind an entity to a render model |
+| `entity_set_grid(entity, grid)` | bind an entity to a `grid_spawn` grid so it rides that grid's transform (its position is read as grid-local); `-1` unbinds; unbound entities render in the global frame. Binding the fog observer also moves fog/`deck_clip` onto that grid |
 | `entity_set_anim(entity, state)` | set an actor entity's animation state |
 | `entity_set_facing(entity, yaw)` | set an actor entity's facing yaw (radians) |
 | `entity_set_tint(entity, tint)` | multiply an actor's sprite by a `0xRRGGBB` tint |
@@ -207,13 +208,15 @@ Spawn and paint additional voxel grids independent of the world grid (e.g. ships
 |---|---|
 | `grid_spawn(wx, wy, wz)` | spawn a grid offset by sim cell `(wx, wy, wz)` from the world origin (`(0,0,0)` = world origin); returns a grid handle (i64), or `< 0` if unsupported |
 | `voxel_fill_in(grid, x0, y0, z0, x1, y1, z1, color)` | fill a solid box of voxels in the given dynamic grid (same coords as `voxel_fill`) |
-| `vision_observer(entity, grid)` | fog/`deck_clip` overload that rides the given dynamic grid instead of the world grid (movable hull) |
+| `grid_orient(grid, axis, angle)` | turn a grid to a 3D orientation: `angle` radians about the (auto-normalised) `axis` in SIM coordinates (+z up), replacing its rotation — entities riding it and its fog/`deck_clip` follow; a zero-length axis is ignored |
+| `vision_observer(entity, grid)` | fog/`deck_clip` overload that rides the given dynamic grid instead of the world grid (movable hull). Names the fog's grid only — it does not bind the entity, and an observer bound via `entity_set_grid` fogs the grid it rides instead |
 
 ## Camera, lighting, sky — *presentation*
 
 | Function | Result |
 |---|---|
 | `camera_focus(point)` | aim the camera at a sim-space point |
+| `camera_focus_entity(entity, point)` | aim the camera at an entity's `point`, composed through the grid the entity rides (tracks a crew member on a moving/rotating hull) |
 | `camera_angle(yaw, pitch)` | set the camera's orbit angles (radians) |
 | `camera_dist(dist)` | set the camera's distance from its focus |
 | `camera_pan(dx, dy)` | shift the camera focus by a sim-space delta — an RTS-style scroll, accumulated host-side |

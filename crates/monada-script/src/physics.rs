@@ -372,7 +372,8 @@ pub(crate) fn register_physics_api(
                 };
                 let PhysicsSim { world, terrain, .. } = &mut *sim;
                 let body_ref = world.body(id).expect("phys_drill: unknown body");
-                let axis = body_ref.orientation() * (tool.orientation * FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO));
+                let axis = body_ref.orientation()
+                    * (tool.orientation * FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO));
                 let center = body_ref.position() + body_ref.orientation() * tool.anchor;
                 let mut samples: Vec<(Fixed, (i64, i64, i64), MaterialId)> = world
                     .drill_query(id, &tool, terrain)

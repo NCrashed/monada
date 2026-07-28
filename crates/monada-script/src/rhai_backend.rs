@@ -417,6 +417,11 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").entity_set_model(e, model);
     });
 
+    let b = bridge.clone();
+    engine.register_fn("entity_set_grid", move |e: i64, grid: i64| {
+        b.lock().expect("bridge mutex").entity_set_grid(e, grid);
+    });
+
     // Animated 8-direction billboard actor: `model_actor(dir, [states])`,
     // then per-entity `entity_set_anim` / `entity_set_facing` (render-side).
     let b = bridge.clone();
@@ -515,6 +520,16 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     );
 
     let b = bridge.clone();
+    engine.register_fn(
+        "grid_orient",
+        move |grid: i64, axis: FixedVec3, angle: Fixed| {
+            b.lock()
+                .expect("bridge mutex")
+                .grid_orient(grid, axis, angle);
+        },
+    );
+
+    let b = bridge.clone();
     engine.register_fn("voxel_set", move |x: i64, y: i64, z: i64, color: i64| {
         b.lock().expect("bridge mutex").voxel_set(x, y, z, color);
     });
@@ -573,6 +588,16 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     engine.register_fn("camera_focus", move |point: FixedVec3| {
         b.lock().expect("bridge mutex").camera_focus(point);
     });
+
+    let b = bridge.clone();
+    engine.register_fn(
+        "camera_focus_entity",
+        move |entity: i64, point: FixedVec3| {
+            b.lock()
+                .expect("bridge mutex")
+                .camera_focus_entity(entity, point);
+        },
+    );
 
     let b = bridge.clone();
     engine.register_fn("camera_angle", move |yaw: Fixed, pitch: Fixed| {

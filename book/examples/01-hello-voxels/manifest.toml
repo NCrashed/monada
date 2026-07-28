@@ -3,8 +3,10 @@
 name = "Hello Voxels"
 engine_version = "0.0.1"
 # Script-API version this map requires; the host refuses a map asking
-# for an API it does not carry (chapter 3 explains the contract).
-host_api = 1
+# for an API it does not carry (chapter 3 explains the contract). This
+# map only calls the oldest verbs, but hosts support v12 and up — v12
+# was a breaking change, so it took the supported floor with it.
+host_api = 12
 players = 1
 # Real-time: the sim advances on a fixed 30 Hz clock, so `tick(dt)` runs.
 sim_hz = "30hz"

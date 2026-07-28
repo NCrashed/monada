@@ -3,8 +3,10 @@
 name = "Chess 2.0"
 engine_version = "0.0.1"
 # Script-API version required (monada-script HOST_API_VERSION); a host
-# outside its supported range refuses the map instead of desyncing.
-host_api = 1
+# outside its supported range refuses the map instead of desyncing. The
+# map only calls the v1 surface, but v12 broke the grid semantics and
+# carried the supported floor with it, so 12 is the oldest a host runs.
+host_api = 12
 players = 2
 # Turn-based: the sim advances only when a command arrives (DESIGN.md §6).
 sim_hz = "on_command"

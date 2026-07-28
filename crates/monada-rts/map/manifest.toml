@@ -8,8 +8,10 @@ engine_version = "0.0.1"
 # deterministic pathfinder), 5 = multi-select (`highlight_add`/
 # `highlighted_all`/`drag_begin`/`drag_end`), 6 = `voxel_clear` (tree
 # felling / razed buildings); a host outside its supported range refuses
-# the map instead of desyncing.
-host_api = 6
+# the map instead of desyncing. Declared 12, not 6: v12 broke the grid
+# semantics and carried the supported floor with it, so 12 is the oldest
+# a host runs — the verbs this map actually needs are still the v6 set.
+host_api = 12
 # 1v1: two players over LAN lockstep (--listen host = player 0, --connect
 # client = player 1). Runs solo too (no flag = hotseat, driving player 0).
 players = 2

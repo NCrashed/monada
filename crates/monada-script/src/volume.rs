@@ -78,10 +78,7 @@ mod chunk_cells_serde {
 
     use super::CHUNK_CELLS;
 
-    pub fn serialize<S: Serializer>(
-        cells: &[u16; CHUNK_CELLS],
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(cells: &[u16; CHUNK_CELLS], s: S) -> Result<S::Ok, S::Error> {
         cells.as_slice().serialize(s)
     }
 
@@ -90,10 +87,9 @@ mod chunk_cells_serde {
     ) -> Result<Box<[u16; CHUNK_CELLS]>, D::Error> {
         let cells = Vec::<u16>::deserialize(d)?;
         let len = cells.len();
-        cells
-            .into_boxed_slice()
-            .try_into()
-            .map_err(|_| D::Error::custom(format!("chunk must have {CHUNK_CELLS} cells, got {len}")))
+        cells.into_boxed_slice().try_into().map_err(|_| {
+            D::Error::custom(format!("chunk must have {CHUNK_CELLS} cells, got {len}"))
+        })
     }
 }
 
@@ -237,7 +233,10 @@ impl VolumeStore {
             }
         }
         for key in dirty {
-            self.chunks.get_mut(&key).expect("dirty chunk exists").rehash();
+            self.chunks
+                .get_mut(&key)
+                .expect("dirty chunk exists")
+                .rehash();
         }
     }
 
