@@ -454,6 +454,138 @@ struct BodyMirror {
     /// Shape dims at the last blit — the box to clear on re-blit/removal.
     dims: IVec3,
     wheels: Vec<WheelMirror>,
+    /// The fine-voxel decoration grid (`body_deco_box`), lazily created
+    /// and posed identically to `grid` at `voxel_world_size = 1`.
+    deco_grid: Option<GridId>,
+    /// Deco boxes blitted so far — a longer list re-blits the tail.
+    deco_blitted: usize,
+    /// The spinning drill-cone grid (`drill_indicator`), plus its
+    /// render-side spin angle.
+    drill: Option<DrillMirror>,
+}
+
+/// The drill indicator's render state: a cone grid pitched with the
+/// commanded bore and spun (render-side accumulator, like wheel spin)
+/// while the drill actively cuts.
+struct DrillMirror {
+    grid: GridId,
+    spin: f64,
+    /// Cone blit extent (length, base radius), fine voxels — the box to
+    /// clear on removal.
+    len: i32,
+    base_r: i32,
+}
+
+/// Blit the drill cone into its (world-voxel) grid: axis along local +x
+/// from the base at the origin, tapering to a bright tip. A darker
+/// half-stripe alternating along the length makes the render-side spin
+/// readable.
+#[allow(clippy::cast_possible_truncation)]
+fn blit_drill_cone(scene: &mut Scene, id: GridId, len: i32, base_r: i32) {
+    let Some(grid) = scene.grid_mut(id) else {
+        return;
+    };
+    for x in 0..len {
+        let r = f64::from(base_r) * f64::from(len - x) / f64::from(len) + 1.0;
+        let ri = r.ceil() as i32;
+        let tip = x > len - 6;
+        for y in -ri..=ri {
+            for z in -ri..=ri {
+                let (cy, cz) = (f64::from(y) + 0.5, f64::from(z) + 0.5);
+                if cy.mul_add(cy, cz * cz) > r * r {
+                    continue;
+                }
+                let stripe = (z >= 0) ^ ((x / 5) % 2 == 0);
+                let color = if tip {
+                    0x80e8_e8f0
+                } else if stripe {
+                    0x8050_5058
+                } else {
+                    0x8098_98a4
+                };
+                let c = IVec3::new(x, y, z);
+                grid.set_rect(c, c, Some(VoxColor(color)));
+            }
+        }
+    }
+}
+
+/// Drill-cone spin rate while cutting, radians per second.
+const DRILL_SPIN_RATE: f64 = 9.0;
+
+/// Decoration (`body_deco_box`): fine-voxel trim sharing the body pose.
+/// Same origin AND rotation as the cell grid — fine voxel `f = 16·l`
+/// lands on cell point `l` because the deco grid's voxel_world_size is 1.
+fn sync_body_deco(
+    scene: &mut Scene,
+    decos: Option<&Vec<(IVec3, IVec3, u32)>>,
+    mirror: &mut BodyMirror,
+    origin: DVec3,
+    rot: DQuat,
+) {
+    let deco_len = decos.map_or(0, Vec::len);
+    if deco_len > 0 && mirror.deco_grid.is_none() {
+        mirror.deco_grid = Some(new_prop_grid(scene, 1.0));
+    }
+    if let (Some(gid), Some(boxes)) = (mirror.deco_grid, decos) {
+        if let Some(grid) = scene.grid_mut(gid) {
+            if mirror.deco_blitted != deco_len {
+                for &(lo, hi, color) in boxes {
+                    grid.set_rect(lo, hi, Some(VoxColor(color)));
+                }
+                mirror.deco_blitted = deco_len;
+            }
+            grid.transform.origin = origin;
+            grid.transform.rotation = rot;
+        }
+    }
+}
+
+/// The drill indicator (`drill_indicator`): a cone mirroring the
+/// registered TOOL — based at the tool box's rear-centre, pitched
+/// exactly like the bore, spun render-side while cutting. The spin is
+/// the "drilling works" telltale.
+#[allow(clippy::cast_possible_truncation)]
+fn sync_drill_cone(
+    scene: &mut Scene,
+    vis: Option<&(f64, bool)>,
+    tool: Option<&monada_script::DrillToolDef>,
+    mirror: &mut BodyMirror,
+    q: DQuat,
+    position: DVec3,
+    dt: f64,
+) {
+    let (Some(&(pitch, spinning)), Some(tool)) = (vis, tool) else {
+        return;
+    };
+    if mirror.drill.is_none() {
+        // Chunky on purpose: the cone blits at DOUBLE voxel size (vws 2,
+        // half the grid dims) — same silhouette, half the detail, reads
+        // better next to the cell-sized hull.
+        let len = (tool.half_extents.x.to_f64() * SCALE) as i32;
+        let base_r =
+            (tool.half_extents.y.to_f64().min(tool.half_extents.z.to_f64()) * SCALE * 0.35) as i32;
+        let grid = new_prop_grid(scene, 2.0);
+        blit_drill_cone(scene, grid, len, base_r);
+        mirror.drill = Some(DrillMirror {
+            grid,
+            spin: 0.0,
+            len,
+            base_r,
+        });
+    }
+    let dm = mirror.drill.as_mut().expect("just ensured");
+    if spinning {
+        dm.spin = (dm.spin + DRILL_SPIN_RATE * dt) % std::f64::consts::TAU;
+    }
+    let base_body = dvec3(tool.anchor) - DVec3::new(tool.half_extents.x.to_f64(), 0.0, 0.0);
+    let base_sim = position + q * base_body;
+    let crot =
+        mirror_half_turn() * q * DQuat::from_rotation_y(-pitch) * DQuat::from_rotation_x(dm.spin);
+    if let Some(grid) = scene.grid_mut(dm.grid) {
+        grid.transform.origin = volume_world_of(base_sim);
+        grid.transform.rotation = crot;
+    }
 }
 
 /// One wheel's render state: the cylinder grid and its accumulated spin
@@ -469,7 +601,13 @@ struct WheelMirror {
 }
 
 /// Wheel cylinder half-width along its axle, world voxels.
-const WHEEL_HALF_WIDTH: i32 = 3;
+const WHEEL_HALF_WIDTH: i32 = 5;
+
+/// Render-only wheel inflation: the physics radius (half a cell) reads
+/// tiny against a six-cell hull, so the mirror draws wheels this much
+/// larger and seats them so the enlarged rim still touches the contact
+/// point (the extra radius lifts the centre, not buries the rim).
+const WHEEL_RENDER_SCALE: f64 = 1.5;
 
 /// One debris puff: a dust sprite rising from a carved cell for
 /// [`PUFF_TTL`] seconds. World position is the cell centre at spawn; the
@@ -649,6 +787,21 @@ pub struct MapRender {
     /// D4): the body mirror consults this before the engine's fallback
     /// palette. Render-side only.
     phys_colors: BTreeMap<u16, u32>,
+    /// The map's sun as declared by `set_light` (unit travel direction,
+    /// sim space + intensity). Volume maps feed it to the dynamic
+    /// [`LightRig`] (sun + baked-AO ambient + stylized shadows) so voxel
+    /// edges read; column maps keep the legacy `side_shades` path.
+    sun: Option<(DVec3, f32)>,
+    /// Render-only decoration boxes per body (`body_deco_box`): FINE
+    /// voxels (16 per cell), shape-local. Blitted into a `vws = 1` grid
+    /// posed identically to the body's cell grid — skirts, cockpits,
+    /// trim that should ride the physics pose without touching the
+    /// hashed shape.
+    body_decos: BTreeMap<u64, Vec<(IVec3, IVec3, u32)>>,
+    /// Per-body drill indicator state (`drill_indicator`): commanded
+    /// pitch (radians) + whether the drill is actively cutting. Drives
+    /// the spinning cone grid in [`sync_physics`](Self::sync_physics).
+    drill_vis: BTreeMap<u64, (f64, bool)>,
     /// Grids spawned by the script via `grid_spawn` (e.g. the ship demo's hull).
     /// The script's i64 handle is the index into this Vec; never reordered or
     /// compacted so handles stay stable. Painted by `voxel_fill_in`. Kept
@@ -866,6 +1019,9 @@ impl MapRender {
             puffs: Vec::new(),
             puff_models: BTreeMap::new(),
             phys_colors: BTreeMap::new(),
+            sun: None,
+            body_decos: BTreeMap::new(),
+            drill_vis: BTreeMap::new(),
             grids: Vec::new(),
             vision_grid: None,
             sprites,
@@ -930,11 +1086,20 @@ impl MapRender {
             if self.volume {
                 // Isotropic cell grid (see the `volume` field): origin at
                 // GROUND_Z so cell z 0 tops out exactly where the column
-                // convention's floor surface sits.
-                self.scene.add_grid(GridTransform::at_scale(
+                // convention's floor surface sits. Full detail only — at
+                // voxel_world_size 16 every voxel is already 16× coarser
+                // than a world unit, so the mip ladder buys little and
+                // costs correctness: mip 1 aggregates a carved tunnel
+                // back into solid, and the player digs "invisible walls"
+                // sketched by the coarser level.
+                let id = self.scene.add_grid(GridTransform::at_scale(
                     DVec3::new(0.0, 0.0, GROUND_Z),
                     SCALE,
-                ))
+                ));
+                if let Some(grid) = self.scene.grid_mut(id) {
+                    grid.mip_levels_override = Some(1);
+                }
+                id
             } else {
                 self.scene.add_grid(GridTransform::identity())
             }
@@ -1266,6 +1431,11 @@ impl MapRender {
     /// wheel-spin accumulator (the stateless-wheel dividend: spin exists
     /// nowhere in the hashed sim). Ghost bodies (no shape) have nothing to
     /// draw and are skipped.
+    // One linear per-body sweep (blit → pose → wheels → trim → cone);
+    // the deco/cone stages are already extracted, and slicing the blit
+    // or wheel stages would thread half the mirror state through
+    // parameters for no clarity gain.
+    #[allow(clippy::too_many_lines)]
     pub fn sync_physics(&mut self, sim: &monada_script::PhysicsSim, dt: f64) {
         self.retire_dead_mirrors(sim);
         for body in sim.world.bodies() {
@@ -1282,6 +1452,9 @@ impl MapRender {
                     blitted: usize::MAX,
                     dims: IVec3::ONE,
                     wheels: Vec::new(),
+                    deco_grid: None,
+                    deco_blitted: 0,
+                    drill: None,
                 }
             });
 
@@ -1341,7 +1514,7 @@ impl MapRender {
                     i
                 } else {
                     let grid = new_prop_grid(&mut self.scene, 1.0);
-                    let r_world = radius * SCALE;
+                    let r_world = radius * SCALE * WHEEL_RENDER_SCALE;
                     blit_wheel_cylinder(&mut self.scene, grid, r_world, WHEEL_HALF_WIDTH);
                     #[allow(clippy::cast_possible_truncation)]
                     mirror.wheels.push(WheelMirror {
@@ -1358,12 +1531,15 @@ impl MapRender {
                 }
                 let steer = wheel.input().steer.to_f64();
                 // Seat the wheel on the ACTUAL suspension length (see
-                // `wheel_travel`), not the rest length.
+                // `wheel_travel`), not the rest length — then lift the
+                // centre by the render-only radius surplus so the
+                // inflated rim touches where the physics contact is.
                 let anchor_sim = dvec3(body.position()) + q * dvec3(wheel.def().anchor);
                 let down_sim = q * DVec3::NEG_Z;
                 let rest = wheel.def().rest_length.to_f64();
                 let travel = wheel_travel(&sim.terrain, anchor_sim, down_sim, rest, radius);
-                let center_sim = anchor_sim + down_sim * travel;
+                let lift = radius * (WHEEL_RENDER_SCALE - 1.0);
+                let center_sim = anchor_sim + down_sim * (travel - lift);
                 let wrot = mirror_half_turn()
                     * q
                     * DQuat::from_rotation_z(steer)
@@ -1373,6 +1549,23 @@ impl MapRender {
                     grid.transform.rotation = wrot;
                 }
             }
+
+            sync_body_deco(
+                &mut self.scene,
+                self.body_decos.get(&body.id().0),
+                mirror,
+                origin,
+                rot,
+            );
+            sync_drill_cone(
+                &mut self.scene,
+                self.drill_vis.get(&body.id().0),
+                sim.tools.get(&body.id().0),
+                mirror,
+                q,
+                dvec3(body.position()),
+                dt,
+            );
         }
     }
 
@@ -1394,6 +1587,19 @@ impl MapRender {
                 let (r, hw) = wm.extent;
                 if let Some(grid) = self.scene.grid_mut(wm.grid) {
                     grid.set_rect(IVec3::new(-r, -hw, -r), IVec3::new(r, hw, r), None);
+                }
+            }
+            if let (Some(gid), Some(boxes)) = (mirror.deco_grid, self.body_decos.get(id)) {
+                if let Some(grid) = self.scene.grid_mut(gid) {
+                    for &(lo, hi, _) in boxes {
+                        grid.set_rect(lo, hi, None);
+                    }
+                }
+            }
+            if let Some(dm) = &mirror.drill {
+                if let Some(grid) = self.scene.grid_mut(dm.grid) {
+                    let r = dm.base_r + 2;
+                    grid.set_rect(IVec3::new(0, -r, -r), IVec3::new(dm.len, r, r), None);
                 }
             }
             false
@@ -1432,7 +1638,45 @@ impl MapRender {
     }
 
     pub fn camera(&self) -> Camera {
-        self.camera.to_roxlap()
+        let mut cam = self.camera.to_roxlap();
+        // Volume maps: third-person camera collision (the keyhole cutout
+        // is gone, so nothing else keeps the eye out of rock — a flipped
+        // vehicle by the mountain face was a full-screen sandstone wall).
+        // Walk the focus→eye ray through the CLIPPED scene (the same cut
+        // the player sees; a 1-frame-old clip is fine) and pull the eye
+        // just short of the first hit. Render-side only — the orbit
+        // distance the wheel owns is untouched.
+        if self.volume {
+            let center = self.camera.center;
+            let eye = DVec3::from_array(cam.pos);
+            let back = eye - center;
+            let dist = back.length();
+            if dist > 1e-6 {
+                if let Some(hit) = self.scene.raycast_clipped(center, back / dist, dist) {
+                    // The vehicle's own mirror grids are not obstacles —
+                    // a grazing hit on the hull would judder the camera —
+                    // and a hit within one cell of the focus means the
+                    // FOCUS itself is buried (a degenerate ray born in
+                    // rock), which pulling could only make worse.
+                    let pulled = (hit.t - 12.0).max(24.0);
+                    if hit.t > 16.0 && pulled < dist && !self.is_vehicle_grid(hit.grid) {
+                        cam.pos = (center + back / dist * pulled).to_array();
+                    }
+                }
+            }
+        }
+        cam
+    }
+
+    /// Whether `id` is one of the physics-mirror grids (hull, deco,
+    /// wheels, drill cone) — the camera-collision ray ignores those.
+    fn is_vehicle_grid(&self, id: GridId) -> bool {
+        self.body_mirrors.values().any(|m| {
+            m.grid == id
+                || m.deco_grid == Some(id)
+                || m.wheels.iter().any(|w| w.grid == id)
+                || m.drill.as_ref().is_some_and(|d| d.grid == id)
+        })
     }
     pub fn orbit(&mut self, dyaw: f64, dpitch: f64, ddist: f64) {
         self.camera.orbit(dyaw, dpitch, ddist);
@@ -1683,7 +1927,32 @@ impl MapRender {
         frame.sky = self.sky.as_ref(); // CPU backend sky panorama
                                        // Sprites are flat-lit on both backends; this is just the on/off opt-in.
         frame.draw_sprites = true;
-        frame.side_shades = self.side_shades;
+        // Volume maps light through the dynamic rig — the map's sun as a
+        // real directional light over the baked ambient/AO channel, with
+        // stylized shadows, so isotropic voxel edges READ (digger feel
+        // polish). The sim→world direction composes the world-X mirror
+        // and the z-down flip (`R_y(π)`): `(dx, dy, dz) → (−dx, dy, −dz)`.
+        // Column maps keep the legacy per-face side_shades, byte-stable.
+        if let (true, Some((dir, intensity))) = (self.volume, self.sun) {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                frame.lights = Some(roxlap_render::LightRig {
+                    sun: Some(roxlap_render::DirectionalLight {
+                        direction: [-dir.x as f32, dir.y as f32, -dir.z as f32],
+                        color: [1.0; 3],
+                        intensity,
+                        casts_shadow: true,
+                    }),
+                    ambient: [0.62; 3],
+                    shadow_strength: 0.42,
+                    shadow_bias_voxels: 1.5,
+                    shadow_max_dist: 2400.0,
+                    ..roxlap_render::LightRig::default()
+                });
+            }
+        } else {
+            frame.side_shades = self.side_shades;
+        }
         // Third-person wall cutout: a keyhole around the camera focus (the crew
         // member) so front geometry between eye and focus dissolves. Project the
         // sim-cell radius to logical pixels at the focus distance
@@ -2589,8 +2858,16 @@ impl HostBridge for MapRender {
         // threshold (smaller grid-z = higher up, z-down) become air. So clip at
         // the band top (sim `z_hi`) to cut everything above it. A band whose top
         // is the world's tallest voxel yields a threshold at/below all geometry,
-        // cutting nothing.
-        self.deck_clip = Some(deck_clip_world_z(z_hi));
+        // cutting nothing. Volume maps are ISOTROPIC and grid-LOCAL (cell z →
+        // grid voxel `-z-1`, origin handles GROUND_Z): keep voxels with
+        // grid-z ≥ `-z_hi-1`, i.e. sim cells ≤ z_hi — the digger's
+        // follow-the-vehicle tunnel cutaway.
+        #[allow(clippy::cast_possible_truncation)]
+        if self.volume {
+            self.deck_clip = Some((-z_hi - 1) as i32);
+        } else {
+            self.deck_clip = Some(deck_clip_world_z(z_hi));
+        }
         // The full sim band drives the fog of war's `DeckBand` too.
         self.deck_band = Some((z_lo, z_hi));
     }
@@ -2622,6 +2899,38 @@ impl HostBridge for MapRender {
 
     fn phys_material_color(&mut self, mat: i64, color: i64) {
         self.phys_colors.insert(mat as u16, color as u32);
+    }
+
+    fn body_deco_box(
+        &mut self,
+        body: i64,
+        x0: i64,
+        y0: i64,
+        z0: i64,
+        x1: i64,
+        y1: i64,
+        z1: i64,
+        color: i64,
+    ) {
+        let lo = IVec3::new(
+            x0.min(x1) as i32,
+            y0.min(y1) as i32,
+            z0.min(z1) as i32,
+        );
+        let hi = IVec3::new(
+            x0.max(x1) as i32,
+            y0.max(y1) as i32,
+            z0.max(z1) as i32,
+        );
+        self.body_decos
+            .entry(body as u64)
+            .or_default()
+            .push((lo, hi, color as u32));
+    }
+
+    fn drill_indicator(&mut self, body: i64, pitch: Fixed, spinning: bool) {
+        self.drill_vis
+            .insert(body as u64, (pitch.to_f64(), spinning));
     }
 
     fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3) {
@@ -2689,6 +2998,12 @@ impl HostBridge for MapRender {
             return;
         }
         let travel = raw / len; // unit direction the light travels
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            // Volume maps light through the dynamic rig (render_into);
+            // stored in SIM space, transformed there.
+            self.sun = Some((travel, intensity.to_f64() as f32));
+        }
                                 // Board grid: darken only faces tilted *away* from the sun (normal
                                 // along the light's travel, `dot > 0`); faces toward or perpendicular
                                 // to it keep full brightness, so the lit board reads bright, not

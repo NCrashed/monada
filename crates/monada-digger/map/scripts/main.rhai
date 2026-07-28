@@ -27,11 +27,14 @@ fn init() {
     let ground = phys_material(fixed(1), ratio(4, 5), fixed(0), fixed(40));
     let hull = phys_material(fixed(1), ratio(1, 2), fixed(0), fixed(100));
     // Granite is drillable-but-slow, NOT impassable: its hardness must
-    // stay under the drill budget (80), or a vein becomes a softlock
+    // stay under the drill budget (100), or a vein becomes a softlock
     // instead of a grind.
     let sandstone = phys_material(fixed(1), ratio(4, 5), fixed(0), fixed(10));
     let granite = phys_material(fixed(1), ratio(4, 5), fixed(0), fixed(50));
     let crystal = phys_material(fixed(1), ratio(1, 2), fixed(0), fixed(25));
+    // The world's unbreakable floor: hardness no budget will ever
+    // afford — the drill policy stops dead at it.
+    let core = phys_material(fixed(1), ratio(4, 5), fixed(0), fixed(100000));
 
     // The flat apron: a 160×160 slab, two voxels thick (cells z 0..1,
     // top surface at z = 2) — runway enough for the golden's full
@@ -51,22 +54,22 @@ fn init() {
     voxel_fill(0, 158, 0, 1, 159, 4, 0x80a0_6040);
     voxel_fill(158, 158, 0, 159, 159, 4, 0x80a0_6040);
 
-    // The bedrock underlayer (plan §2, D3): eight cells of solid ground
-    // under the whole apron — what a pitched-down drill descends
-    // through. The BASEMENT vault (x 128..156, y 110..126, z −4..−1 — a
-    // long undercroft below the mountain whose ceiling is the apron slab
-    // itself, so a ~14° effective bore from the crystal chamber breaks
-    // through within the chamber-to-vault run; steeper shafts cut slots
-    // too low to enter and shallower ones never get down — the D3 trace
-    // lessons; the floor sits a jump-class ~3-cell drop below the
-    // breach, so the arrival lands on wheels, D4) hides inside it,
-    // built paint-AROUND — five boxes, the cavity itself never painted —
-    // so init carves nothing (no puff storm, no wasted rehash).
-    voxel_fill(0, 0, -8, 127, 159, -1, 0x8060_5850);
-    voxel_fill(157, 0, -8, 159, 159, -1, 0x8060_5850);
-    voxel_fill(128, 0, -8, 156, 109, -1, 0x8060_5850);
-    voxel_fill(128, 127, -8, 156, 159, -1, 0x8060_5850);
-    voxel_fill(128, 110, -8, 156, 126, -5, 0x8060_5850);
+    // The bedrock underlayer (plan §2, D3; deepened for the feel
+    // polish): TWENTY cells of drillable ground under the whole apron —
+    // real mining room below the vault — sitting on an UNBREAKABLE core
+    // (hardness far beyond any budget: the drill's front-to-back policy
+    // stops at the first cell it cannot afford, so the world has a
+    // floor you cannot fall out of). The BASEMENT vault (x 128..156,
+    // y 110..126, z −4..−1 — ceiling is the apron slab itself, floor a
+    // jump-class ~3-cell drop below the breach) hides inside the
+    // underlayer, built paint-AROUND — five boxes, the cavity itself
+    // never painted — so init carves nothing.
+    voxel_fill(0, 0, -20, 127, 159, -1, 0x8060_5850);
+    voxel_fill(157, 0, -20, 159, 159, -1, 0x8060_5850);
+    voxel_fill(128, 0, -20, 156, 109, -1, 0x8060_5850);
+    voxel_fill(128, 127, -20, 156, 159, -1, 0x8060_5850);
+    voxel_fill(128, 110, -20, 156, 126, -5, 0x8060_5850);
+    voxel_fill(0, 0, -24, 159, 159, -21, 0x8028_2430, core);
     // Crystal pillars on the vault floor (decoration; the OBJECTIVE
     // crystals are entities, below).
     voxel_fill(134, 114, -4, 134, 114, -3, 0x80a0_e8f0, crystal);
@@ -151,15 +154,17 @@ fn init() {
     // must never nick the floor it drives on: a one-cell pothole under
     // the wheels is an unclimbable lip from standstill (the P3 lesson,
     // learned the hard way in the D3 traces).
+    // hy = 4: the bore is two cells wider than the track, so the
+    // vehicle passes its own tunnel without scraping the walls.
     phys_drill_tool(
         body,
         ratio(15, 2), fixed(2), fixed(1),
-        fixed(3), fixed(3), ratio(5, 2),
+        fixed(3), fixed(4), ratio(5, 2),
     );
 
     let arch = archetype([
         "body", "w_fl", "w_fr", "w_rl", "w_rr", "drive", "steer", "brake", "drill", "pitch_in",
-        "pitch", "score", "cam", "bite", "cyaw", "found", "crystal_arch",
+        "pitch", "score", "bite", "cyaw", "found", "crystal_arch",
     ]);
     let v = entity_create(arch);
     entity_set_field(v, "body", fixed(body));
@@ -185,7 +190,7 @@ fn init() {
     entity_set_position(c2, vec3(fixed(137), fixed(119), fixed(3)));
     entity_set_model(c2, cm);
     let c3 = entity_create(cr);
-    entity_set_position(c3, vec3(fixed(150), fixed(118), fixed(-4)));
+    entity_set_position(c3, vec3(fixed(152), fixed(116), fixed(-2)));
     entity_set_model(c3, cm);
 
     // The body mirror wears the map's own material colours (D4) —
@@ -195,21 +200,31 @@ fn init() {
     phys_material_color(sandstone, 0x80c8_a860);
     phys_material_color(granite, 0x8060_6a74);
     phys_material_color(crystal, 0x80a0_e8f0);
+    phys_material_color(core, 0x8028_2430);
+
+    // Body trim (feel polish): render-only FINE-voxel deco riding the
+    // physics pose — fenders over the four wheels (they read as part of
+    // the machine instead of floating), side skirts closing the
+    // hull-to-wheel gap, and a glass cockpit up front. Shape-local fine
+    // coords: the hull spans (0,0,0)..(96,64,32), 16 per cell; wheels
+    // centre at y −8 / +72, front x ~104, rear x ~−8.
+    body_deco_box(body, 84, 60, -10, 120, 78, 4, 0x8040_444c);
+    body_deco_box(body, 84, -14, -10, 120, 4, 4, 0x8040_444c);
+    body_deco_box(body, -24, 60, -10, 12, 78, 4, 0x8040_444c);
+    body_deco_box(body, -24, -14, -10, 12, 4, 4, 0x8040_444c);
+    body_deco_box(body, 12, 60, -8, 84, 66, 4, 0x8060_6670);
+    body_deco_box(body, 12, -2, -8, 84, 4, 4, 0x8060_6670);
+    body_deco_box(body, 28, 14, 32, 64, 50, 40, 0x80a8_d0e0);
 
     // Render-side dressing (no-ops headless). The engine's automatic body
     // mirror draws the vehicle (plan §1d) — the map never hand-mirrors it.
     // The chase cam takes over on the first tick; this is just the pre-tick
     // frame.
     camera_focus(phys_pos(body));
-    camera_angle(pi() - phys_yaw(body), ratio(1, 2));
-    camera_dist(fixed(220));
-    // The view cutout stays ON for the whole map: "am I under a roof"
-    // is not expressible from the sim layer (no z-threshold works —
-    // the crystal chamber floor sits at surface height), and a keyhole
-    // that dissolves rock between camera and vehicle is harmless in
-    // the open. Focus discipline keeps the bored face safe: geometry
-    // beyond the focus distance is never cut.
-    camera_cutout(fixed(5), fixed(2));
+    camera_angle(pi() - phys_yaw(body), ratio(2, 5));
+    camera_dist(fixed(200));
+    // No view cutout: the follow-the-vehicle deck clip (tick) IS the
+    // underground view — a keyhole on top of it just ate tunnel walls.
     set_light(vec3(fixed(1), fixed(2), fixed(-3)), ratio(9, 10));
     status("digger: W/S drive, A/D steer, Space brake, E drill, R/F pitch");
 }
@@ -254,19 +269,23 @@ fn command(player, verb, target, arg) {
 fn tick(dt) {
     let v = vehicle();
     let body = to_int(entity_field(v, "body"));
-    // Feel constants: full drive = torque 25, full brake = 100, full
-    // steer = 1/5 rad (3/10 drifts the stance into a bottomed-out slide).
+    // Feel constants (punched up in the feel polish): full drive =
+    // torque 40 (S reverses through the same torque — natural braking
+    // when rolling forward), full steer = 1/5 rad (3/10 drifts the
+    // stance into a bottomed-out slide). Space is the HANDBRAKE: it
+    // locks the REAR axle only (250), so a fast pull swings the tail —
+    // the fun kind of stop.
     // Steer is NEGATED: input +1 means "screen right", and with the
     // chase cam behind the body a positive physics yaw (+z, toward sim
     // +y) reads as a LEFT turn on screen.
-    let drive = entity_field(v, "drive") * fixed(25);
+    let drive = entity_field(v, "drive") * fixed(40);
     let steer = entity_field(v, "steer") * ratio(-1, 5);
-    let brake = entity_field(v, "brake") * fixed(100);
-    // Front wheels steer; all four drive and brake.
-    phys_wheel_input(body, to_int(entity_field(v, "w_fl")), steer, drive, brake);
-    phys_wheel_input(body, to_int(entity_field(v, "w_fr")), steer, drive, brake);
-    phys_wheel_input(body, to_int(entity_field(v, "w_rl")), fixed(0), drive, brake);
-    phys_wheel_input(body, to_int(entity_field(v, "w_rr")), fixed(0), drive, brake);
+    let hand = entity_field(v, "brake") * fixed(250);
+    // Front wheels steer and drive; rear wheels drive and handbrake.
+    phys_wheel_input(body, to_int(entity_field(v, "w_fl")), steer, drive, fixed(0));
+    phys_wheel_input(body, to_int(entity_field(v, "w_fr")), steer, drive, fixed(0));
+    phys_wheel_input(body, to_int(entity_field(v, "w_rl")), fixed(0), drive, hand);
+    phys_wheel_input(body, to_int(entity_field(v, "w_rr")), fixed(0), drive, hand);
     // Drill pitch (plan §1e): the nudge axis integrates into a held
     // pitch, clamped to ±45° (pi/4). +1 nudges the nose UP at 45°/s.
     let pitch = entity_field(v, "pitch") + entity_field(v, "pitch_in") * pi() * dt / fixed(4);
@@ -278,10 +297,11 @@ fn tick(dt) {
         pitch = -lim;
     }
     entity_set_field(v, "pitch", pitch);
-    // The drill (plan §1c): one engine sweep per held tick. Budget 80:
-    // the reaction of a full cut (80) stays under the drive train's
-    // push (4×25 torque ≈ 100-force), so boring never out-brakes the
-    // wheels — 8 sandstone / 2 bedrock / 1 granite cells per tick.
+    // The drill (plan §1c): one engine sweep per held tick. Budget 100
+    // (raised with the hy-4 wide bore): the reaction of a full cut
+    // stays under the drive train's push (4×40 torque ≈ 160-force), so
+    // boring never out-brakes the wheels — 10 sandstone / 2 bedrock /
+    // 2 granite cells per tick.
     // The bore is GRAVITY-STABLE: subtracting the chassis attitude
     // keeps the cut on the commanded grade even when ramming the face
     // noses the body up — otherwise the tunnel ratchets upward and the
@@ -290,10 +310,13 @@ fn tick(dt) {
     // reads it as a crude "how hard is this rock" indicator.
     let bite = 0;
     if entity_field(v, "drill") > fixed(0) {
-        bite = phys_drill(body, pitch - phys_pitch(body), fixed(80));
+        bite = phys_drill(body, pitch - phys_pitch(body), fixed(100));
         entity_set_field(v, "score", entity_field(v, "score") + fixed(bite));
     }
     entity_set_field(v, "bite", fixed(bite));
+    // The spinning cone on the nose: tilted with the commanded pitch,
+    // spinning while the drill is held — "it's working" at a glance.
+    drill_indicator(body, pitch, entity_field(v, "drill") > fixed(0));
     // Mirror the pose onto the entity (sensors and game logic read the
     // World, never the physics handle).
     let p0 = phys_pos(body);
@@ -335,27 +358,52 @@ fn tick(dt) {
     let cyaw = entity_field(v, "cyaw");
     cyaw += atan2(sin(yaw - cyaw), cos(yaw - cyaw)) / fixed(6);
     entity_set_field(v, "cyaw", cyaw);
+    // ONE camera mode (feel polish — the old surface/underground switch
+    // was whiplash): a fixed chase frame, and the WORLD adapts instead —
+    // the deck cutaway below clips away everything more than 3 cells
+    // above the vehicle, so a tunnel shows itself, its walls, and the
+    // rock face ahead, surface or not. Distance is the player's (mouse
+    // wheel); we set it once in init and never touch it again.
     let p = phys_pos(body);
-    let underground = entity_field(v, "drill") > fixed(0) || p.z < fixed(3);
-    let mode = if underground { fixed(1) } else { fixed(0) };
-    if mode != entity_field(v, "cam") {
-        entity_set_field(v, "cam", mode);
-        if underground {
-            camera_dist(fixed(140));
-        } else {
-            camera_dist(fixed(220));
-        }
+    // Pull the look-ahead back out of solid rock: aiming the focus INTO
+    // a face buried the camera-collision ray at t≈0 and slammed the
+    // view onto the drill's rear.
+    let ahead = fixed(6);
+    while ahead > fixed(0)
+        && phys_solid(
+            to_int(p.x + cos(cyaw) * ahead),
+            to_int(p.y + sin(cyaw) * ahead),
+            to_int(p.z),
+        )
+    {
+        ahead -= fixed(2);
     }
-    if underground {
-        camera_focus(p);
-        camera_angle(pi() - cyaw, ratio(1, 5));
+    camera_focus(vec3(
+        p.x + cos(cyaw) * ahead,
+        p.y + sin(cyaw) * ahead,
+        p.z,
+    ));
+    camera_angle(pi() - cyaw, ratio(2, 5));
+    // The world-slice clip engages only UNDER A ROOF: probe the volume
+    // store straight above the cockpit (phys_solid — the deterministic
+    // terrain read); in the open the clip lifts entirely, so tall
+    // landscape (the mountain, walls, ramps) stays visible.
+    let cx = to_int(p.x);
+    let cy = to_int(p.y);
+    let cz = to_int(p.z);
+    let roof = false;
+    let dz = 3;
+    while dz <= 14 {
+        if phys_solid(cx, cy, cz + dz) {
+            roof = true;
+            break;
+        }
+        dz += 1;
+    }
+    if roof {
+        deck_clip(-24, cz + 1);
     } else {
-        camera_focus(vec3(
-            p.x + cos(cyaw) * fixed(10),
-            p.y + sin(cyaw) * fixed(10),
-            p.z,
-        ));
-        camera_angle(pi() - cyaw, ratio(1, 2));
+        deck_clip(-24, 99);
     }
 }
 

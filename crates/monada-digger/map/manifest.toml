@@ -4,8 +4,9 @@
 name = "monada digger demo"
 engine_version = "0.0.1"
 # Requires the phys_* sim-physics verbs + volume terrain routing, the
-# D3 drill loop, and the D4 polish surface (atan2, phys_material_color).
-host_api = 10
+# D3 drill loop, the D4 polish surface (atan2, phys_material_color),
+# and the feel-polish surface (body_deco_box, drill_indicator).
+host_api = 11
 # Single-player sandbox. The lockstep command stream keeps the LAN door
 # open (plan §6), but the demo ships solo.
 players = 1
@@ -35,7 +36,7 @@ label = { en = "Steer" }
 id = "brake"
 kind = "button"
 default = ["Space"]
-label = { en = "Brake" }
+label = { en = "Handbrake" }
 
 [[action]]
 id = "drill"
