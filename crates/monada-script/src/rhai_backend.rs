@@ -437,6 +437,17 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
                 .model_actor(path.as_str(), &states, height_cells)
         },
     );
+    // Rigged `.rkc` character: `model_character(path, height_cells)`, then the
+    // same per-entity `entity_set_anim` (by clip name) / `entity_set_facing`.
+    let b = bridge.clone();
+    engine.register_fn(
+        "model_character",
+        move |path: ImmutableString, height_cells: Fixed| -> i64 {
+            b.lock()
+                .expect("bridge mutex")
+                .model_character(path.as_str(), height_cells)
+        },
+    );
     let b = bridge.clone();
     engine.register_fn("model_drop", move |model: i64, cells: Fixed| {
         b.lock().expect("bridge mutex").model_drop(model, cells);

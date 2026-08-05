@@ -75,8 +75,12 @@ pub use volume::VolumeStore;
 /// that reads one — fog, the deck cutaway, picking, the camera —
 /// composes against an identity transform exactly as before; 13 =
 /// `grid_pivot` (the grid-local point `grid_orient` turns about, so a
-/// hull turns in place instead of swinging about a corner).
-pub const HOST_API_VERSION: u32 = 13;
+/// hull turns in place instead of swinging about a corner); 14 =
+/// `model_character` (rigged `.rkc` voxel characters — real geometry
+/// with a skeleton and named clips, the 3D counterpart of
+/// `model_actor`'s billboards; it reuses `entity_set_anim` /
+/// `entity_set_facing` / `model_drop`, so nothing else moved).
+pub const HOST_API_VERSION: u32 = 14;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -542,23 +546,56 @@ pub trait HostBridge: Send {
         -1
     }
 
-    /// Nudge an actor model's sprites down (`cells` > 0) or up (< 0) by that
-    /// many cells, on top of the pivot-computed grounding. Lets a map correct
-    /// art whose visible feet aren't at the trimmed opaque bottom (e.g. a baked
-    /// shadow) without re-authoring the GIFs. Render-side only.
+    /// Define a rigged, animated **character** model from an `.rkc` asset in
+    /// the map archive (`roxlap-formats`' character container: voxel meshes +
+    /// a skeleton + named animation clips). Real geometry, not a billboard —
+    /// it turns in world space instead of swapping a pre-drawn facing, so a
+    /// steep camera sees it in proper perspective (`host_api` 14).
+    ///
+    /// `height_cells` is the rendered height in sim cells, measured over the
+    /// character's **first clip** (its idle) so a sprawling death pose can't
+    /// shrink the walking character; pass `0` (or less) to keep the artist's
+    /// scale, one model voxel per world voxel. Returns a model id to bind
+    /// with [`entity_set_model`](Self::entity_set_model), or `-1` if the asset
+    /// is missing or unparsable.
+    ///
+    /// The animation states are the character's own clip names, selected per
+    /// entity with [`entity_set_anim`](Self::entity_set_anim); facing comes
+    /// from [`entity_set_facing`](Self::entity_set_facing), grounding is
+    /// nudged with [`model_drop`](Self::model_drop). Whether a clip loops or
+    /// holds its last frame is baked into the clip's own keyframe sequence —
+    /// unlike [`model_actor`](Self::model_actor), where the host picks the
+    /// loop mode by state name — so a death that replays forever is an
+    /// authoring fix, not a script one. Render-side only; the default
+    /// ignores it.
+    fn model_character(&mut self, _asset_path: &str, _height_cells: Fixed) -> i64 {
+        -1
+    }
+
+    /// Nudge a model's sprites down (`cells` > 0) or up (< 0) by that many
+    /// cells, on top of the pivot-computed grounding. Lets a map correct art
+    /// whose visible feet aren't at the trimmed opaque bottom (e.g. a baked
+    /// shadow) without re-authoring the GIFs — or lift a hovering `.rkc`
+    /// character off the floor. Applies to actor and character models.
+    /// Render-side only.
     fn model_drop(&mut self, _model: i64, _cells: Fixed) {}
 
-    /// Set an actor entity's current animation state by name (one of the
-    /// `states` given to [`model_actor`](Self::model_actor)). Render-side only.
+    /// Set an entity's current animation state by name: one of the `states`
+    /// given to [`model_actor`](Self::model_actor), or one of the clip names
+    /// baked into the [`model_character`](Self::model_character) `.rkc`. An
+    /// unknown name leaves the current animation playing. Render-side only.
     fn entity_set_anim(&mut self, _entity: i64, _state: &str) {}
 
-    /// Set an actor entity's facing yaw in sim radians (`atan2(dy, dx)`); the
-    /// renderer picks the matching directional sprite. Render-side only.
+    /// Set an entity's facing yaw in sim radians (`atan2(dy, dx)`): an actor
+    /// picks the matching directional sprite, a character turns its geometry.
+    /// Render-side only.
     fn entity_set_facing(&mut self, _entity: i64, _yaw: Fixed) {}
 
     /// Tint an actor entity's sprite by an `0x00RR_GGBB` colour multiply
     /// (`0x00FF_FFFF` = white = no tint; e.g. `0x00FF_4040` = damage red).
     /// Render-side only — flash a hit without touching the hashed sim.
+    /// Billboard actors only: roxlap has no per-character tint, so a
+    /// [`model_character`](Self::model_character) entity ignores it.
     fn entity_set_tint(&mut self, _entity: i64, _tint: i64) {}
 
     // --- audio (render-side, never hashed) --------------------------------

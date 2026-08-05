@@ -38,7 +38,7 @@ entry = "scripts/main.rhai"
 |---|---|
 | `name` | Human-readable title, shown in the host and used as the key for saved key bindings. |
 | `engine_version` | The engine version the map was authored against. |
-| `host_api` | The script-API version the map requires — the version of the function set your scripts call (`entity_create`, `voxel_set`, …). Declare the oldest version that carries every verb you call; a host runs only a version inside its supported range (`1..=12` today) and refuses the map up front instead of failing mid-game. Growth is additive, so the range's top moves with each new verb while the bottom stays put — an old map keeps working. Only a *breaking* change moves the bottom, turning an outdated declaration into a loud refusal rather than a quiet re-interpretation. Omitted = `1`. |
+| `host_api` | The script-API version the map requires — the version of the function set your scripts call (`entity_create`, `voxel_set`, …). Declare the oldest version that carries every verb you call; a host runs only a version inside its supported range (`1..=14` today) and refuses the map up front instead of failing mid-game. Growth is additive, so the range's top moves with each new verb while the bottom stays put — an old map keeps working. Only a *breaking* change moves the bottom, turning an outdated declaration into a loud refusal rather than a quiet re-interpretation. Omitted = `1`. |
 | `players` | Player count (a two-player map is `2`). |
 | `sim_hz` | The tick model — see below. |
 | `script_runtime` | The scripting backend; `"rhai"` in v0. |

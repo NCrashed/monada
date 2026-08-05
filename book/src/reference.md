@@ -130,12 +130,30 @@ to place in a command payload.
 | `model_box(w, h, d, color)` | define a procedural box sprite; returns a model id |
 | `model_kv6(path, turns)` | define a sprite from a KV6 asset; returns a model id |
 | `model_actor(path, states, height)` | define an animated 8-direction billboard; returns a model id |
-| `model_drop(model, cells)` | nudge an actor model's sprites down/up by `cells` |
+| `model_character(path, height)` | define a rigged `.rkc` voxel character (skeleton + named clips); returns a model id, or `-1` if the asset is missing or unparsable (requires `host_api` 14) |
+| `model_drop(model, cells)` | nudge an actor's or character's sprites down/up by `cells` |
 | `entity_set_model(entity, model)` | bind an entity to a render model |
 | `entity_set_grid(entity, grid)` | bind an entity to a `grid_spawn` grid so it rides that grid's transform (its position is read as grid-local); `-1` unbinds; unbound entities render in the global frame. Binding the fog observer also moves fog/`deck_clip` onto that grid |
-| `entity_set_anim(entity, state)` | set an actor entity's animation state |
-| `entity_set_facing(entity, yaw)` | set an actor entity's facing yaw (radians) |
-| `entity_set_tint(entity, tint)` | multiply an actor's sprite by a `0xRRGGBB` tint |
+| `entity_set_anim(entity, state)` | set an entity's animation: an actor state, or a character's `.rkc` clip name (an unknown name keeps the current one) |
+| `entity_set_facing(entity, yaw)` | set an entity's facing yaw (radians): an actor picks its directional sprite, a character turns its geometry |
+| `entity_set_tint(entity, tint)` | multiply an actor's sprite by a `0xRRGGBB` tint (billboard actors only) |
+
+A **billboard actor** is pre-drawn art: eight GIF facings the renderer picks
+from, on a card that stays upright, so a steep camera foreshortens it. A
+**character** is a real voxel rig — [demiurg]'s `.rkc` container, holding the
+meshes, the skeleton and every clip in one file — so it turns in world space
+and holds its proportions at any camera angle. `height` is the rendered height
+in sim cells, measured over the character's *first* clip (its idle) so a
+sprawling death pose can't shrink it; pass `0` to keep the artist's scale, one
+model voxel per world voxel. Both kinds animate and face through the same two
+verbs above.
+
+Whether a character's clip loops or holds its last frame is baked into the
+clip itself (its keyframe sequence), not chosen by the map — so a death
+animation that replays forever is fixed in the editor, not in the script.
+Switching clips restarts the new one from its first frame.
+
+[demiurg]: https://github.com/NCrashed/demiurg
 
 ## World painting — *presentation*
 

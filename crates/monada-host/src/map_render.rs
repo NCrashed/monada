@@ -27,17 +27,20 @@ use monada_format::ActionDecl;
 use monada_render::OrbitCamera;
 use monada_script::{HostBridge, VoxelStore};
 use monada_sim::{Command, EntityId, World};
+use roxlap_core::kfa_draw::{compose_attachment, solve_kfa_limbs};
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sky::Sky;
 use roxlap_core::Camera;
+use roxlap_formats::character::{self, Character, ClipData, MeshRef};
 use roxlap_formats::kv6::{self, Kv6};
 use roxlap_formats::sprite::{Sprite, SPRITE_FLAG_NO_SHADING};
 use roxlap_formats::voxel_clip::{DecodedClip, LoopMode};
 use roxlap_formats::{OverlayColor, Rgb, VoxColor};
 use roxlap_render::gif_import::{voxel_clip_from_gif, GifImportOpts};
 use roxlap_render::{
-    ActorState, BillboardActorDef, BillboardActorId, BillboardMode, FrameParams, Line3,
-    SceneRenderer, SpriteInstanceDesc, SpriteSet, ViewCutout, VoxelClipId,
+    ActorState, BillboardActorDef, BillboardActorId, BillboardMode, CharacterId,
+    DynSpriteTransform, FrameParams, Line3, SceneRenderer, SpriteInstanceDesc, SpriteSet,
+    ViewCutout, VoxelClipId,
 };
 use roxlap_scene::fow::{DeckBand, FogOfWar, FowObserver, FowTwin, VisionConfig};
 use roxlap_scene::{GridId, GridTransform, Scene};
@@ -163,14 +166,16 @@ pub enum UiWidget {
     },
 }
 
-/// A model the script bound via `entity_set_model`: either a static sprite
-/// (box / kv6) or an animated billboard [`ActorModel`]. Unifies the public
-/// model-id space the script sees.
+/// A model the script bound via `entity_set_model`: a static sprite (box /
+/// kv6), an animated billboard [`ActorModel`], or a rigged [`CharacterModel`]
+/// (`.rkc`). Unifies the public model-id space the script sees.
 enum ModelRef {
     /// Index into [`SpriteSet::models`].
     Sprite(usize),
     /// Index into [`MapRender::actors`].
     Actor(usize),
+    /// Index into [`MapRender::characters`].
+    Character(usize),
 }
 
 /// An animated billboard actor model: each animation state's 8 decoded
@@ -286,6 +291,182 @@ struct ActorInst {
     tint: u32,
     /// The tint last pushed to the renderer — only re-set on change.
     applied_tint: u32,
+}
+
+/// A rigged `.rkc` character model (`model_character`): the parsed
+/// container, its clips by name, and the placement the map asked for.
+/// Registration with the renderer is per ENTITY (roxlap's `add_character`
+/// spawns one instance per bone attachment), so nothing here is
+/// renderer-side — unlike [`ActorModel`], whose clips upload once.
+struct CharacterModel {
+    /// Meshes + skeleton + clips, as parsed from the archive asset.
+    ch: Character,
+    /// Clip name → index into `ch.clips`, for `entity_set_anim`.
+    clips: BTreeMap<String, usize>,
+    /// World voxels per model voxel, so the character renders
+    /// `height_cells` tall whatever scale the artist rigged it at. `1.0`
+    /// when the map asked for the native size (`height_cells <= 0`).
+    scale: f32,
+    /// World distance from the character's root anchor DOWN to its lowest
+    /// posed voxel (already scaled), so the feet sit on the entity's cell
+    /// instead of the rig origin.
+    lift: f32,
+    /// Extra world-space vertical offset (`model_drop`), added when seating:
+    /// positive lowers, negative lifts (world +z is down) — the knob for a
+    /// hovering character that should float above its cell.
+    drop: f32,
+    /// Clip names `entity_set_anim` asked for that this character doesn't
+    /// have, so the warning is printed once per name, not once per frame.
+    warned: BTreeSet<String>,
+}
+
+impl CharacterModel {
+    /// The clip a per-entity instance should play, or `None` for a
+    /// character with no clips at all (roxlap poses it at rest).
+    fn clip_of(&self, inst: &CharInst) -> Option<usize> {
+        (!self.ch.clips.is_empty()).then_some(inst.clip)
+    }
+
+    /// The world transform seating this character at `pos` facing `yaw`:
+    /// roxlap takes the ROOT limb's basis, whose vector lengths carry the
+    /// scale. The model's local +z stays world +z (down), so the rig's
+    /// z-down convention is preserved and yaw is a plain spin about it.
+    fn transform(&self, pos: [f32; 3], yaw: f64) -> DynSpriteTransform {
+        #[allow(clippy::cast_possible_truncation)]
+        let (sy, cy) = (yaw.sin() as f32, yaw.cos() as f32);
+        let k = self.scale;
+        DynSpriteTransform {
+            pos,
+            right: [k * cy, k * sy, 0.0],
+            up: [-k * sy, k * cy, 0.0],
+            forward: [0.0, 0.0, k],
+        }
+    }
+}
+
+/// Per-entity live character state: the renderer handle (created lazily on
+/// the first frame it renders), the model it draws, and the clip / facing
+/// the script asked for.
+struct CharInst {
+    /// Index into [`MapRender::characters`].
+    model: usize,
+    /// The live renderer character, created on the first frame it renders.
+    id: Option<CharacterId>,
+    /// Desired clip index (script-set via `entity_set_anim`).
+    clip: usize,
+    /// The clip the live `id` was BUILT with. roxlap bakes the clip into the
+    /// skeleton at `add_character` and has no setter, so a change here
+    /// re-registers the character (cheap for the small rigs this is for).
+    applied_clip: Option<usize>,
+    /// Desired facing yaw in sim radians (script-set).
+    facing: f64,
+}
+
+/// The voxel bounding box of a kv6 mesh, in voxel units RELATIVE TO ITS
+/// PIVOT (the point roxlap places at the bone), or `None` if the mesh holds
+/// no voxels. Measured from the actual voxels, not the authored `xsiz`
+/// extent, so padding around the art doesn't inflate the character.
+fn mesh_voxel_box(kv6: &Kv6) -> Option<([f32; 3], [f32; 3])> {
+    let (mut lo, mut hi) = ([u32::MAX; 3], [0u32; 3]);
+    let mut any = false;
+    let mut idx = 0usize;
+    for x in 0..kv6.xsiz {
+        for y in 0..kv6.ysiz {
+            let n = *kv6
+                .ylen
+                .get(x as usize)
+                .and_then(|row| row.get(y as usize))
+                .unwrap_or(&0) as usize;
+            for _ in 0..n {
+                let Some(v) = kv6.voxels.get(idx) else { break };
+                idx += 1;
+                any = true;
+                for (a, c) in [x, y, u32::from(v.z)].into_iter().enumerate() {
+                    lo[a] = lo[a].min(c);
+                    hi[a] = hi[a].max(c);
+                }
+            }
+        }
+    }
+    let piv = [kv6.xpiv, kv6.ypiv, kv6.zpiv];
+    #[allow(clippy::cast_precision_loss)]
+    any.then(|| {
+        (
+            [0, 1, 2].map(|a| lo[a] as f32 - piv[a]),
+            // The max voxel occupies the cell up to `hi + 1`.
+            [0, 1, 2].map(|a| (hi[a] + 1) as f32 - piv[a]),
+        )
+    })
+}
+
+/// How far a character reaches above and below its root anchor while `clip`
+/// plays: `(top, bottom)` in model voxel units with roxlap's z-down sign, so
+/// `bottom - top` is its height and `bottom` is its feet. Sampled across the
+/// clip (the envelope, not one frame), so a flapping wing or a crouch can't
+/// make the size or the grounding pop mid-animation.
+///
+/// Only STATIC mesh attachments count: an animated clip attachment (VCL.5's
+/// flame on a hand) is decoration and must not decide how tall a character
+/// is. `None` when the rig draws no static geometry at all.
+fn clip_z_envelope(ch: &Character, clip: Option<usize>) -> Option<(f64, f64)> {
+    /// Samples per clip. The rigs this serves hold a handful of keyframes;
+    /// 16 steps catch their extremes without a measurable load cost.
+    const STEPS: i32 = 16;
+
+    // Mesh boxes are pose-independent — measure each one once, then only
+    // transform its 8 corners per sample.
+    let boxes: Vec<Option<([f32; 3], [f32; 3])>> = ch.meshes.iter().map(mesh_voxel_box).collect();
+    let mut kfa = ch.to_kfa_sprite(clip);
+    // Identity root basis at the origin: the envelope is relative to the
+    // anchor `set_character_world_transform` will place.
+    kfa.p = [0.0; 3];
+    kfa.s = [1.0, 0.0, 0.0];
+    kfa.h = [0.0, 1.0, 0.0];
+    kfa.f = [0.0, 0.0, 1.0];
+    let dur = clip
+        .and_then(|c| match &ch.clips[c].data {
+            ClipData::Skeletal { seq, .. } => seq.iter().map(|s| s.tim).max(),
+            ClipData::Unknown { .. } => None,
+        })
+        .unwrap_or(0);
+    let mut env: Option<(f64, f64)> = None;
+    for step in 0..=STEPS {
+        if step > 0 {
+            if dur <= 0 {
+                break; // a rest pose / an empty clip has nothing to sweep
+            }
+            kfa.animsprite(dur / STEPS);
+        }
+        solve_kfa_limbs(&mut kfa);
+        for (bi, bone) in ch.bones.iter().enumerate() {
+            let Some(limb) = kfa.limbs.get(bi) else {
+                continue;
+            };
+            for att in &bone.attachments {
+                let MeshRef::Static(mi) = att.target else {
+                    continue;
+                };
+                let Some(&Some((lo, hi))) = boxes.get(mi) else {
+                    continue;
+                };
+                let (basis_x, basis_y, basis_z, origin) =
+                    compose_attachment(limb.s, limb.h, limb.f, limb.p, &att.local_offset);
+                for corner in 0..8u8 {
+                    // Only the world-z row of the basis matters for a height.
+                    let dx = if corner & 1 == 0 { lo[0] } else { hi[0] };
+                    let dy = if corner & 2 == 0 { lo[1] } else { hi[1] };
+                    let dz = if corner & 4 == 0 { lo[2] } else { hi[2] };
+                    let world_z =
+                        f64::from(origin[2] + dx * basis_x[2] + dy * basis_y[2] + dz * basis_z[2]);
+                    env = Some(match env {
+                        Some((top, bottom)) => (top.min(world_z), bottom.max(world_z)),
+                        None => (world_z, world_z),
+                    });
+                }
+            }
+        }
+    }
+    env
 }
 
 /// A box sprite model. `shaded` keeps roxlap's per-face directional
@@ -875,6 +1056,9 @@ pub struct MapRender {
     model_refs: Vec<ModelRef>,
     /// Animated billboard actor models (decoded GIF clips per state).
     actors: Vec<ActorModel>,
+    /// Rigged `.rkc` character models (`model_character`), parsed from the
+    /// archive at `init` and instanced per entity by `update_characters`.
+    characters: Vec<CharacterModel>,
     /// Entity → public model id, set by `entity_set_model`. Render-side, not
     /// hashed. Despawned entities are skipped (positions read live).
     models: BTreeMap<EntityId, usize>,
@@ -887,10 +1071,18 @@ pub struct MapRender {
     /// Per-entity live actor state (only for entities bound to an actor
     /// model). Created on bind, driven by `entity_set_anim` / `_facing`.
     entity_actors: BTreeMap<EntityId, ActorInst>,
+    /// Per-entity live character state (entities bound to a `.rkc` model).
+    /// The character twin of [`entity_actors`](Self::entity_actors), driven
+    /// by the same `entity_set_anim` / `_facing` verbs.
+    entity_chars: BTreeMap<EntityId, CharInst>,
     /// Actor render targets computed by `build_instances` (which has the
     /// world) for `render_into` (which has the renderer) to apply:
     /// `(entity, model index, world pos, world yaw)`.
     actor_targets: Vec<(EntityId, usize, [f32; 3], f64)>,
+    /// Character render targets, same shape and lifetime as
+    /// [`actor_targets`](Self::actor_targets) — the world pos is already
+    /// seated (feet on the cell, `model_drop` applied).
+    char_targets: Vec<(EntityId, usize, [f32; 3], f64)>,
     /// Whether the actor clips have been registered with the renderer (done
     /// once, on the first frame a renderer is available — like `sky_uploaded`).
     clips_registered: bool,
@@ -1089,10 +1281,13 @@ impl MapRender {
             sprites,
             model_refs: Vec::new(),
             actors: Vec::new(),
+            characters: Vec::new(),
             models: BTreeMap::new(),
             entity_grid: BTreeMap::new(),
             entity_actors: BTreeMap::new(),
+            entity_chars: BTreeMap::new(),
             actor_targets: Vec::new(),
+            char_targets: Vec::new(),
             clips_registered: false,
             highlighted: BTreeSet::new(),
             ring_model: None,
@@ -1487,6 +1682,18 @@ impl MapRender {
         }
     }
 
+    /// The sim-space facing yaw the script last set on an entity, whichever
+    /// animated model kind it is bound to (`0` for an entity with neither).
+    /// The fog observer reads it through here so a crew member rigged as a
+    /// `.rkc` character aims the same cone a billboard actor would.
+    fn entity_facing(&self, e: EntityId) -> f64 {
+        self.entity_actors
+            .get(&e)
+            .map(|a| a.facing)
+            .or_else(|| self.entity_chars.get(&e).map(|c| c.facing))
+            .unwrap_or(0.0)
+    }
+
     /// A bound entity's billboard facing turned by its grid's *full* 3D
     /// rotation: the billboard's world facing direction rotated by the grid
     /// quaternion, then re-projected onto the horizontal plane. Honest for any
@@ -1520,11 +1727,12 @@ impl MapRender {
     pub fn build_instances(&mut self, world: &World) {
         self.sprites.instances.clear();
         self.actor_targets.clear();
+        self.char_targets.clear();
         // Capture the fog-of-war observer's world pose (feet + facing yaw) while
         // we have the World; `render_into` builds the `FowObserver` from it.
         self.observer_pose = self.vision_entity.and_then(|e| {
             let p = world.position(e)?;
-            let yaw = self.entity_actors.get(&e).map_or(0.0, |a| a.facing);
+            let yaw = self.entity_facing(e);
             Some((self.place(e, p), yaw))
         });
         // Snapshot the bindings so the loop can mutate the disjoint sprite /
@@ -1573,6 +1781,29 @@ impl MapRender {
                         e,
                         ai,
                         [w.x as f32, w.y as f32, w.z as f32 + drop],
+                        yaw,
+                    ));
+                }
+                Some(&ModelRef::Character(ci)) => {
+                    // A rigged `.rkc` character: the transform anchors its
+                    // ROOT, so pull the anchor up by the measured `lift` to
+                    // land its lowest posed voxel on the cell (`model_drop`
+                    // then nudges, world +z = down). Real geometry turns, so
+                    // the yaw is the model's own spin, not a sprite pick.
+                    let yaw = self.grid_facing_yaw(
+                        e,
+                        self.entity_chars
+                            .get(&e)
+                            .map_or(0.0, |c| facing_to_world_yaw(c.facing)),
+                    );
+                    let (lift, drop) = self
+                        .characters
+                        .get(ci)
+                        .map_or((0.0, 0.0), |c| (c.lift, c.drop));
+                    self.char_targets.push((
+                        e,
+                        ci,
+                        [w.x as f32, w.y as f32, w.z as f32 - lift + drop],
                         yaw,
                     ));
                 }
@@ -2109,6 +2340,73 @@ impl MapRender {
         renderer.face_billboards_to(camera);
     }
 
+    /// Drive the rigged `.rkc` characters for this frame: create / re-clip /
+    /// move / retire one [`CharacterId`] per character-bound entity from the
+    /// targets `build_instances` computed, then advance each skeleton by
+    /// `dt`. Render-side only.
+    ///
+    /// Unlike the actor path there is nothing to register up front: roxlap's
+    /// `add_character` uploads a character's meshes when the INSTANCE is
+    /// created, so registration is per entity and its teardown frees them.
+    fn update_characters(&mut self, renderer: &mut SceneRenderer, dt: f64) {
+        if self.characters.is_empty() {
+            return;
+        }
+        let present: BTreeSet<EntityId> = self.char_targets.iter().map(|t| t.0).collect();
+        for &(e, ci, pos, yaw) in &self.char_targets {
+            let (Some(inst), Some(model)) =
+                (self.entity_chars.get_mut(&e), self.characters.get(ci))
+            else {
+                continue;
+            };
+            // A clip switch re-registers: the clip is baked into the skeleton
+            // at `add_character` and roxlap has no setter for it. Dropping the
+            // old instance first also frees its uploaded meshes, so a state
+            // machine cycling states doesn't leak models.
+            if inst.applied_clip.is_some() && inst.applied_clip != Some(inst.clip) {
+                if let Some(id) = inst.id.take() {
+                    renderer.remove_character(id);
+                }
+            }
+            let id = if let Some(id) = inst.id {
+                id
+            } else {
+                let id = renderer.add_character(&model.ch, model.clip_of(inst));
+                inst.id = Some(id);
+                inst.applied_clip = Some(inst.clip);
+                id
+            };
+            // Seat first, then tick: `advance_character` re-solves the whole
+            // skeleton from the root we just set, so the frame ends on one
+            // consistent pose (a tick-then-seat order would re-solve twice).
+            renderer.set_character_world_transform(id, model.transform(pos, yaw));
+            renderer.advance_character(id, dt);
+        }
+
+        // Retire characters whose entity is gone this frame (despawned).
+        let gone: Vec<EntityId> = self
+            .entity_chars
+            .iter()
+            .filter(|(e, c)| c.id.is_some() && !present.contains(e))
+            .map(|(&e, _)| e)
+            .collect();
+        for e in gone {
+            if let Some(inst) = self.entity_chars.remove(&e) {
+                if let Some(id) = inst.id {
+                    renderer.remove_character(id);
+                }
+            }
+        }
+    }
+
+    /// Whether this map drives roxlap's DYNAMIC layer (billboard actors or
+    /// rigged characters). That layer is reset by `set_sprites`, so a map on
+    /// it uploads its static sprite set exactly once and mirrors the
+    /// selection markers through the dynamic path instead.
+    fn dynamic_layer(&self) -> bool {
+        !self.actors.is_empty() || !self.characters.is_empty()
+    }
+
     /// Draw this map: upload its sprites and render its scene, lit by the
     /// map's declared sun (grid `side_shades`; sprites are flat-lit in
     /// roxlap 0.19) and its sky. Disjoint field borrows let the per-frame
@@ -2134,17 +2432,20 @@ impl MapRender {
         // upload below.
         self.sync_puffs(dt);
         // Upload the static sprite set *before* driving the actors:
-        // `set_sprites` resets the dynamic layer (clips + actors), so a map
-        // with animated actors uploads its static set exactly once (before any
-        // actor is registered), while a static map (chess) rebuilds the set
-        // each frame (it has no actors to clobber).
-        if self.actors.is_empty() {
+        // `set_sprites` resets the dynamic layer (clips + actors +
+        // characters), so a map with animated models uploads its static set
+        // exactly once (before any of them is registered), while a static map
+        // (chess) rebuilds the set each frame (it has nothing to clobber).
+        if self.dynamic_layer() {
+            if !self.sprites_uploaded {
+                renderer.set_sprites(&self.sprites);
+                self.sprites_uploaded = true;
+            }
+        } else {
             renderer.set_sprites(&self.sprites);
-        } else if !self.sprites_uploaded {
-            renderer.set_sprites(&self.sprites);
-            self.sprites_uploaded = true;
         }
         self.update_actors(renderer, camera, dt);
+        self.update_characters(renderer, dt);
         self.sync_rings(renderer);
         // Deck cutaway: clip the grid above the local crew's deck so the camera
         // sees inside (set before building `frame`, which doesn't touch scene).
@@ -2270,7 +2571,7 @@ impl MapRender {
     }
 
     fn sync_rings(&mut self, renderer: &mut SceneRenderer) {
-        if self.actors.is_empty() {
+        if !self.dynamic_layer() {
             return; // static path (chess) draws the marker itself
         }
         if self.ring_model.is_none() {
@@ -2515,16 +2816,79 @@ impl HostBridge for MapRender {
         self.push_model_ref(ModelRef::Actor(self.actors.len() - 1))
     }
 
+    fn model_character(&mut self, asset_path: &str, height_cells: Fixed) -> i64 {
+        let Some(bytes) = self.assets.get(asset_path) else {
+            eprintln!("monada-host: model_character: missing asset {asset_path:?}");
+            return -1;
+        };
+        let ch = match character::parse(bytes) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("monada-host: model_character: {asset_path:?} is not a usable .rkc: {e}");
+                return -1;
+            }
+        };
+        // Size and ground from the FIRST clip's envelope (the idle, by
+        // convention): a death sprawl or a lunge would otherwise shrink the
+        // character every other frame of its life. A clip-less rig measures
+        // its rest pose.
+        let first_clip = (!ch.clips.is_empty()).then_some(0);
+        let Some((top, bottom)) = clip_z_envelope(&ch, first_clip) else {
+            eprintln!("monada-host: model_character: {asset_path:?} draws no static meshes");
+            return -1;
+        };
+        let target_h = height_cells.to_f64() * SCALE;
+        let native_h = bottom - top;
+        // `height_cells <= 0` keeps the artist's scale (one model voxel per
+        // world voxel) — the right default for a rig authored against the
+        // map's own voxel grid.
+        #[allow(clippy::cast_possible_truncation)]
+        let scale = if target_h > 0.0 && native_h > 1e-6 {
+            (target_h / native_h) as f32
+        } else {
+            1.0
+        };
+        let mut clips: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, clip) in ch.clips.iter().enumerate() {
+            if !clip.name.is_empty() {
+                // First wins: a duplicate clip name resolves to the earlier
+                // clip rather than silently shadowing it.
+                clips.entry(clip.name.clone()).or_insert(i);
+            }
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        self.characters.push(CharacterModel {
+            ch,
+            clips,
+            scale,
+            lift: (bottom * f64::from(scale)) as f32,
+            drop: 0.0,
+            warned: BTreeSet::new(),
+        });
+        self.push_model_ref(ModelRef::Character(self.characters.len() - 1))
+    }
+
     fn model_drop(&mut self, model: i64, cells: Fixed) {
-        // Resolve the public model id to its actor slot, then store the offset
-        // in world units (down = +z). No-op for a non-actor / bad id.
-        if let Some(&ModelRef::Actor(ai)) = usize::try_from(model)
+        // Resolve the public model id to its actor / character slot, then
+        // store the offset in world units (down = +z). No-op for a static
+        // sprite model or a bad id.
+        #[allow(clippy::cast_possible_truncation)]
+        let offset = (cells.to_f64() * SCALE) as f32;
+        match usize::try_from(model)
             .ok()
             .and_then(|m| self.model_refs.get(m))
         {
-            if let Some(actor) = self.actors.get_mut(ai) {
-                actor.drop = (cells.to_f64() * SCALE) as f32;
+            Some(&ModelRef::Actor(ai)) => {
+                if let Some(actor) = self.actors.get_mut(ai) {
+                    actor.drop = offset;
+                }
             }
+            Some(&ModelRef::Character(ci)) => {
+                if let Some(c) = self.characters.get_mut(ci) {
+                    c.drop = offset;
+                }
+            }
+            Some(&ModelRef::Sprite(_)) | None => {}
         }
     }
 
@@ -2532,26 +2896,41 @@ impl HostBridge for MapRender {
         let e = EntityId(entity as u64);
         let id = model as usize;
         self.models.insert(e, id);
-        // Binding an actor model sets up the per-entity actor state (initial
-        // animation = the model's first state).
-        if let Some(&ModelRef::Actor(ai)) = self.model_refs.get(id) {
-            let initial = self
-                .actors
-                .get(ai)
-                .and_then(|a| a.states.first())
-                .map_or("", |(n, _)| *n);
-            self.entity_actors.insert(
-                e,
-                ActorInst {
-                    model: ai,
-                    id: None,
-                    anim: initial,
-                    applied_anim: "",
-                    facing: 0.0,
-                    tint: WHITE_TINT,
-                    applied_tint: WHITE_TINT,
-                },
-            );
+        // Binding an animated model sets up the per-entity state (initial
+        // animation = the model's first state / clip).
+        match self.model_refs.get(id) {
+            Some(&ModelRef::Actor(ai)) => {
+                let initial = self
+                    .actors
+                    .get(ai)
+                    .and_then(|a| a.states.first())
+                    .map_or("", |(n, _)| *n);
+                self.entity_actors.insert(
+                    e,
+                    ActorInst {
+                        model: ai,
+                        id: None,
+                        anim: initial,
+                        applied_anim: "",
+                        facing: 0.0,
+                        tint: WHITE_TINT,
+                        applied_tint: WHITE_TINT,
+                    },
+                );
+            }
+            Some(&ModelRef::Character(ci)) => {
+                self.entity_chars.insert(
+                    e,
+                    CharInst {
+                        model: ci,
+                        id: None,
+                        clip: 0,
+                        applied_clip: None,
+                        facing: 0.0,
+                    },
+                );
+            }
+            Some(&ModelRef::Sprite(_)) | None => {}
         }
     }
 
@@ -2611,23 +2990,51 @@ impl HostBridge for MapRender {
 
     fn entity_set_anim(&mut self, entity: i64, state: &str) {
         let e = EntityId(entity as u64);
-        let Some(&ActorInst { model, .. }) = self.entity_actors.get(&e) else {
+        if let Some(&ActorInst { model, .. }) = self.entity_actors.get(&e) {
+            // Reuse the model's interned `'static` name so the renderer state
+            // and the change-detection compare cheaply.
+            let interned = self
+                .actors
+                .get(model)
+                .and_then(|a| a.states.iter().find(|(n, _)| *n == state))
+                .map(|(n, _)| *n);
+            if let (Some(name), Some(inst)) = (interned, self.entity_actors.get_mut(&e)) {
+                inst.anim = name;
+            }
+            return;
+        }
+        // A character's states are its `.rkc` clip names.
+        let Some(&CharInst { model, .. }) = self.entity_chars.get(&e) else {
             return;
         };
-        // Reuse the model's interned `'static` name so the renderer state and
-        // the change-detection compare cheaply.
-        let interned = self
-            .actors
-            .get(model)
-            .and_then(|a| a.states.iter().find(|(n, _)| *n == state))
-            .map(|(n, _)| *n);
-        if let (Some(name), Some(inst)) = (interned, self.entity_actors.get_mut(&e)) {
-            inst.anim = name;
+        match self.characters.get(model).and_then(|c| c.clips.get(state)) {
+            Some(&clip) => {
+                if let Some(inst) = self.entity_chars.get_mut(&e) {
+                    inst.clip = clip;
+                }
+            }
+            // Unknown name: keep playing whatever is on, and say so ONCE —
+            // a per-frame state machine would otherwise flood the log.
+            None => {
+                if let Some(c) = self.characters.get_mut(model) {
+                    if c.warned.insert(state.to_string()) {
+                        let have: Vec<&str> = c.clips.keys().map(String::as_str).collect();
+                        eprintln!(
+                            "monada-host: entity_set_anim: character has no clip {state:?} \
+                             (clips: {have:?})"
+                        );
+                    }
+                }
+            }
         }
     }
 
     fn entity_set_facing(&mut self, entity: i64, yaw: Fixed) {
-        if let Some(inst) = self.entity_actors.get_mut(&EntityId(entity as u64)) {
+        let e = EntityId(entity as u64);
+        if let Some(inst) = self.entity_actors.get_mut(&e) {
+            inst.facing = yaw.to_f64();
+        }
+        if let Some(inst) = self.entity_chars.get_mut(&e) {
             inst.facing = yaw.to_f64();
         }
     }
@@ -4468,6 +4875,177 @@ mod tests {
             r.model_actor("char/hero", &["idle".to_string()], Fixed::from_int(2)),
             -1,
             "a missing GIF aborts the actor model"
+        );
+    }
+
+    /// A one-bone `.rkc`: a 2x2x4 box (so its z envelope is exactly 4 model
+    /// voxels, pivot-centred) rigged to a root bone, with two named clips.
+    fn tiny_rkc() -> Vec<u8> {
+        use roxlap_formats::character::{Attachment, Bone, Clip};
+        use roxlap_formats::kfa::{Hinge, Point3, Seq};
+        use roxlap_formats::xform::BoneXform;
+
+        let zero = Point3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let axis = Point3 {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        };
+        let clip = |name: &str| Clip {
+            name: name.to_string(),
+            data: ClipData::Skeletal {
+                frmval: vec![vec![BoneXform::IDENTITY]],
+                seq: vec![Seq { tim: 0, frm: 0 }],
+            },
+        };
+        character::serialize(&Character {
+            name: "tiny".to_string(),
+            root: [0.0; 3],
+            meshes: vec![Kv6::solid_box(2, 2, 4, VoxColor(0x8080_8080))],
+            bones: vec![Bone {
+                name: "body".to_string(),
+                attachments: vec![Attachment::static_mesh(0)],
+                hinge: Hinge {
+                    parent: -1,
+                    p: [zero, zero],
+                    v: [axis, axis],
+                    vmin: 0,
+                    vmax: 0,
+                    htype: 0,
+                    filler: [0; 7],
+                },
+            }],
+            clips: vec![clip("hover"), clip("attack")],
+            voxel_clips: Vec::new(),
+            extra_chunks: Vec::new(),
+        })
+    }
+
+    /// The whole `.rkc` path with no renderer: parse, auto-scale to the asked
+    /// height, bind, name a clip, and produce the seated character target the
+    /// frame hands to `update_characters`.
+    #[test]
+    fn model_character_scales_binds_and_targets() {
+        let assets = BTreeMap::from([("mobs/moth.rkc".to_string(), tiny_rkc())]);
+        let mut r = MapRender::new(assets, Some(0), &[]);
+        let model = r.model_character("mobs/moth.rkc", Fixed::from_int(2));
+        assert!(model >= 0, "character model registered");
+        assert_eq!(r.characters.len(), 1);
+        // 2 cells x SCALE(16) over the 4-voxel envelope → 8 world voxels per
+        // model voxel, and the feet sit `2 * 8` below the (centred) root.
+        assert!(
+            (r.characters[0].scale - 8.0).abs() < 1e-3,
+            "sized by the first clip's envelope, got {}",
+            r.characters[0].scale
+        );
+        assert!(
+            (r.characters[0].lift - 16.0).abs() < 1e-3,
+            "feet offset from the root anchor, got {}",
+            r.characters[0].lift
+        );
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["hp"]);
+        let e = world.spawn(arch);
+        world.set_position(
+            e,
+            FixedVec3::new(Fixed::from_int(2), Fixed::from_int(3), Fixed::ZERO),
+        );
+        r.entity_set_model(e.0 as i64, model);
+        assert_eq!(
+            r.entity_chars.get(&e).map(|c| c.clip),
+            Some(0),
+            "binding starts on the first clip"
+        );
+        r.entity_set_anim(e.0 as i64, "attack");
+        r.entity_set_facing(e.0 as i64, Fixed::ZERO);
+        assert_eq!(
+            r.entity_chars.get(&e).map(|c| c.clip),
+            Some(1),
+            "a clip is selected by its `.rkc` name"
+        );
+        // An unknown state leaves the current clip playing (warned once).
+        r.entity_set_anim(e.0 as i64, "moonwalk");
+        assert_eq!(r.entity_chars.get(&e).map(|c| c.clip), Some(1));
+
+        // The frame produces one character target, not a sprite instance, and
+        // seats it feet-on-the-floor: the root anchor rides `lift` above it.
+        r.build_instances(&world);
+        assert_eq!(r.char_targets.len(), 1, "one character target");
+        assert_eq!(r.char_targets[0].0, e);
+        assert!(
+            (f64::from(r.char_targets[0].2[2]) - (GROUND_Z - 16.0)).abs() < 1e-3,
+            "seated by the measured lift, got {}",
+            r.char_targets[0].2[2]
+        );
+        assert!(
+            r.sprites.instances.is_empty(),
+            "a character is not a static sprite instance"
+        );
+
+        // `model_drop` nudges it down the same way it does an actor.
+        r.model_drop(model, Fixed::from_int(1));
+        r.build_instances(&world);
+        assert!(
+            (f64::from(r.char_targets[0].2[2]) - (GROUND_Z - 16.0 + SCALE)).abs() < 1e-3,
+            "model_drop lowers the character by a cell"
+        );
+    }
+
+    /// `height_cells <= 0` means "the artist's scale": one model voxel per
+    /// world voxel, whatever the rig was authored at.
+    #[test]
+    fn model_character_zero_height_keeps_native_scale() {
+        let assets = BTreeMap::from([("mobs/moth.rkc".to_string(), tiny_rkc())]);
+        let mut r = MapRender::new(assets, None, &[]);
+        assert!(r.model_character("mobs/moth.rkc", Fixed::ZERO) >= 0);
+        assert!((r.characters[0].scale - 1.0).abs() < 1e-6, "native scale");
+        assert!(
+            (r.characters[0].lift - 2.0).abs() < 1e-6,
+            "feet 2 voxels down"
+        );
+    }
+
+    /// A world transform carries the scale in its basis lengths and yaws the
+    /// geometry about the vertical axis (the model's own +z stays world +z).
+    #[test]
+    fn character_transform_carries_scale_and_yaw() {
+        let assets = BTreeMap::from([("mobs/moth.rkc".to_string(), tiny_rkc())]);
+        let mut r = MapRender::new(assets, None, &[]);
+        r.model_character("mobs/moth.rkc", Fixed::from_int(2));
+        let xf = r.characters[0].transform([1.0, 2.0, 3.0], std::f64::consts::FRAC_PI_2);
+        let close = |got: [f32; 3], want: [f32; 3]| (0..3).all(|a| (got[a] - want[a]).abs() < 1e-3);
+        assert!(close(xf.pos, [1.0, 2.0, 3.0]), "seated where asked");
+        assert!(
+            close(xf.right, [0.0, 8.0, 0.0]),
+            "a quarter turn puts local +x on world +y, scaled: {:?}",
+            xf.right
+        );
+        assert!(
+            close(xf.forward, [0.0, 0.0, 8.0]),
+            "z-down stays z-down, scaled: {:?}",
+            xf.forward
+        );
+    }
+
+    #[test]
+    fn model_character_missing_or_broken_asset_is_minus_one() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        assert_eq!(
+            r.model_character("mobs/moth.rkc", Fixed::from_int(2)),
+            -1,
+            "a missing asset aborts the character model"
+        );
+        let assets = BTreeMap::from([("mobs/moth.rkc".to_string(), b"not an rkc".to_vec())]);
+        let mut r = MapRender::new(assets, None, &[]);
+        assert_eq!(
+            r.model_character("mobs/moth.rkc", Fixed::from_int(2)),
+            -1,
+            "a malformed .rkc aborts the character model"
         );
     }
 }
