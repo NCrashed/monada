@@ -103,29 +103,32 @@ fn cam_relative(rx, fy) {
 }
 
 // --- decks --------------------------------------------------------------
-// The hull stacks two decks as sim-z bands (height-up: `voxel_fill` maps
-// height z → world g − z). Because the two floor slabs are BOTH solid, a
-// naive `ground_height` (highest solid z) would always snap a crew member to
-// the UPPER floor — so the crew tracks its deck as sim state and collision /
-// seating is deck-relative. This is the off-by-a-band trap from the plan's
-// Open Questions, resolved by threading the deck through the whole path
-// rather than reading a fixed z.
+// The hull stacks two decks as sim-z bands (height-up: a cell painted at
+// height z tops out where a crew member standing at z has its feet). Because
+// the two floor plates are BOTH solid, a naive `ground_height` (highest solid
+// z) would always snap a crew member to the UPPER floor — so the crew tracks
+// its deck as sim state and collision / seating is deck-relative. This is the
+// off-by-a-band trap from the plan's Open Questions, resolved by threading the
+// deck through the whole path rather than reading a fixed z.
 //
-// z is UNSCALED (1 world unit per sim-z; only x/y scale by SCALE=16 — see
-// `world_of`), so a deck needs a tall sim-z span to read as a real storey and
-// clear the ~1.4-cell (~22-unit) crew sprite. Decks are `DECK_STRIDE = 28`
-// apart:
-//   deck 0 (lower): floor z=0,  walls z 1..24
-//   deck 1 (upper): floor z=28, walls z 29..52
+// The hull is a CUBIC grid (`grid_spawn_cubic`, host_api 15): one sim cell is
+// a cube of 16³ world voxels, so z is scaled exactly like x/y and the hull's
+// 3D rotation is the sim-space rotation the script asks for — which is what
+// lets a map convert between hull-local and world coordinates at all
+// (docs/plans/grid-entities.md §6). The price is that VERTICAL GEOMETRY IS
+// CELL-QUANTISED: a wall is a whole number of cells tall, and a stair step is
+// one cell. Decks are `DECK_STRIDE = 3` cells apart:
+//   deck 0 (lower): floor plate cell 0, walls cells 1..2, crew feet at z=0
+//   deck 1 (upper): floor plate cell 3, walls cells 4..5, crew feet at z=3
 // (numbers are for the eye + the deck cutaway; the wall PREDICATE is xy-only,
 // so height changes never touch collision. All tunable on a real display.)
 
-/// The floor sim-z a crew member on `deck` stands on (decks 28 apart).
-fn deck_floor(deck) { if deck == 0 { 0 } else { 28 } }
+/// The floor sim-z a crew member on `deck` stands on (decks 3 cells apart).
+fn deck_floor(deck) { if deck == 0 { 0 } else { 3 } }
 
 /// The top of `deck`'s keep-band for the cutaway: everything above it (the
-/// deck above) is cut. One below the next deck's floor.
-fn deck_top(deck) { deck_floor(deck) + 27 }
+/// deck above) is cut. The last cell below the next deck's floor plate.
+fn deck_top(deck) { deck_floor(deck) + 2 }
 
 /// Is sim cell `(cx, cy)` a hull wall / out of bounds *on `deck`*?
 ///
@@ -155,28 +158,29 @@ fn blocked(cx, cy, deck) {
 fn absi(n) { if n < 0 { -n } else { n } }
 
 /// Which deck a crew member at grid height `cz` stands on (upper half → 1).
-fn deck_of(cz) { if cz >= 14 { 1 } else { 0 } }
+fn deck_of(cz) { if cz >= 2 { 1 } else { 0 } }
 
-/// The deck **staircase**: solid step blocks at cx 14..18 × cy 1..2, tucked in
+/// The deck **staircase**: solid step blocks at cx 15..18 × cy 1..2, tucked in
 /// the fore-starboard corner (against the south + starboard hull), climbing EAST
 /// — the west (low) end is flush with the lower floor, the east (high) end
 /// reaches the upper floor. You walk up to it on the deck and climb: there is NO
 /// fence around it — the step *risers* (the solid blocks `build_hull` paints,
-/// z 0..step-top) block you from stepping onto a step more than one step-height
-/// above your feet, exactly like real stairs. `build_hull` carves a matching
-/// hole in the upper plate. Keep on_stairs / stair_z / paint in sync.
-fn on_stairs(cx, cy) { cx >= 14 && cx <= 18 && cy >= 1 && cy <= 2 }
+/// cells 0..step-top) block you from stepping onto a step more than one
+/// step-height above your feet, exactly like real stairs. `build_hull` carves a
+/// matching hole in the upper plate. Keep on_stairs / stair_z / paint in sync.
+fn on_stairs(cx, cy) { cx >= 15 && cx <= 18 && cy >= 1 && cy <= 2 }
 
-/// The step-top sim-z at staircase column `cx` (cx 14 → 0 … cx 18 → 28, step 7).
-fn stair_z(cx) { (cx - 14) * 7 }
+/// The step-top sim-z at staircase column `cx` (cx 15 → 0 … cx 18 → 3): one
+/// CELL per step, the finest a cubic grid can carve.
+fn stair_z(cx) { cx - 15 }
 
 /// The walkable surface height at cell `(cx, cy)` for a crew currently at height
 /// `cz`: a staircase step if on the stairs, else the deck floor nearest `cz`.
 fn floor_at(cx, cy, cz) {
     if on_stairs(cx, cy) {
         stair_z(cx)
-    } else if cz >= 14 {
-        28
+    } else if cz >= 2 {
+        3
     } else {
         0
     }
@@ -190,8 +194,8 @@ fn cell(v) { to_int(v + ratio(1, 2)) }
 
 /// Can a crew member at height `cz` stand centred at `(px, py)`? Its footprint
 /// must be clear of walls (on the deck `cz` implies), AND the surface it would
-/// stand on must be at most one step (`STEP_MAX = 8`) from `cz` — so a tall step
-/// riser blocks like a wall, but you climb a normal stair freely.
+/// stand on must be at most one step (`STEP_MAX = 1` cell) from `cz` — so a
+/// two-cell drop or rise blocks like a wall, but you climb the stair freely.
 fn reachable(px, py, cz) {
     let deck = deck_of(cz);
     let r = ratio(40, 100);
@@ -202,7 +206,7 @@ fn reachable(px, py, cz) {
     {
         return false;
     }
-    absi(floor_at(cell(px), cell(py), cz) - cz) <= 8
+    absi(floor_at(cell(px), cell(py), cz) - cz) <= 1
 }
 
 /// The collision-checked new `(x, y)` for moving entity `e` by `(vx, vy)`,
@@ -240,23 +244,25 @@ fn init() {
     set_sky("assets/starfield.png");
 
     // Spawn the ship's own voxel grid (separate from any world grid) so the
-    // hull can later be moved/rotated as a unit, and so the fog/deck cutaway
-    // ride the crew's own grid. grid_spawn returns a render-side handle; (0,0,0)
-    // places it at the world voxel origin. As the first (only) grid_spawn its
-    // handle is `hull_grid()` (== 0); a `< 0` return means a host without
-    // multi-grid support (host_api < 7) — the manifest requires 13, so bail
-    // loud rather than paint the hull into nothing.
-    let ship_grid = grid_spawn(0, 0, 0);
+    // hull can be moved/rotated as a unit, and so the fog/deck cutaway ride the
+    // crew's own grid. CUBIC cells (host_api 15): a cell is a cube, so the
+    // hull's tilted tumble below is the sim-space rotation it asks for and a
+    // hull-local point can be converted to a world point exactly — the column
+    // cell's unscaled z can only do that for yaw. `(0,0,0)` places it at the
+    // world voxel origin. As the first (only) grid it spawns its handle is
+    // `hull_grid()` (== 0); a `< 0` return means a host without cubic grids —
+    // the manifest requires 15, so bail loud rather than paint into nothing.
+    let ship_grid = grid_spawn_cubic(0, 0, 0);
     if ship_grid < 0 {
-        status("this host lacks multi-grid support (host_api 7+ required)");
+        status("this host lacks cubic grids (host_api 15+ required)");
         return;
     }
     build_hull(ship_grid);
     // Turn the hull about its own middle, not the corner its local origin sits
-    // on. `build_hull` spans sim cells 0..=19 in x/y and 0..=52 in z, so the
-    // centre is (9.5, 9.5, 26) — without this the whole ship swings through an
+    // on. `build_hull` spans sim cells 0..=19 in x/y and 0..=5 in z, so the
+    // centre is (9.5, 9.5, 2) — without this the whole ship swings through an
     // arc wider than itself every time `step_ship` re-orients it.
-    grid_pivot(ship_grid, vec3(ratio(19, 2), ratio(19, 2), fixed(26)));
+    grid_pivot(ship_grid, vec3(ratio(19, 2), ratio(19, 2), fixed(2)));
 
     // The animated billboard crew actor (id 0 by call order). The 3rd arg is
     // the rendered height in cells; the host scales the art to it. Reuses the
@@ -292,44 +298,44 @@ fn init() {
 
 /// Paint the two-deck hull into `grid`, for the EYE. Collision is the `blocked`
 /// predicate above (the heightmap store can't do stacked decks); keep this
-/// layout and that predicate in sync. A deck is a floor slab + a tall rim wall
-/// band; an interior divider (with a doorway gap) splits each deck into two
+/// layout and that predicate in sync. A deck is a floor plate + a two-cell rim
+/// wall band; an interior divider (with a doorway gap) splits each deck into two
 /// compartments joined by the gap — the "corridor". The two decks get
-/// perpendicular dividers so they read distinct, and sit `DECK_STRIDE = 28`
-/// apart in (unscaled) z.
+/// perpendicular dividers so they read distinct, and sit `DECK_STRIDE = 3`
+/// cells apart. Every z here is a CELL of the cubic grid (16 world voxels), so
+/// a "one cell" wall is as tall as the crew is wide.
 fn build_hull(grid) {
     let plate = 0x8055_5f6b; // steel floor plating
     let wall = 0x8079_8592; // hull wall
     let step = 0x80b8_9850; // brass stair steps
 
-    // --- deck 0 (lower): floor z=0, walls z 1..24 ---
+    // --- deck 0 (lower): floor plate cell 0, walls cells 1..2 ---
     voxel_fill_in(grid, 0, 0, 0, 19, 19, 0, plate);
-    rim_walls(grid, 1, 24, wall);
+    rim_walls(grid, 1, 2, wall);
     // Full divider along y=10 splitting fore (y<10) / aft (y>10), doorway gap
     // x 9..10 (the stairwell is off this row, so no other opening is needed).
-    voxel_fill_in(grid, 1, 10, 1, 8, 10, 24, wall);
-    voxel_fill_in(grid, 11, 10, 1, 18, 10, 24, wall);
+    voxel_fill_in(grid, 1, 10, 1, 8, 10, 2, wall);
+    voxel_fill_in(grid, 11, 10, 1, 18, 10, 2, wall);
 
-    // --- deck 1 (upper): floor slab z=28 with a HOLE over the staircase
-    // (cx 14..18 × cy 1..2, so the crew climbs up through it), walls z 29..52 ---
-    voxel_fill_in(grid, 0, 0, 28, 13, 19, 28, plate); // west of the stair hole
-    voxel_fill_in(grid, 19, 0, 28, 19, 19, 28, plate); // east sliver (under the rim)
-    voxel_fill_in(grid, 14, 3, 28, 18, 19, 28, plate); // north of the hole (cy 3..19)
-    rim_walls(grid, 29, 52, wall);
+    // --- deck 1 (upper): floor plate cell 3 with a HOLE over the staircase
+    // (cx 15..18 × cy 1..2, so the crew climbs up through it), walls cells 4..5 ---
+    voxel_fill_in(grid, 0, 0, 3, 14, 19, 3, plate); // west of the stair hole
+    voxel_fill_in(grid, 19, 0, 3, 19, 19, 3, plate); // east sliver (under the rim)
+    voxel_fill_in(grid, 15, 3, 3, 18, 19, 3, plate); // north of the hole (cy 3..19)
+    rim_walls(grid, 4, 5, wall);
     // Divider along x=10 splitting port (x<10) / starboard (x>10), gap y 9..10.
-    voxel_fill_in(grid, 10, 1, 29, 10, 8, 52, wall);
-    voxel_fill_in(grid, 10, 11, 29, 10, 18, 52, wall);
+    voxel_fill_in(grid, 10, 1, 4, 10, 8, 5, wall);
+    voxel_fill_in(grid, 10, 11, 4, 10, 18, 5, wall);
 
     // The staircase (fore-starboard corner, cy 1..2) climbs EAST: solid step
-    // blocks at cx 14..18, each a column from z 0 up to `stair_z(cx)` — 0 at cx
-    // 14 (flush with the lower floor) to 28 (the upper floor) at cx 18. No
-    // surrounding wall: the blocks' own risers do the containment (see
-    // `reachable`). Keep in sync with `on_stairs` / `stair_z`.
-    voxel_fill_in(grid, 14, 1, 0, 14, 2, 0, step); // cx 14 → z 0 (lower floor)
-    voxel_fill_in(grid, 15, 1, 0, 15, 2, 7, step);
-    voxel_fill_in(grid, 16, 1, 0, 16, 2, 14, step);
-    voxel_fill_in(grid, 17, 1, 0, 17, 2, 21, step);
-    voxel_fill_in(grid, 18, 1, 0, 18, 2, 28, step); // cx 18 → z 28 (upper floor)
+    // blocks at cx 15..18, each a column from cell 0 up to `stair_z(cx)` — 0 at
+    // cx 15 (flush with the lower floor) to 3 (the upper floor) at cx 18, one
+    // cell per step. No surrounding wall: the blocks' own risers do the
+    // containment (see `reachable`). Keep in sync with `on_stairs` / `stair_z`.
+    voxel_fill_in(grid, 15, 1, 0, 15, 2, 0, step); // cx 15 → z 0 (lower floor)
+    voxel_fill_in(grid, 16, 1, 0, 16, 2, 1, step);
+    voxel_fill_in(grid, 17, 1, 0, 17, 2, 2, step);
+    voxel_fill_in(grid, 18, 1, 0, 18, 2, 3, step); // cx 18 → z 3 (upper floor)
 }
 
 /// A rim wall band (z `lo`..`hi`) around the 20×20 hull edge, painted into `grid`.

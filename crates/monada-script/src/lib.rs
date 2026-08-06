@@ -79,8 +79,22 @@ pub use volume::VolumeStore;
 /// `model_character` (rigged `.rkc` voxel characters — real geometry
 /// with a skeleton and named clips, the 3D counterpart of
 /// `model_actor`'s billboards; it reuses `entity_set_anim` /
-/// `entity_set_facing` / `model_drop`, so nothing else moved).
-pub const HOST_API_VERSION: u32 = 14;
+/// `entity_set_facing` / `model_drop`, so nothing else moved); 15 =
+/// `grid_spawn_cubic` (a `grid_spawn` grid whose CELLS ARE CUBES —
+/// `SCALE³` world voxels — instead of the column convention's
+/// `SCALE×SCALE×1`, so sim z scales like x/y inside it). Additive: the
+/// 3-arg `grid_spawn` keeps the column cell exactly, and the cell shape
+/// is per-grid, so every verb that reads a grid (`voxel_fill_in`,
+/// `grid_pivot`, the seats of entities bound with `entity_set_grid`,
+/// `deck_clip`, the fog) follows the grid it was given and a map written
+/// against v7..v14 is byte-unaffected. Why it exists: sim→world on a
+/// column cell is the ANISOTROPIC `diag(-SCALE, SCALE, -1)`, and
+/// conjugating a rotation by a non-uniform diagonal yields a rotation
+/// only about z — so on a column grid only yaw is exact, and a map
+/// cannot convert coordinates between a tilted hull and the world
+/// (docs/plans/grid-entities.md §6). A cubic cell makes that map a
+/// similarity transform, so any 3D orientation is exact.
+pub const HOST_API_VERSION: u32 = 15;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -263,11 +277,43 @@ pub trait HostBridge: Send {
         -1
     }
 
+    /// Like [`grid_spawn`](Self::grid_spawn), but the grid's CELLS ARE CUBES:
+    /// one sim cell is `SCALE³` world voxels, so sim z scales exactly like x/y
+    /// inside it (a plain `grid_spawn` grid keeps the column convention's
+    /// `SCALE×SCALE×1` cell, whose z is unscaled). The spawn offset `(wx, wy,
+    /// wz)` is in sim cells, as before — only its z now scales too.
+    ///
+    /// Use this whenever the map converts coordinates between the grid and the
+    /// world, or turns the grid about anything but the vertical: sim→world on a
+    /// column cell is the anisotropic `diag(-SCALE, SCALE, -1)`, so a sim-space
+    /// rotation survives it only about z. On a cubic grid the map is a
+    /// similarity transform, so ANY orientation is exact and a grid-local point
+    /// and a world point are the same point (docs/plans/grid-entities.md §6).
+    ///
+    /// The cell shape is a property of the GRID, so every verb that reads one
+    /// follows it: [`voxel_fill_in`](Self::voxel_fill_in) paints cubes,
+    /// [`grid_pivot`](Self::grid_pivot) reads its point in the cubic frame,
+    /// entities bound with [`entity_set_grid`](Self::entity_set_grid) seat with
+    /// scaled z, and [`deck_clip`](Self::deck_clip) / the fog cut on cell
+    /// boundaries. Vertical geometry is therefore CELL-QUANTISED here: a wall is
+    /// a whole number of cells tall, not an arbitrary number of voxels.
+    ///
+    /// Render-side, like `grid_spawn`. The default returns `-1` (no grid
+    /// allocated), so a map must check the handle exactly as it does there
+    /// (`host_api` 15).
+    fn grid_spawn_cubic(&mut self, _wx: i64, _wy: i64, _wz: i64) -> i64 {
+        -1
+    }
+
     /// Paint a solid voxel box into a specific grid (by id from
     /// [`grid_spawn`](Self::grid_spawn)), in sim coordinates. Same
     /// coordinate convention as [`voxel_fill`](Self::voxel_fill) but
-    /// render-side only — does NOT update the collision store. The default
-    /// ignores it.
+    /// render-side only — does NOT update the collision store.
+    ///
+    /// The cell's SHAPE follows the grid: a `grid_spawn` grid keeps the column
+    /// convention (`SCALE×SCALE×1` voxels — z unscaled, so a cell is a thin
+    /// slab), a [`grid_spawn_cubic`](Self::grid_spawn_cubic) grid makes it a
+    /// `SCALE³` cube. The default ignores it.
     #[allow(clippy::too_many_arguments)]
     fn voxel_fill_in(
         &mut self,
@@ -291,12 +337,22 @@ pub trait HostBridge: Send {
     /// maps it through the same sim→world transform the grid's voxels are
     /// painted with. Render-side, not hashed; a zero-length axis or out-of-range
     /// handle is ignored. The turn is about the grid's
-    /// [`grid_pivot`](Self::grid_pivot) point. The default ignores it.
+    /// [`grid_pivot`](Self::grid_pivot) point.
+    ///
+    /// EXACTNESS: on a [`grid_spawn_cubic`](Self::grid_spawn_cubic) grid that
+    /// sim→world map is a similarity transform, so the rendered turn IS the
+    /// sim-space turn the script asked for, whatever the axis. On a column-cell
+    /// `grid_spawn` grid only the yaw part is scale-exact (z is unscaled there,
+    /// so the map is anisotropic): a tilted axis renders as an honest world
+    /// rotation about the mapped axis, but it is not the sim rotation, and a map
+    /// cannot convert coordinates through it. The default ignores it.
     fn grid_orient(&mut self, _grid: i64, _axis: FixedVec3, _angle: Fixed) {}
 
     /// Name the grid-local point [`grid_orient`](Self::grid_orient) turns a
     /// `grid_spawn` grid about, in SIM cells — the frame `voxel_fill_in` paints
-    /// in, so a hull spanning cells `0..=19` turns about its middle at `9.5`.
+    /// in (so on a [`grid_spawn_cubic`](Self::grid_spawn_cubic) grid the point's
+    /// z scales with x/y, like everything else there), so a hull spanning cells
+    /// `0..=19` turns about its middle at `9.5`.
     /// Without this a grid turns about its own local origin, which for a hull
     /// painted up from cell `(0,0,0)` is a CORNER: the whole hull then swings
     /// through an arc wider than itself instead of turning in place. Sticky —

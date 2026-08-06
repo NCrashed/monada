@@ -222,9 +222,14 @@ entity state (deterministic inputs only).
 
 Spawn and paint additional voxel grids independent of the world grid (e.g. ships, moving platforms). Render-only: dynamic grids do not feed collision. A grid handle is render-side — never store it in `World` state or hashed `tick()` logic. A `< 0` handle means the host lacks multi-grid support (requires `host_api` 7).
 
+**Cell shape.** A `grid_spawn` grid keeps the world grid's *column* cell: `SCALE×SCALE×1` voxels, so sim z is unscaled and a cell is a thin slab. A `grid_spawn_cubic` grid makes the cell a cube (`SCALE³` voxels), so z scales like x/y. The shape belongs to the grid: `voxel_fill_in`, `grid_pivot`, the seat of an entity bound with `entity_set_grid`, and `deck_clip` all follow the grid they are given.
+
+Prefer the cubic grid whenever the map turns a grid about anything but the vertical, or wants to convert a point between the grid and the world: sim→world on a column cell is anisotropic, and only a rotation about z survives it — a tilted turn renders honestly but is not the rotation the script asked for. The cubic cell makes that map a similarity transform, so every orientation is exact. The trade is that vertical geometry is cell-quantised there: a wall is a whole number of cells tall, and the finest stair step is one cell.
+
 | Function | Result |
 |---|---|
 | `grid_spawn(wx, wy, wz)` | spawn a grid offset by sim cell `(wx, wy, wz)` from the world origin (`(0,0,0)` = world origin); returns a grid handle (i64), or `< 0` if unsupported |
+| `grid_spawn_cubic(wx, wy, wz)` | the same, but the grid's cells are CUBES — sim z scales like x/y inside it, so any 3D orientation is exact and hull-local and world points can be converted (requires `host_api` 15) |
 | `voxel_fill_in(grid, x0, y0, z0, x1, y1, z1, color)` | fill a solid box of voxels in the given dynamic grid (same coords as `voxel_fill`) |
 | `grid_orient(grid, axis, angle)` | turn a grid to a 3D orientation: `angle` radians about the (auto-normalised) `axis` in SIM coordinates (+z up), replacing its rotation — entities riding it and its fog/`deck_clip` follow; a zero-length axis is ignored |
 | `grid_pivot(grid, point)` | the grid-local sim-cell `point` `grid_orient` turns the grid about — a hull spanning cells `0..=19` turns in place about `9.5`, not about the corner its local origin sits on. Sticky; call once at spawn |

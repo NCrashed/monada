@@ -146,13 +146,15 @@ fn stairwell_climbs_to_upper_deck() {
     step(&mut b, &input(0, 0)); // spawn on the lower deck (deck 0, z 0)
     assert_eq!(crew_deck(&world), 0);
     climb_to_upper(&mut b);
-    // Walking up the ramp flipped the deck (z crossed the DECK_STRIDE midpoint)
-    // and left the crew standing on the upper floor (sim-z 28).
+    // Walking up the steps flipped the deck (z crossed the DECK_STRIDE
+    // midpoint) and left the crew standing on the upper floor plate — sim-z 3,
+    // since the hull is a CUBIC grid where a storey is 3 whole cells (it was 28
+    // unscaled units under the column cell).
     assert_eq!(crew_deck(&world), 1, "climbed the stairwell → upper deck");
     let z = crew_pos(&world).z.to_f64();
     assert!(
-        (z - 28.0).abs() < 0.01,
-        "reached the upper deck floor (z=28, was {z})"
+        (z - 3.0).abs() < 0.01,
+        "reached the upper deck floor (z=3, was {z})"
     );
 }
 
@@ -221,8 +223,8 @@ fn stairwell_round_trips_both_ways() {
     assert_eq!(crew_deck(&world), 1, "climbed up to the upper deck");
     let z_up = crew_pos(&world).z.to_f64();
     assert!(
-        (z_up - 28.0).abs() < 0.01,
-        "reached the upper floor (z=28, was {z_up})"
+        (z_up - 3.0).abs() < 0.01,
+        "reached the upper floor (z=3, was {z_up})"
     );
 
     // Walk back WEST DOWN the steps → lower deck.

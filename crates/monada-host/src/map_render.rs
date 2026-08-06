@@ -543,6 +543,38 @@ fn sim_box_to_world(x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64) -> (IV
     (lo, hi)
 }
 
+/// Map an inclusive sim-cell region to its voxel box inside a CUBIC
+/// `grid_spawn_cubic` grid (`host_api` 15): a cell is a `SCALE³` cube of world
+/// voxels, so sim z scales exactly like x/y. Same world-X mirror and z-down
+/// flip as [`sim_box_to_world`] — it differs only in z, where the column
+/// convention gives a cell a single voxel row.
+///
+/// The z convention is the column one, generalised: an entity at sim z `N`
+/// stands on TOP of cell `N` (`world_of`'s `GROUND_Z - N·SCALE` here), so cell
+/// `N` hangs below that plane, occupying voxels `[GROUND_Z - N·SCALE,
+/// GROUND_Z - N·SCALE + SCALE - 1]`. With `SCALE = 1` this is exactly
+/// `sim_box_to_world`, which is the invariant to keep the two readable
+/// together. (NB the *volume world grid* seats entities one cell higher — see
+/// [`cell_box_to_volume_grid`] — an older wart no walking map has hit.)
+fn cell_box_to_cubic(x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64) -> (IVec3, IVec3) {
+    let s = SCALE as i64;
+    let gz = GROUND_Z as i64;
+    let (xa, xb) = (x0.min(x1), x0.max(x1));
+    let (ya, yb) = (y0.min(y1), y0.max(y1));
+    let (za, zb) = (z0.min(z1), z0.max(z1));
+    let lo = IVec3::new(
+        (-(xb + 1) * s) as i32,
+        (ya * s) as i32,
+        (gz - zb * s) as i32,
+    );
+    let hi = IVec3::new(
+        (-xa * s - 1) as i32,
+        ((yb + 1) * s - 1) as i32,
+        (gz - za * s + s - 1) as i32,
+    );
+    (lo, hi)
+}
+
 /// Map an inclusive sim-cell region to its grid-voxel box on the ISOTROPIC
 /// volume world grid (one grid voxel per cell, `voxel_world_size = SCALE`,
 /// origin `(0, 0, GROUND_Z)`): cell `(x, y, z)` is grid voxel
@@ -584,13 +616,23 @@ fn entity_world_of_in(volume: bool, p: FixedVec3) -> DVec3 {
 /// the disjoint `sprites` field — a `&self` method would borrow all of it.
 fn place_in(
     entity_grid: &BTreeMap<EntityId, GridId>,
+    anchors: &BTreeMap<GridId, GridAnchor>,
     scene: &Scene,
     volume: bool,
     e: EntityId,
     p: FixedVec3,
 ) -> DVec3 {
-    let local = entity_world_of_in(volume, p);
-    match entity_grid.get(&e).and_then(|&g| scene.grid(g)) {
+    let Some(&g) = entity_grid.get(&e) else {
+        // Unbound: the global frame, under the MAP's z convention.
+        return entity_world_of_in(volume, p);
+    };
+    // Bound: the z convention comes from the GRID, not the map — the entity's
+    // position is a point in that grid's frame, so it must match the voxels
+    // `voxel_fill_in` painted there: scaled z inside a cubic grid (which is
+    // what makes its rotation exact), unscaled inside a column-cell one, even
+    // on a volume map whose *world* grid scales.
+    let local = entity_world_of_in(anchors.get(&g).is_some_and(|a| a.cubic), p);
+    match scene.grid(g) {
         Some(grid) => grid.transform.rotation * local + grid.transform.origin,
         None => local,
     }
@@ -614,6 +656,25 @@ struct GridAnchor {
     /// cell the map named). `ZERO` — the grid's local origin — until the map
     /// calls `grid_pivot`, so an unset pivot is exactly the old behaviour.
     pivot: DVec3,
+    /// Whether this grid's CELLS ARE CUBES (`grid_spawn_cubic`, `host_api` 15):
+    /// `SCALE³` world voxels per cell, so sim z scales like x/y. A plain
+    /// `grid_spawn` grid keeps the column convention (`SCALE×SCALE×1`, z
+    /// unscaled) and this stays `false`. Everything that reads a grid's frame —
+    /// `voxel_fill_in`, `grid_pivot`, a bound entity's seat, the deck cutaway,
+    /// the fog band — asks the anchor rather than the map, because the cell
+    /// shape belongs to the grid.
+    cubic: bool,
+}
+
+/// How many world voxels one sim cell spans along z inside a grid with this
+/// cell shape: `SCALE` for a cubic grid, `1` for the column convention. The one
+/// place the two conventions differ, so the z formulas can be written once.
+fn cell_z_voxels(cubic: bool) -> i64 {
+    if cubic {
+        SCALE as i64
+    } else {
+        1
+    }
 }
 
 /// The world-frame pose of a physics body's render grid. The grid's voxels
@@ -927,10 +988,14 @@ fn blit_wheel_cylinder(scene: &mut Scene, id: GridId, r: f64, half_width: i32) {
 /// only coincide at `sim_z = 0` (a known monada wart; see the plan). Grid z is
 /// z-DOWN (smaller = higher up), so voxels at sim-z > `z_hi` sit at grid-z below
 /// this threshold and roxlap clips them (`z < z_clip` reads as air). Band top
-/// sim-z `z_hi` maps to grid-z `GROUND_Z - z_hi`, kept; the layer above it
-/// (sim-z `z_hi+1`) is one lower and cut. Unit-tested against a REAL grid.
-fn deck_clip_world_z(z_hi: i64) -> i32 {
-    (GROUND_Z as i64 - z_hi) as i32
+/// sim-z `z_hi` maps to grid-z `GROUND_Z - z_hi·cell_z`, kept; the layer above
+/// it (sim-z `z_hi+1`) is `cell_z` lower and cut. `cell_z` is the grid's own
+/// cell height in voxels ([`cell_z_voxels`]): `1` on a column-cell grid, `SCALE`
+/// on a cubic one, where a cell's `SCALE` voxel rows hang BELOW its top plane
+/// (see [`cell_box_to_cubic`]) so the threshold still lands on the band top.
+/// Unit-tested against a REAL grid.
+fn deck_clip_world_z(z_hi: i64, cell_z: i64) -> i32 {
+    (GROUND_Z as i64 - z_hi * cell_z) as i32
 }
 
 /// The four sim-cell corners of a box-select drag rectangle, aligned to the
@@ -1195,12 +1260,13 @@ pub struct MapRender {
     /// in sim cells, projected to pixels each frame around the camera focus.
     /// `None` = no cutout. Render-side, never hashed.
     cutout: Option<(f64, f64)>,
-    /// Deck cutaway (`deck_clip`): the grid-local z threshold for the grid's
-    /// `z_clip` (voxels above it — smaller grid-z — are cut). `None` = show the
-    /// whole grid. Render-side, never hashed.
-    deck_clip: Option<i32>,
-    /// The current deck band (`deck_clip`'s sim `z_lo..=z_hi`), kept so the fog
-    /// of war can build its `DeckBand`. `None` = no deck declared.
+    /// The current deck band (`deck_clip`'s sim `z_lo..=z_hi`): the cutaway the
+    /// vision grid is clipped to AND the band the fog of war builds its
+    /// `DeckBand` from. Kept in SIM cells, not as a resolved `z_clip` threshold,
+    /// because the grid it lands on is derived (`vision_grid`) and may use
+    /// either cell shape — resolving early froze the column convention's z into
+    /// a value a cubic hull would cut at the wrong height. `None` = no deck
+    /// declared (show the whole grid). Render-side, never hashed.
     deck_band: Option<(i64, i64)>,
     /// Fog of war (`vision_observer`): the local observer entity, or `None`.
     /// Per-client, never hashed.
@@ -1322,7 +1388,6 @@ impl MapRender {
             cursor_aim: 0.0,
             cursor_entity: -1,
             cutout: None,
-            deck_clip: None,
             deck_band: None,
             vision_entity: None,
             vision_cfg: (100, 8, 3),
@@ -1431,9 +1496,24 @@ impl MapRender {
     /// to a grid at another origin would cut that grid at the wrong world height.
     fn apply_deck_clip(&mut self) {
         if let Some(id) = self.vision_grid() {
+            let z_clip = self.deck_band.map(|(_, z_hi)| self.deck_clip_z(id, z_hi));
             if let Some(grid) = self.scene.grid_mut(id) {
-                grid.z_clip = self.deck_clip;
+                grid.z_clip = z_clip;
             }
+        }
+    }
+
+    /// The `z_clip` threshold for band top `z_hi` in grid `id`'s own voxel
+    /// coordinates. Three conventions meet here, all keeping cells `≤ z_hi`:
+    /// the volume world grid is grid-LOCAL in cells (cell z sits at voxel
+    /// `-z-1`, `GROUND_Z` living in the transform origin), a cubic script grid
+    /// scales z by `SCALE`, and a column grid gives a cell one voxel row.
+    fn deck_clip_z(&self, id: GridId, z_hi: i64) -> i32 {
+        #[allow(clippy::cast_possible_truncation)]
+        if self.volume && Some(id) == self.world_grid {
+            (-z_hi - 1) as i32
+        } else {
+            deck_clip_world_z(z_hi, cell_z_voxels(self.grid_is_cubic(id)))
         }
     }
 
@@ -1456,15 +1536,18 @@ impl MapRender {
         let (feet, yaw) = self.observer_pose?;
         self.deck_band?; // a deck was declared (deck_clip ran) ⇒ vision is ready
         let main_grid = self.vision_grid()?; // no grid yet ⇒ no fog
-                                             // Re-base the world-space observer into the vision grid's local voxel
-                                             // space: the fog mask is grid-local, so a grid spawned off the world
-                                             // origin (or a moving/turning hull) must have its viewpoint expressed
-                                             // in the grid's own frame. This is roxlap's world→grid-local map,
-                                             // `rotation.inverse() * (world - origin) / voxel_world_size`. Every
-                                             // grid we make has voxel_world_size 1, so the scale drops out; we read
-                                             // the live origin AND rotation each frame, so a hull that translates or
-                                             // yaws is tracked automatically. The identity world grid has origin 0
-                                             // and no rotation, so this is a no-op there.
+                                             // The grid's cell shape sets the z scale everything below works in (the
+                                             // deck band, the eye height): a cubic hull's cell is SCALE voxels tall.
+        let cubic = self.grid_is_cubic(main_grid);
+        // Re-base the world-space observer into the vision grid's local voxel
+        // space: the fog mask is grid-local, so a grid spawned off the world
+        // origin (or a moving/turning hull) must have its viewpoint expressed
+        // in the grid's own frame. This is roxlap's world→grid-local map,
+        // `rotation.inverse() * (world - origin) / voxel_world_size`. Every
+        // grid we make has voxel_world_size 1, so the scale drops out; we read
+        // the live origin AND rotation each frame, so a hull that translates or
+        // yaws is tracked automatically. The identity world grid has origin 0
+        // and no rotation, so this is a no-op there.
         let (grid_origin, grid_rot) = self
             .scene
             .grid(main_grid)
@@ -1487,8 +1570,10 @@ impl MapRender {
             let (cone_deg, range, peripheral) = self.vision_cfg;
             // z-down: the floor is the LARGER grid-z (the lowest deck sits at
             // GROUND_Z, sim_z 0), the ceiling the smaller. HULL_SPAN clears the
-            // tallest deck + its walls with margin.
-            let hull_span: i32 = 64;
+            // tallest deck + its walls with margin — in the grid's OWN z units,
+            // so a cubic hull (a cell is SCALE voxels tall) gets the same eight
+            // cells of headroom the column tuning's 64 voxels bought.
+            let hull_span: i32 = if cubic { 8 * SCALE as i32 } else { 64 };
             let z_bottom = GROUND_Z as i32; // lowest floor
             let z_top = GROUND_Z as i32 - hull_span; // generous ceiling
             let mut cfg = VisionConfig::for_decks(vec![DeckBand { z_top, z_bottom }]);
@@ -1529,7 +1614,14 @@ impl MapRender {
             // (EYE_HEIGHT 10 of a 12-tall body) so the crew looks OVER the near
             // steps onto the treads — `-16` (≈head height on the ~22-tall crew,
             // clears two 7-risers) matches that and reveals the run from below.
-            eye_z: feet.z as i32 - 16,
+            //
+            // A CUBIC hull quantises a step to a whole cell (SCALE voxels), and
+            // the eye's opacity band is `±EYE_HALF` (2) around `eye_z`: at `-16`
+            // the band's top (`eye − 2` = feet − 18) sits BELOW the next riser's
+            // top (feet − 16), so the riser blocks and the run fogs from below
+            // again. `-(SCALE + 2·EYE_HALF)` = `-20` lifts the whole band clear
+            // of it — still under the ~22-tall crew's head, i.e. the same ~83%.
+            eye_z: feet.z as i32 - if cubic { SCALE as i32 + 4 } else { 16 },
         };
         // Take the mask + twin out to keep `self.scene` borrows disjoint.
         let mut fow = self.fow.take()?;
@@ -1661,7 +1753,53 @@ impl MapRender {
     /// entities have an identity transform, i.e. `entity_world_of(p)`
     /// unchanged (chess/RPG/RTS).
     fn place(&self, e: EntityId, p: FixedVec3) -> DVec3 {
-        place_in(&self.entity_grid, &self.scene, self.volume, e, p)
+        place_in(
+            &self.entity_grid,
+            &self.grid_anchors,
+            &self.scene,
+            self.volume,
+            e,
+            p,
+        )
+    }
+
+    /// Allocate a script-facing grid and its anchor; the shared body of
+    /// `grid_spawn` (column cells) and `grid_spawn_cubic` (cube cells).
+    ///
+    /// `(wx, wy, wz)` is a SIM cell offset, so the grid composes with the
+    /// mirrored/scaled voxels `voxel_fill_in` paints inside it: a spawn at sim
+    /// cell `wx` shifts world X by `-wx·SCALE` (world X is mirrored — see
+    /// `world_of`), Y by `+wy·SCALE`, and z by `-wz` times the grid's own cell
+    /// height (`SCALE` for a cubic grid, `1` for a column one — the same factor
+    /// its voxels use, so the offset moves it by whole cells either way). At
+    /// `(0, 0, 0)` this is the identity, the common world-origin case.
+    fn spawn_grid(&mut self, wx: i64, wy: i64, wz: i64, cubic: bool) -> i64 {
+        let pos = DVec3::new(
+            -(wx as f64) * SCALE,
+            wy as f64 * SCALE,
+            -(wz as f64) * cell_z_voxels(cubic) as f64,
+        );
+        let id = self.scene.add_grid(GridTransform::at(pos));
+        let idx = self.grids.len() as i64;
+        self.grids.push(id);
+        // A fresh grid turns about its own local origin until the map names a
+        // pivot — the pose `GridTransform::at` just set.
+        self.grid_anchors.insert(
+            id,
+            GridAnchor {
+                spawn_origin: pos,
+                pivot: DVec3::ZERO,
+                cubic,
+            },
+        );
+        idx
+    }
+
+    /// Whether the script grid `id` was spawned with cube cells
+    /// (`grid_spawn_cubic`). Unknown grids — the world grid, a physics mirror —
+    /// answer `false`: they are not script grids and never carry an anchor.
+    fn grid_is_cubic(&self, id: GridId) -> bool {
+        self.grid_anchors.get(&id).is_some_and(|a| a.cubic)
     }
 
     /// Write a `grid_spawn` grid's pose: `rotation`, plus the origin that keeps
@@ -1834,7 +1972,14 @@ impl MapRender {
         // volume map's z convention the inlined `world_of` used to drop.
         for &h in &self.highlighted {
             if let Some(p) = world.position(h) {
-                let w = place_in(&self.entity_grid, &self.scene, self.volume, h, p);
+                let w = place_in(
+                    &self.entity_grid,
+                    &self.grid_anchors,
+                    &self.scene,
+                    self.volume,
+                    h,
+                    p,
+                );
                 self.sprites.instances.push(SpriteInstanceDesc {
                     // Seat the tile flush on the ground the entity stands
                     // on (its own w.z, not the z=0 board plane — a unit up
@@ -3105,25 +3250,11 @@ impl HostBridge for MapRender {
     }
 
     fn grid_spawn(&mut self, wx: i64, wy: i64, wz: i64) -> i64 {
-        // `(wx, wy, wz)` is a SIM cell offset, so the grid composes with the
-        // mirrored/scaled voxels `voxel_fill_in` paints inside it: a spawn at
-        // sim cell `wx` shifts world X by `-wx·SCALE` (world X is mirrored — see
-        // `world_of`), Y by `+wy·SCALE`, and z by `-wz` (z unscaled, z-down). At
-        // `(0, 0, 0)` this is the identity, the common world-origin case.
-        let pos = glam::DVec3::new(-(wx as f64) * SCALE, wy as f64 * SCALE, -(wz as f64));
-        let id = self.scene.add_grid(GridTransform::at(pos));
-        let idx = self.grids.len() as i64;
-        self.grids.push(id);
-        // A fresh grid turns about its own local origin until the map names a
-        // pivot — the pose `GridTransform::at` just set.
-        self.grid_anchors.insert(
-            id,
-            GridAnchor {
-                spawn_origin: pos,
-                pivot: DVec3::ZERO,
-            },
-        );
-        idx
+        self.spawn_grid(wx, wy, wz, false)
+    }
+
+    fn grid_spawn_cubic(&mut self, wx: i64, wy: i64, wz: i64) -> i64 {
+        self.spawn_grid(wx, wy, wz, true)
     }
 
     fn grid_pivot(&mut self, grid: i64, point: FixedVec3) {
@@ -3131,13 +3262,14 @@ impl HostBridge for MapRender {
             return;
         };
         // `point` is a grid-local SIM cell, the frame `voxel_fill_in` paints in,
-        // so map it with `world_of` — the same transform that put those voxels
-        // where they are. (Not `entity_world_of`: the pivot is a point on the
-        // HULL, and `voxel_fill_in` keeps the column z convention on every map.)
+        // so map it the same way those voxels were placed: `world_of` on a
+        // column-cell grid (z unscaled), the cubic frame's scaled z on a
+        // `grid_spawn_cubic` one. (Not `entity_world_of`: the pivot is a point
+        // on the HULL, so it follows the GRID's convention, never the map's.)
         let Some(anchor) = self.grid_anchors.get_mut(&id) else {
             return;
         };
-        anchor.pivot = world_of(point);
+        anchor.pivot = entity_world_of_in(anchor.cubic, point);
         // Re-derive the origin so a pivot named after the grid is already
         // turned lands the same as one named before it.
         let rotation = self
@@ -3160,11 +3292,17 @@ impl HostBridge for MapRender {
         color: i64,
     ) {
         // Render-side only — does NOT update self.terrain. Same sim→world
-        // coordinate transform as voxel_fill (world X mirrored, z unscaled).
+        // coordinate transform as voxel_fill (world X mirrored), with the cell's
+        // z height taken from the grid: a cube on a `grid_spawn_cubic` grid, the
+        // column convention's single voxel row otherwise.
         let Some(&id) = self.grids.get(grid as usize) else {
             return;
         };
-        let (lo, hi) = sim_box_to_world(x0, y0, z0, x1, y1, z1);
+        let (lo, hi) = if self.grid_is_cubic(id) {
+            cell_box_to_cubic(x0, y0, z0, x1, y1, z1)
+        } else {
+            sim_box_to_world(x0, y0, z0, x1, y1, z1)
+        };
         if let Some(g) = self.scene.grid_mut(id) {
             g.set_rect(lo, hi, Some(VoxColor(color as u32)));
         }
@@ -3578,21 +3716,14 @@ impl HostBridge for MapRender {
     }
 
     fn deck_clip(&mut self, z_lo: i64, z_hi: i64) {
-        // roxlap's `Grid::z_clip` cuts one side: voxels with grid-z BELOW the
-        // threshold (smaller grid-z = higher up, z-down) become air. So clip at
-        // the band top (sim `z_hi`) to cut everything above it. A band whose top
-        // is the world's tallest voxel yields a threshold at/below all geometry,
-        // cutting nothing. Volume maps are ISOTROPIC and grid-LOCAL (cell z →
-        // grid voxel `-z-1`, origin handles GROUND_Z): keep voxels with
-        // grid-z ≥ `-z_hi-1`, i.e. sim cells ≤ z_hi — the digger's
-        // follow-the-vehicle tunnel cutaway.
-        #[allow(clippy::cast_possible_truncation)]
-        if self.volume {
-            self.deck_clip = Some((-z_hi - 1) as i32);
-        } else {
-            self.deck_clip = Some(deck_clip_world_z(z_hi));
-        }
-        // The full sim band drives the fog of war's `DeckBand` too.
+        // Just remember the SIM band: it drives both the cutaway and the fog's
+        // `DeckBand`, and the grid each lands on is derived later
+        // (`vision_grid`), so the `z_clip` threshold is resolved at apply time
+        // by `deck_clip_z` — in whichever cell shape that grid uses. roxlap's
+        // `Grid::z_clip` cuts one side (voxels with grid-z BELOW the threshold —
+        // smaller grid-z = higher up, z-down — read as air), so the threshold
+        // sits at the band top and everything above it goes; a band whose top is
+        // the world's tallest voxel cuts nothing.
         self.deck_band = Some((z_lo, z_hi));
     }
 
@@ -4223,6 +4354,214 @@ mod tests {
         );
     }
 
+    /// A `grid_spawn_cubic` grid paints a cell as a CUBE: `SCALE³` world voxels,
+    /// z scaled exactly like x/y, instead of the column convention's
+    /// `SCALE×SCALE×1` slab. The cube hangs BELOW its cell's top plane
+    /// (`GROUND_Z - z·SCALE`), which is where an entity at that sim z stands —
+    /// the column convention's rule, generalised.
+    #[test]
+    fn cubic_grid_paints_cells_as_cubes() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        assert!(g >= 0, "cubic grid handle allocated");
+        r.voxel_fill_in(g, 0, 0, 0, 0, 0, 0, 0x8055_5555);
+
+        let hull = r.scene.grid(r.grids[g as usize]).expect("grid");
+        let gz = GROUND_Z as i32;
+        let s = SCALE as i32;
+        let solid = |x: i32, y: i32, z: i32| hull.voxel_color(IVec3::new(x, y, z)).is_some();
+
+        // Cell (0,0,0) fills world voxels x ∈ [-SCALE, -1], y ∈ [0, SCALE-1],
+        // z ∈ [GROUND_Z, GROUND_Z + SCALE - 1] — a cube, both corners in.
+        assert!(solid(-1, 0, gz), "cube's near-top corner");
+        assert!(solid(-s, s - 1, gz + s - 1), "cube's far-bottom corner");
+        // ...and nothing outside it, on any axis.
+        assert!(!solid(0, 0, gz), "x is mirrored: cell 0 stops at -1");
+        assert!(!solid(-s - 1, 0, gz), "one voxel past the cube in x");
+        assert!(!solid(-1, s, gz), "one voxel past the cube in y");
+        assert!(
+            !solid(-1, 0, gz - 1),
+            "the cell's TOP plane is GROUND_Z: nothing above it"
+        );
+        assert!(
+            !solid(-1, 0, gz + s),
+            "the cube is exactly SCALE voxels deep"
+        );
+    }
+
+    /// An entity bound to a cubic grid seats on the TOP of the very cell it
+    /// names — the column convention ("floor painted at z, crew at z"), now with
+    /// z scaled like x/y. Proven against the real painted cube, so the entity
+    /// map and the voxel map can't drift apart (the S-C verticality bug, which
+    /// floated the crew ~60 units off its own deck, was exactly this drift).
+    #[test]
+    fn cubic_grid_seats_a_bound_entity_on_the_cell_it_names() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        let (cx, cy, cz) = (3_i64, 4_i64, 2_i64);
+        r.voxel_fill_in(g, cx, cy, cz, cx, cy, cz, 0x8055_5555);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let e = world.spawn(arch);
+        let p = FixedVec3::new(
+            Fixed::from_int(cx as i32),
+            Fixed::from_int(cy as i32),
+            Fixed::from_int(cz as i32),
+        );
+        world.set_position(e, p);
+        r.entity_set_grid(e.0 as i64, g);
+
+        let seat = r.place(e, p);
+        let want = DVec3::new(
+            -(cx as f64 + 0.5) * SCALE,
+            (cy as f64 + 0.5) * SCALE,
+            GROUND_Z - cz as f64 * SCALE,
+        );
+        assert!(
+            (seat - want).length() < 1e-9,
+            "cubic seat at the cell's top-centre, want {want:?}, got {seat:?}"
+        );
+
+        // And that plane really is the top of the painted cube.
+        let hull = r.scene.grid(r.grids[g as usize]).expect("grid");
+        let column = IVec3::new(-(cx as i32) * SCALE as i32 - 1, cy as i32 * SCALE as i32, 0);
+        let top = seat.z as i32;
+        assert!(
+            hull.voxel_color(IVec3::new(column.x, column.y, top))
+                .is_some(),
+            "the crew's feet plane is the cube's first solid voxel row"
+        );
+        assert!(
+            hull.voxel_color(IVec3::new(column.x, column.y, top - 1))
+                .is_none(),
+            "and nothing is painted above it"
+        );
+    }
+
+    /// The property the cubic cell exists for: on a cubic grid the rendered pose
+    /// IS the sim-space pose, for ANY axis. sim→world there is
+    /// `W(p) = M·(p + (½, ½, 0)) + (0, 0, GROUND_Z)` with `M = diag(-S, S, -S)`
+    /// — a uniform scale times a half-turn about +y — so `W ∘ R_sim = R_world ∘
+    /// W` holds exactly, and a map may convert coordinates between the hull and
+    /// the world. Turn a hull about the ship demo's own TILTED axis and require
+    /// the seat to equal the sim-space prediction to floating-point noise.
+    ///
+    /// The same check on a column-cell grid is off by whole cells (z unscaled
+    /// there ⇒ `M` is not a similarity ⇒ conjugation is not a rotation), which
+    /// is asserted too: it is what makes this test decisive rather than a
+    /// restatement of the host's own arithmetic.
+    #[test]
+    fn a_cubic_grid_turns_exactly_about_a_tilted_axis() {
+        let (ox, oy, oz) = (4_i64, 3_i64, 2_i64);
+        let pivot = DVec3::new(9.5, 9.5, 2.0);
+        let axis = DVec3::new(0.3, 0.0, 1.0); // the ship's tumble axis
+        let angle = 0.7_f64;
+        let local = DVec3::new(5.0, 2.0, 3.0);
+
+        let fixed3 = |v: DVec3| {
+            FixedVec3::new(
+                Fixed::from_f64(v.x),
+                Fixed::from_f64(v.y),
+                Fixed::from_f64(v.z),
+            )
+        };
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let crew = world.spawn(arch);
+
+        // The sim-space pose the script asked for: turn about the pivot,
+        // right-handed in sim coordinates, then shift by the spawn offset.
+        let turned = DQuat::from_axis_angle(axis.normalize(), angle) * (local - pivot)
+            + pivot
+            + DVec3::new(ox as f64, oy as f64, oz as f64);
+
+        // Cubic: map that sim point through the cubic frame and expect the seat.
+        let mut cube = MapRender::new(BTreeMap::new(), None, &[]);
+        let hull = cube.grid_spawn_cubic(ox, oy, oz);
+        cube.entity_set_grid(crew.0 as i64, hull);
+        cube.grid_pivot(hull, fixed3(pivot));
+        cube.grid_orient(hull, fixed3(axis), Fixed::from_f64(angle));
+        let want = DVec3::new(
+            -(turned.x + 0.5) * SCALE,
+            (turned.y + 0.5) * SCALE,
+            GROUND_Z - turned.z * SCALE,
+        );
+        let seat = cube.place(crew, fixed3(local));
+        assert!(
+            (seat - want).length() < 1e-6,
+            "a cubic hull renders the sim-space turn exactly: want {want:?}, got {seat:?}"
+        );
+
+        // Column: the same script calls, the column frame — and the sim-space
+        // prediction (z unscaled) no longer lands where the hull draws.
+        let mut column = MapRender::new(BTreeMap::new(), None, &[]);
+        let slab = column.grid_spawn(ox, oy, oz);
+        column.entity_set_grid(crew.0 as i64, slab);
+        column.grid_pivot(slab, fixed3(pivot));
+        column.grid_orient(slab, fixed3(axis), Fixed::from_f64(angle));
+        let want_col = DVec3::new(
+            -(turned.x + 0.5) * SCALE,
+            (turned.y + 0.5) * SCALE,
+            GROUND_Z - turned.z,
+        );
+        assert!(
+            (column.place(crew, fixed3(local)) - want_col).length() > 1.0,
+            "a column hull cannot honour a tilted sim rotation — if this ever \
+             passes, the anisotropy is gone and the cubic grid is redundant"
+        );
+    }
+
+    /// The deck cutaway on a cubic hull, end-to-end against the real grid (the
+    /// cubic twin of `deck_clip_cuts_the_deck_above_via_a_real_grid`): the
+    /// threshold must follow the grid's own cell height, or a band top of `z_hi`
+    /// cuts SCALE times too low and takes the crew's own deck with it.
+    #[test]
+    fn deck_clip_cuts_a_cubic_deck_above_via_a_real_grid() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        let (cx, cy) = (2_i64, 2_i64);
+        r.voxel_fill_in(g, cx, cy, 0, cx, cy, 0, 0x80AA_AAAA); // lower deck plate
+        r.voxel_fill_in(g, cx, cy, 3, cx, cy, 3, 0x8055_5555); // upper deck plate
+                                                               // The fog/cutaway ride this grid (no observer ⇒ the named-grid fallback).
+        r.vision_observer_in(-1, g);
+
+        let col = DVec3::new(-(cx as f64 + 0.5) * SCALE, (cy as f64 + 0.5) * SCALE, 0.0);
+        let down = DVec3::new(0.0, 0.0, 1.0);
+        let hit_z = |r: &MapRender| {
+            r.scene
+                .raycast_clipped(col, down, 4096.0)
+                .map(|h| h.voxel.z)
+        };
+        let gz = GROUND_Z as i32;
+        let s = SCALE as i32;
+
+        r.apply_deck_clip(); // no band declared yet
+        assert_eq!(
+            hit_z(&r).expect("hits the upper plate"),
+            gz - 3 * s,
+            "upper deck's cube tops out at GROUND_Z - 3·SCALE"
+        );
+
+        // The lower deck's band (cells 0..=2) cuts the upper plate away.
+        r.deck_clip(0, 2);
+        r.apply_deck_clip();
+        assert_eq!(
+            hit_z(&r).expect("hits the lower plate after the cut"),
+            gz,
+            "the cut exposes the lower deck, whose cube tops out at GROUND_Z"
+        );
+
+        // The upper deck's own band keeps everything (nothing is above it).
+        r.deck_clip(3, 5);
+        r.apply_deck_clip();
+        assert_eq!(
+            hit_z(&r).expect("hits the upper plate again"),
+            gz - 3 * s,
+            "a band that contains the tallest cell cuts nothing"
+        );
+    }
+
     /// The grid binding is per-entity render state with a full lifecycle: `-1`
     /// unbinds (a crew member steps off the hull and seats in the global frame
     /// again), and a despawned entity's binding is retired rather than leaking —
@@ -4659,7 +4998,7 @@ mod tests {
 
         // The crew climbs: a new band ⇒ a new `z_clip`, nothing else.
         r.deck_clip(4, 7);
-        let want = deck_clip_world_z(7);
+        let want = deck_clip_world_z(7, 1); // a column-cell grid: one voxel per cell
         r.build_instances(&world);
         r.apply_deck_clip(); // the order `render_into` uses (clip, then fog)
         let _ = r.update_fow(0.016);

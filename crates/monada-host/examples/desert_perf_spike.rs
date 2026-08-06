@@ -192,8 +192,8 @@ impl Gen {
         for i in 0..n as i32 {
             let (gx, gy) = (i % side, i / side);
             let j = hash2(gx, gy, 0xfeed);
-            let x = (self.map / 2 - spread / 2 + gx * spacing + (j % 2) as i32)
-                .clamp(1, self.map - 2);
+            let x =
+                (self.map / 2 - spread / 2 + gx * spacing + (j % 2) as i32).clamp(1, self.map - 2);
             let y = (self.map / 2 - spread / 2 + gy * spacing + ((j >> 8) % 2) as i32)
                 .clamp(1, self.map - 2);
             let (h, _) = self.column(x, y);

@@ -520,6 +520,15 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").grid_spawn(wx, wy, wz)
     });
 
+    // The cubic-cell twin (host_api 15): same handle space, a cell is a cube.
+    let b = bridge.clone();
+    engine.register_fn(
+        "grid_spawn_cubic",
+        move |wx: i64, wy: i64, wz: i64| -> i64 {
+            b.lock().expect("bridge mutex").grid_spawn_cubic(wx, wy, wz)
+        },
+    );
+
     let b = bridge.clone();
     engine.register_fn(
         "voxel_fill_in",
