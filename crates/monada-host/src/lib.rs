@@ -924,8 +924,11 @@ impl App {
         backend.on_init().expect("map init");
         backend.drain_ui_events();
         // The local layer boots after the sim's `init` so `local_init`
-        // observes the populated world.
+        // observes the populated world — and reads the same grid frames the
+        // sim's `grid_*` verbs just wrote, so a cursor hit can be expressed in
+        // a hull's coordinates.
         let mut local_layer = LocalBackend::new(&world, &bridge);
+        local_layer.set_grids(backend.grids());
         local_layer
             .load(&local_script)
             .expect("compile local script");
@@ -993,8 +996,10 @@ impl App {
         if let SimHz::Fixed(hz) = run.map.manifest.sim_hz {
             driver.set_tick_hz(hz);
         }
-        // The local layer reads the same shared world the driver mutates.
+        // The local layer reads the same shared world — and the same grid
+        // frames — the driver mutates.
         let mut local_layer = LocalBackend::new(driver.world(), &bridge);
+        local_layer.set_grids(driver.grids());
         local_layer
             .load(&local_script)
             .expect("compile local script");

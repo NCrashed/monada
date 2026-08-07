@@ -4,10 +4,14 @@
 //! `--listen`/`--connect` (LAN co-op) and `--replay` exactly as `monada-host
 //! --map` does. The demo *map* is scripts + GIF assets only — no engine code.
 //!
-//! S-A is the skeleton: a hull floor, one walkable crew member (reusing the
-//! RPG billboard actor), voxel collision, and a follow camera. Later slices
-//! stretch the view/visibility features (wall cutout, deck clip, fog of war)
-//! onto this frame — see docs/plans/ship-visibility.md.
+//! What it is now: a two-deck hull on its own CUBIC voxel grid, tumbling and
+//! swaying as one body while the crew walk it (WASD, view-relative), climb the
+//! fore-starboard stairwell between decks, carry cargo crates (E) and cycle the
+//! starboard airlock (F). Per-crew fog of war, a deck cutaway and the follow
+//! camera come from docs/plans/ship-visibility.md; the cargo half — a crate
+//! that rides the ship's frame until it is released through the airlock, and
+//! then stays behind in space while the ship turns away — is the demo side of
+//! docs/plans/grid-entities.md.
 
 use monada_format::Map;
 use monada_host::{cli, run};

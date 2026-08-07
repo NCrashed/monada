@@ -21,12 +21,14 @@ use monada_fixed::{Fixed, FixedVec3};
 use monada_sim::{Command, PlayerId, World};
 
 mod driver;
+mod grids;
 mod local_backend;
 mod physics;
 mod rhai_backend;
 mod volume;
 
 pub use driver::RhaiDriver;
+pub use grids::{shared_grids, GridStore, SharedGrids, NO_GRID};
 pub use local_backend::LocalBackend;
 // Re-exported because it is part of VolumeStore's own API surface
 // (`set`/`fill`/`get` speak MaterialId) — consumers of the store should
@@ -93,8 +95,24 @@ pub use volume::VolumeStore;
 /// only about z — so on a column grid only yaw is exact, and a map
 /// cannot convert coordinates between a tilted hull and the world
 /// (docs/plans/grid-entities.md §6). A cubic cell makes that map a
-/// similarity transform, so any 3D orientation is exact.
-pub const HOST_API_VERSION: u32 = 15;
+/// similarity transform, so any 3D orientation is exact; 16 = dynamic
+/// grid membership (docs/plans/grid-entities.md §3): `grid_move` /
+/// `grid_despawn` complete a grid's lifecycle, `grid_world` /
+/// `grid_local` convert a point between a grid's frame and the world,
+/// `entity_attach` / `entity_detach` move an entity between those frames
+/// WITHOUT moving it in the world, `entity_grid` / `grid_riders` read
+/// the membership back, and `voxel_set_in` / `voxel_clear_in` give
+/// `voxel_fill_in` its one-cell and its inverse. Additive: the raw
+/// `entity_set_grid` keeps its v12 meaning (bind, re-reading the
+/// position in the new frame), because changing it would be a breaking
+/// bump — the converting pair is new verbs beside it; 17 = `camera_grid`
+/// (the camera rides a grid's rotation). Found by playing the ship demo:
+/// a crew member bound to a hull has a grid-LOCAL position, so with a
+/// world-fixed camera the map's view-relative input steered in the
+/// ship's frame while the player looked at the world's — "forward"
+/// changed direction every tick as the hull turned. Riding the grid
+/// aligns the two and costs the map nothing but the one call.
+pub const HOST_API_VERSION: u32 = 17;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -347,6 +365,57 @@ pub trait HostBridge: Send {
     /// rotation about the mapped axis, but it is not the sim rotation, and a map
     /// cannot convert coordinates through it. The default ignores it.
     fn grid_orient(&mut self, _grid: i64, _axis: FixedVec3, _angle: Fixed) {}
+
+    /// Move a `grid_spawn` grid to sim-space `origin` — a hull under way, a
+    /// platform on its track. Replaces the offset `grid_spawn` placed it at;
+    /// unlike that verb's integer cells this is fixed-point, so a hull can
+    /// drift a fraction of a cell per tick. Entities bound to the grid, its fog
+    /// and its `deck_clip` ride the new placement, exactly as they ride
+    /// [`grid_orient`](Self::grid_orient). Render-side, not hashed; an
+    /// out-of-range or despawned handle is ignored (`host_api` 16). The default
+    /// ignores it.
+    fn grid_move(&mut self, _grid: i64, _origin: FixedVec3) {}
+
+    /// Retire a `grid_spawn` grid: its voxels leave the scene and its handle
+    /// dies. Handles are never reused, so a stale one stays inert rather than
+    /// addressing a later grid.
+    ///
+    /// Riders are NOT despawned — entity lifetime is hashed sim state and
+    /// belongs to the map, so a vanishing render frame must never kill crew.
+    /// They are detached keeping their world pose, as if the map had called
+    /// [`entity_detach`] on each; a map that wants them to go down with the
+    /// ship despawns them itself. Render-side (`host_api` 16); the default
+    /// ignores it.
+    ///
+    /// [`entity_detach`]: Self::entity_set_grid
+    fn grid_despawn(&mut self, _grid: i64) {}
+
+    /// Make the camera RIDE a `grid_spawn` grid: its whole orbit frame — the eye
+    /// offset and the view basis — is turned by that grid's rotation, so the
+    /// grid holds still on screen and the world turns around it. `-1` (or a dead
+    /// handle) puts it back in the world frame.
+    ///
+    /// A map with a moving hull wants this for a reason beyond the view: an
+    /// entity bound to a grid has a grid-LOCAL position, so a map that reads
+    /// input relative to the camera is steering in the ship's frame while
+    /// looking at the world's — and "forward" becomes a different direction
+    /// every tick as the hull turns. Riding the grid re-aligns the two, and the
+    /// map's own movement math needs no change. Render-side, never hashed
+    /// (`host_api` 17). The default ignores it.
+    fn camera_grid(&mut self, _grid: i64) {}
+
+    /// Paint ONE cell of a specific grid — [`voxel_fill_in`](Self::voxel_fill_in)
+    /// with both corners at the same place, spelled out because a single cell is
+    /// what a door or a prop edits (`host_api` 16). The default ignores it.
+    fn voxel_set_in(&mut self, _grid: i64, _x: i64, _y: i64, _z: i64, _color: i64) {}
+
+    /// Erase one cell of a specific grid — `voxel_fill_in`'s inverse, and the
+    /// door / hull-breach primitive: until this existed a grid's voxels could be
+    /// painted but never taken back. Render-side only, like every `*_in` verb: a
+    /// dynamic grid still feeds no collision store, so a map that opens a door
+    /// must also open its own passability rule (`host_api` 16). The default
+    /// ignores it.
+    fn voxel_clear_in(&mut self, _grid: i64, _x: i64, _y: i64, _z: i64) {}
 
     /// Name the grid-local point [`grid_orient`](Self::grid_orient) turns a
     /// `grid_spawn` grid about, in SIM cells — the frame `voxel_fill_in` paints

@@ -400,10 +400,25 @@ fn ship_input(t: usize) -> Command {
             _ => (0, -1),
         }
     };
+    // The button mask the map reads from `arg.z` (1 = use, 2 = airlock), pressed
+    // on single ticks so the map's rising-edge rule fires exactly once. This is
+    // what puts grid MEMBERSHIP under the golden: tick 2 attaches the crate
+    // beside the spawn to the crew's hull, tick 240 cycles the airlock (which
+    // changes what the crew can walk through), and tick 320 sets the crate down
+    // wherever the walk has taken it.
+    let btn = match t {
+        2 | 320 => 1,
+        240 => 2,
+        _ => 0,
+    };
     Command::on(
         0,
         EntityId(0),
-        FixedVec3::new(Fixed::from_int(mx), Fixed::from_int(my), Fixed::ZERO),
+        FixedVec3::new(
+            Fixed::from_int(mx),
+            Fixed::from_int(my),
+            Fixed::from_int(btn),
+        ),
     )
 }
 
@@ -1168,11 +1183,15 @@ mod tests {
             std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
         };
         let sources = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             read("crates/monada-script/src/rhai_backend.rs"),
             read("crates/monada-script/src/local_backend.rs"),
             // The volume-map physics verbs (digger demo, host_api 8).
             read("crates/monada-script/src/physics.rs"),
+            // The grid frame verbs (grid-entities, host_api 16). Registered
+            // beside the store they write, so this file has to be scraped too —
+            // without it the gate passed vacuously for every `grid_*` verb.
+            read("crates/monada-script/src/grids.rs"),
         );
         let registered = registered_fn_names(&sources);
         let documented = documented_fn_names(&read("book/src/reference.md"));

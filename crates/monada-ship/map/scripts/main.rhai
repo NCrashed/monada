@@ -143,6 +143,13 @@ fn deck_top(deck) { deck_floor(deck) + 2 }
 /// Until then the map owns its wall layout as this predicate, kept in sync
 /// with what `build_hull` paints for the eye.
 fn blocked(cx, cy, deck) {
+    // The airlock: two rim cells on the lower deck's starboard side. Open, they
+    // are the one walkable cell OUTSIDE the walkable box — you stand IN the
+    // doorway with the void at your back. `paint_door` keeps the voxels in sync
+    // with this predicate (the same hand-sync contract the walls have).
+    if deck == 0 && cx == 19 && (cy == 9 || cy == 10) {
+        return !door_open();
+    }
     if cx < 1 || cy < 1 || cx > 18 || cy > 18 {
         return true; // rim / out of bounds, both decks
     }
@@ -226,17 +233,25 @@ fn try_move(e, vx, vy, cz) {
 // `model_actor` order: crew = 0.
 fn init() {
     // Crew: movement intent (ix/iy), last facing yaw, current deck (0 lower /
-    // 1 upper — follows z on the stairwell ramp).
-    archetype(["ix", "iy", "face", "deck"]);
+    // 1 upper — follows z on the stairwell ramp), the carried crate (its id + 1,
+    // 0 = hands free) and last tick's button mask (so `use` / `door` act on the
+    // press, not on every tick the key is held).
+    archetype(["ix", "iy", "face", "deck", "carry", "btn", "prev"]);
 
     // Ship: the hull's 3D orientation as a spin angle (radians) about a fixed
-    // tumble axis. HASHED sim state, so every peer turns the hull identically —
-    // the crew ride it via grid-local coords, so the hull's motion is real
-    // shared gameplay, not decoration. Archetype id 1 (after CREW = 0); one ship
-    // entity, created here and advanced each tick by `step_ship`.
-    archetype(["spin"]);
+    // tumble axis, plus the airlock state. HASHED sim state, so every peer turns
+    // the hull identically — the crew ride it via grid-local coords, so the
+    // hull's motion is real shared gameplay, not decoration. Archetype id 1
+    // (after CREW = 0); one ship entity, created here and advanced each tick by
+    // `step_ship`.
+    archetype(["spin", "door"]);
     let ship = entity_create(1);
     entity_set_field(ship, "spin", fixed(0));
+
+    // Cargo crates: no fields of their own beyond "is someone holding me". What
+    // makes them interesting is WHICH FRAME they are in — riding the hull, or
+    // released into the world (see `step_use`). Archetype id 2.
+    archetype(["held"]);
 
     set_light(vec3(ratio(-4, 10), ratio(-3, 10), ratio(8, 10)), ratio(8, 10));
     // Space outside the hull: a starfield panorama behind the scene. Unpainted
@@ -268,6 +283,16 @@ fn init() {
     // the rendered height in cells; the host scales the art to it. Reuses the
     // RPG hero's idle/run GIFs under assets/char/crew.
     model_actor("assets/char/crew", ["idle", "run"], ratio(14, 10));
+    // The crate: a procedural box, model id 1 (the call after the actor).
+    model_box(9, 9, 9, 0x80a8_7a3c);
+
+    // Two crates stowed on the lower deck, authored in HULL coordinates — so
+    // `entity_set_grid` (the raw bind) is right here: nothing should move, the
+    // numbers already mean "this cell of the ship". `entity_attach` is for
+    // later, when a crate that is somewhere in the WORLD has to come aboard
+    // without jumping.
+    stow_crate(6, 2); // beside the crew's spawn, within arm's reach
+    stow_crate(12, 14); // aft, across the divider's doorway
     // No model_drop: the crew pivot already grounds on the deck's solid voxel
     // floor (world_of seats sim-z N at grid-z GROUND_Z-N, the same z the floor
     // voxel sits at). The RPG's `model_drop(0.35)` is `0.35·SCALE ≈ 5.6` WORLD
@@ -287,13 +312,20 @@ fn init() {
     camera_angle(ratio(8, 10), ratio(12, 10));
     camera_dist(fixed(60));
     camera_focus(vec3(fixed(6), fixed(4), fixed(0)));
+    // The camera RIDES the hull: its orbit frame turns with the ship, so the
+    // deck holds still on screen and the starfield sweeps past instead. This is
+    // not just a look — the crew's position is hull-LOCAL, so a world-fixed
+    // camera would have `cam_relative` steering in the ship's frame while the
+    // player watches the world's, and "forward" would point somewhere new every
+    // tick as the hull turns. One call, and the two frames agree again.
+    camera_grid(ship_grid);
 
     // Fog of war: a ~110° facing cone reaching 9 cells + a 3-cell 360°
     // peripheral. `follow_camera` names the LOCAL crew as the observer each tick
     // (per-client — each peer sees its own line of sight). Render-side.
     vision_config(110, 9, 3);
 
-    status("ship demo — WASD to walk; the fore-starboard stairwell climbs between decks");
+    status("ship demo — WASD walk, E crate, F airlock; the fore-starboard stairwell climbs between decks");
 }
 
 /// Paint the two-deck hull into `grid`, for the EYE. Collision is the `blocked`
@@ -346,6 +378,126 @@ fn rim_walls(grid, lo, hi, col) {
     voxel_fill_in(grid, 19, 0, lo, 19, 19, hi, col); // east
 }
 
+// --- cargo + airlock -----------------------------------------------------
+// The slice that exercises grid membership (docs/plans/grid-entities.md): a
+// crate is an entity whose FRAME is the gameplay. Stowed, it rides the hull and
+// tumbles with it; dropped through the open airlock it is released into the
+// world frame and stays exactly where it was let go, while the ship turns away
+// from it. `entity_attach` / `entity_detach` are what make those two the same
+// crate rather than a teleport.
+
+/// Put a fresh crate on the lower deck at hull cell `(cx, cy)`.
+fn stow_crate(cx, cy) {
+    let k = entity_create(2);
+    entity_set_position(k, vec3(fixed(cx), fixed(cy), fixed(0)));
+    entity_set_model(k, 1);
+    entity_set_grid(k, hull_grid());
+}
+
+/// Is the airlock open? HASHED ship state, so every peer's collision agrees.
+fn door_open() { to_int(entity_field(ship_entity(), "door")) == 1 }
+
+/// Toggle the airlock: the hashed flag, the wall voxels and — through
+/// `blocked` — passability, all in one place so they cannot drift apart.
+fn toggle_door() {
+    let open = if door_open() { 0 } else { 1 };
+    entity_set_field(ship_entity(), "door", fixed(open));
+    paint_door(open);
+}
+
+/// Cut the doorway out of the rim wall, or weld it shut again. Deck 0's walls
+/// are cells 1..2, so the doorway is those two cells of the two door columns.
+fn paint_door(open) {
+    if open == 1 {
+        voxel_clear_in(hull_grid(), 19, 9, 1);
+        voxel_clear_in(hull_grid(), 19, 9, 2);
+        voxel_clear_in(hull_grid(), 19, 10, 1);
+        voxel_clear_in(hull_grid(), 19, 10, 2);
+    } else {
+        voxel_fill_in(hull_grid(), 19, 9, 1, 19, 10, 2, 0x8079_8592);
+    }
+}
+
+/// Is this crew member standing IN the open doorway — the one cell where a
+/// released crate leaves the ship instead of resting on its deck?
+fn in_airlock(c) {
+    let p = entity_position(c);
+    let cy = cell(p.y);
+    door_open() && cell(p.x) == 19 && (cy == 9 || cy == 10) && to_int(entity_field(c, "deck")) == 0
+}
+
+/// The nearest un-held crate within arm's reach of crew `c`, or -1. Distances
+/// are compared in WORLD coordinates — `grid_world` composes each entity
+/// through whatever frame it currently rides — so a crate floating in space
+/// next to the hull is as reachable as one on the deck, without the map caring
+/// which of them is which.
+fn nearest_crate(c) {
+    let cw = grid_world(entity_grid(c), entity_position(c));
+    let best = -1;
+    let bestd = fixed(0);
+    for k in entities_of(2) {
+        if to_int(entity_field(k, "held")) != 1 {
+            let kw = grid_world(entity_grid(k), entity_position(k));
+            let dx = kw.x - cw.x;
+            let dy = kw.y - cw.y;
+            let dz = kw.z - cw.z;
+            let d = dx * dx + dy * dy + dz * dz;
+            if best < 0 || d < bestd {
+                best = k;
+                bestd = d;
+            }
+        }
+    }
+    if best >= 0 && bestd <= ratio(9, 4) { best } else { -1 } // 1.5 cells
+}
+
+/// One crew member's `use` / `door` presses (rising edges only, so holding the
+/// key does not machine-gun the verb).
+fn step_use(c) {
+    let btn = to_int(entity_field(c, "btn"));
+    let prev = to_int(entity_field(c, "prev"));
+    entity_set_field(c, "prev", fixed(btn));
+    let pressed = btn & (15 - prev); // bits that went 0 -> 1 this tick
+
+    if (pressed & 2) == 2 {
+        toggle_door();
+    }
+    if (pressed & 1) == 1 {
+        let carried = to_int(entity_field(c, "carry"));
+        if carried == 0 {
+            let k = nearest_crate(c);
+            if k >= 0 {
+                // Aboard, keeping its world spot: a crate lying in space is
+                // picked up without jumping, and one already on the deck does
+                // not move at all (the conversion is the identity there).
+                entity_attach(k, entity_grid(c));
+                entity_set_field(k, "held", fixed(1));
+                entity_set_field(c, "carry", fixed(k + 1));
+            }
+        } else {
+            let k = carried - 1;
+            entity_set_field(k, "held", fixed(0));
+            entity_set_field(c, "carry", fixed(0));
+            if in_airlock(c) {
+                // Released through the airlock: it leaves the ship's frame and
+                // stays where it was let go while the hull turns away from it.
+                entity_detach(k);
+            }
+        }
+    }
+}
+
+/// A carried crate sits on its crew member's cell, in whatever frame that crew
+/// member is in — one assignment, because both are in the same frame by
+/// construction (the pick-up attached it there).
+fn carry_crate(c) {
+    let carried = to_int(entity_field(c, "carry"));
+    if carried != 0 {
+        let p = entity_position(c);
+        entity_set_position(carried - 1, vec3(p.x, p.y, p.z));
+    }
+}
+
 /// Spawn crew members lazily as each player's input first arrives (co-op join),
 /// so no player count is needed up front. Ids follow `entities_of(0)` order.
 fn ensure_crew(player) {
@@ -374,7 +526,13 @@ fn ensure_crew(player) {
 // named action.
 fn local_tick(dt) {
     let mv = action_axis2("move");
-    submit_command(0, 0, vec3(mv.x, mv.y, fixed(0)));
+    // Buttons ride the command's spare z as a bit mask (1 = use, 2 = door): one
+    // command per tick either way, and the sim takes the rising edge — the
+    // local layer is stateless and cannot debounce anything itself.
+    let btn = 0;
+    if action_down("use") { btn = btn + 1; }
+    if action_down("door") { btn = btn + 2; }
+    submit_command(0, 0, vec3(mv.x, mv.y, fixed(btn)));
 }
 
 // --- input: store this peer's intent on its crew entity ------------------
@@ -384,6 +542,7 @@ fn command(player, verb, target, arg) {
         let c = entities_of(0)[player];
         entity_set_field(c, "ix", arg.x);
         entity_set_field(c, "iy", arg.y);
+        entity_set_field(c, "btn", arg.z);
     }
 }
 
@@ -391,7 +550,9 @@ fn command(player, verb, target, arg) {
 fn tick() {
     step_ship();
     for c in entities_of(0) {
+        step_use(c);
         step_crew(c);
+        carry_crate(c);
     }
     follow_camera();
     build_deck_hud();
@@ -415,6 +576,10 @@ fn step_ship() {
     // so the hull visibly rolls in 3D rather than spinning flat. The whole pose
     // is replaced each tick from the hashed angle — no render-side accumulation.
     grid_orient(hull_grid(), vec3(ratio(3, 10), fixed(0), fixed(1)), spin);
+    // …and the hull TRAVELS while it turns: a slow sway along the ship's x, so
+    // the frame under the crew translates as well as rotates. Same discipline —
+    // derived from the hashed angle, so it is shared motion, not decoration.
+    grid_move(hull_grid(), vec3(sin(spin) * fixed(4), fixed(0), fixed(0)));
 }
 
 /// Always-on HUD readout of the LOCAL crew's current deck, so climbing the
@@ -427,14 +592,24 @@ fn build_deck_hud() {
     if idx >= crew.len() {
         return;
     }
-    let d = to_int(entity_field(crew[idx], "deck"));
+    let c = crew[idx];
+    let d = to_int(entity_field(c, "deck"));
     ui_clear();
     ui_scale(fixed(2));
     let label = if d == 0 { "DECK 1 / 2  (lower)" } else { "DECK 2 / 2  (upper)" };
     // `ui_scale(2)` doubles sizes + text height; the second line clears the
     // 12pt first line (≈24px scaled) with room to spare.
     ui_text(8, 8, label, 12);
-    ui_text(8, 42, "fore-starboard stairwell links the decks", 8);
+    let hands = if to_int(entity_field(c, "carry")) == 0 {
+        "E: pick up a crate"
+    } else if in_airlock(c) {
+        "E: release into space"
+    } else {
+        "E: set the crate down"
+    };
+    ui_text(8, 42, hands, 8);
+    let lock = if door_open() { "F: airlock OPEN (starboard, deck 1)" } else { "F: airlock closed" };
+    ui_text(8, 60, lock, 8);
 }
 
 /// Advance one crew member: turn its stored input into a view-relative,

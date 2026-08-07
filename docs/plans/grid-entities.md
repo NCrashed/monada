@@ -1,7 +1,8 @@
 # Plan: dynamic grid membership — entities that join and leave a grid
 
-Status: **design**, with its prerequisite built (§9 S-0: cubic cells,
-`host_api` 15, landed 2026-08-06). An additive host-API slice that makes a
+Status: **shipped** — S-0 (cubic cells, `host_api` 15) through S-5 landed
+2026-08-06; what remains is §8's deferred slice 2 (grids that collide) and a
+live-display pass on the demo. An additive host-API slice that makes a
 `grid_spawn` grid a place entities can be *put into* and *taken out of* at run
 time — a crate set down on a deck, a crew member stepping from the hull onto a
 station, a shuttle that undocks and later stops existing. Requested by the
@@ -386,30 +387,99 @@ Each step is a headless test; nothing needs a display until S-4.
   frame math below, not part of it — §4's `to_world`/`to_local` are only
   meaningful on a grid whose cells are cubes.
 
-- **S-1 — `GridStore` + math.** The frame table, `to_world`/`to_local`,
-  `attach`/`detach`/`despawn`/`retain`, `state_hash`. Unit tests: round-trip
-  identity under a pivot + rotation; attach-then-detach returns the original
-  position to within fixed-point rounding; despawn detaches rather than kills;
-  a dead handle is inert.
-- **S-2 — script surface.** `register_grid_api` + the local-layer read split;
-  shadowing order verified by a test that a bridgeless backend still answers
-  `grid_world`. Bump `HOST_API_VERSION` to 15 (`HOST_API_OLDEST` stays 1 — this
-  is additive), extend the history comment in `monada-script/src/lib.rs`.
-- **S-3 — host mirror.** `grid_move` / `grid_despawn` / `voxel_set_in` /
-  `voxel_clear_in` in `map_render.rs` + tombstoned handles + fog re-target on
-  despawn. Tests in the existing `map_render` suite (the
-  `bound_entity_rides_its_grids_transform` / `entity_set_grid_unbinds_and_
-  retires_with_its_entity` neighbourhood): a moved grid moves its riders' seats;
-  a despawned grid leaves no rider bound and no fog on it.
-- **S-4 — the demo uses it.** Ship map: a crate archetype, place/pick-up/drop
-  through the command path, one door on `voxel_clear_in`; manifest
-  `host_api = 15`. Extend `crates/monada-ship/tests/smoke.rs` — the crate
-  survives a hull rotation at the same world spot, pick-up + drop is
-  pose-preserving, the door opens.
-- **S-5 — goldens.** Re-run the oracle; `ship@` is expected **unchanged**
-  through S-3 (§5) and to move at S-4 (new hashed entities), which is a normal
-  `--bless`. Update `book/src/reference.md`'s "Dynamic grids" table with the ten
-  new rows.
+- **S-1 — `GridStore` + math. DONE (2026-08-06).**
+  `crates/monada-script/src/grids.rs`: the frame table, `to_world`/`to_local`,
+  `attach`/`detach`/`despawn`/`retain`, `set_grid` (the raw v12 bind),
+  `state_hash`; 9 unit tests. One finding worth keeping: `from_axis_angle`
+  builds the quaternion from fixed-point `sin`/`cos`, so it is only NEARLY
+  unit — and `inverse` is the conjugate, whose product with the original scales
+  by `|q|²`. A world→local→world trip was therefore a small dilation about the
+  origin (~1.2e-6 of a cell at hull scale, and compounding per round trip).
+  `orient` now normalises on the way in, which puts the trip back inside
+  rounding. The "convert at moments, not every tick" advice stands regardless.
+- **S-2 — script surface. DONE (2026-08-06).** `register_grid_api` (dual-write
+  store + bridge, registered after `register_bridge_api` so it shadows the
+  bridge-only grid verbs) + `register_grid_read_api` for the local layer;
+  `RhaiBackend` owns the store and prunes bindings once per tick;
+  `RhaiDriver::grids()` / `LocalBackend::set_grids` hand it to the host.
+  `HOST_API_VERSION` 16 (`HOST_API_OLDEST` stays 1 — additive). Five
+  script-level tests in `tests/grid_frames.rs`, including the wall: the local
+  layer resolves `grid_world` but raises on `entity_attach`. Two side-findings:
+  (a) the book's "reference can't drift" gate scraped only three files, so every
+  `grid_*` verb passed it vacuously — `grids.rs` is now scraped too; (b) a Rhai
+  function yields its last statement's value even with a semicolon, so an `init`
+  ending in `entity_attach(...)` died with "Output type incorrect: bool
+  (expecting ())" — the trigger callers now take a `Dynamic` and drop it, which
+  also retires the same trap for `entity_create` / `entity_despawn`.
+- **S-3 — host mirror. DONE (2026-08-06).** `grid_move` / `grid_despawn` /
+  `voxel_set_in` / `voxel_clear_in` in `map_render.rs`; the handle table became
+  `Vec<Option<GridId>>` (tombstones) behind one `grid_id` resolver, and
+  `grid_despawn` tears the fog down BEFORE `Scene::remove_grid` — `retarget_vision`
+  un-clips the grid it is leaving and detaches the twin, both of which reach
+  into the scene for a grid that is about to stop existing. Four tests, the
+  important one being `the_sim_frame_and_the_drawn_frame_agree`: feed the same
+  script calls to `monada-script`'s fixed-point `GridStore` and to `MapRender`,
+  then require the store's `to_world` (mapped sim→world) to land where `place`
+  renders. Measured agreement ~1e-6 world voxels over a 20-cell hull — the whole
+  slice rests on that number, so it is now a test rather than an argument.
+- **S-4 — the demo uses it. DONE (2026-08-06).** Ship map: a `CRATE`
+  archetype, two crates stowed on the lower deck, `use` (E) to pick up / set
+  down and `door` (F) to cycle a starboard airlock, both folded into the
+  existing per-tick input command's spare `arg.z` as a bit mask and acted on at
+  the RISING EDGE (the local layer is stateless, so the debounce is a hashed
+  `prev` field). The rule that makes the slice visible: setting a crate down
+  inside the ship leaves it in the ship's frame, releasing it while standing in
+  the open airlock `entity_detach`es it — so it hangs in space exactly where it
+  was let go while the hull turns and sways away from it. The hull now also
+  `grid_move`s (a slow sway derived from the same hashed spin), so riders are
+  carried by a frame that translates as well as rotates. Manifest `host_api =
+  16`. Four new tests in `smoke.rs`, incl. the release-into-space one, plus the
+  airlock gating passability both ways.
+- **S-5 — goldens. DONE (2026-08-06).** `ship@` was unchanged through S-3, as
+  predicted (§5), and moved at S-4 — re-blessed. The oracle's `ship_input` now
+  presses the two buttons on fixed ticks (2 = pick up, 240 = airlock, 320 = set
+  down), so grid MEMBERSHIP is under the golden rather than beside it. Every
+  other scenario stayed byte-identical throughout. `book/src/reference.md`
+  carries the new verbs plus a "Grid frames" section, and the drift gate now
+  scrapes `grids.rs` so it can never miss a `grid_*` verb again.
+
+## 9b. Found on the first live run
+
+- **A prop rode its grid's position but not its ROTATION** (fixed). roxlap's
+  static sprite instance (`SpriteInstanceDesc`) carries a position and nothing
+  else, so a crate on the tumbling hull stayed world-axis-aligned while the ship
+  rolled under it. Orientation exists only on the renderer's DYNAMIC layer
+  (`DynSpriteTransform`'s right/up/forward basis, what `.rkc` characters already
+  use), so `build_instances` now routes a sprite bound to a TURNING grid there
+  (`prop_targets` → `sync_props`) and leaves everything else on the cheap static
+  path. The pivot drop turns with it — it is a model-space offset, so on a hull
+  rolled onto its side it has to push the crate sideways, not down.
+- **A prop left a FROZEN GHOST of itself** (fixed, and the sharper half of the
+  same bug). In a dynamic-layer map the static sprite set is uploaded exactly
+  once — re-uploading resets the actors — so a static instance is nailed to
+  wherever it stood on the first rendered frame. Routing only *turning* grids to
+  the dynamic layer meant every prop was baked in on frame 0 (the hull has not
+  turned yet, `grid_orient` runs in `tick`) and then ALSO drawn posed: one copy
+  riding the ship, one hanging in space. On screen the crate you carried looked
+  right while the one you left behind "flew past" the hull. The test is now "does
+  it ride a grid", not "is that grid turning".
+- **The camera did not ride the hull, so the CONTROLS drifted** (fixed, new verb
+  `camera_grid`, `host_api` 17). This one was mis-filed as a look: a crew member
+  bound to a grid has a grid-LOCAL position, so with a world-fixed camera the
+  map's view-relative input steered in the ship's frame while the player watched
+  the world's — "forward" pointed somewhere new every tick the hull turned.
+  `camera_grid(grid)` turns the whole orbit frame (basis + eye offset) by the
+  grid's rotation, which re-aligns the two and needs nothing from the map's
+  movement math. Consequence to weigh on the next live pass: with a TILTED tumble
+  axis the camera now rolls too — the deck holds still and the starfield sweeps.
+  If that reads badly, the demo's tumble axis becomes pure `+z` (one literal) and
+  the camera only yaws.
+- **Still upright on a rolling hull, by the same mechanism:** a `.rkc`
+  character (`CharacterModel::transform` takes a yaw, not the grid's basis) and
+  the selection ring (`sync_rings` places unposed instances). Neither is in the
+  ship demo's path — the crew are billboards, which cannot tilt at all — so they
+  are noted, not fixed. A billboard actor riding a rolling hull is a deeper
+  question than a bug: it has no "tilted" art to show.
 
 ## 10. Open questions
 

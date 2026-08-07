@@ -47,8 +47,9 @@
 use monada_fixed::{Fixed, FixedVec3};
 use rhai::{Dynamic, Engine, ImmutableString, Scope, AST};
 
+use crate::grids::register_grid_read_api;
 use crate::rhai_backend::{register_bridge_api, register_number_types, register_world_read_api};
-use crate::{ScriptError, SharedBridge, SharedWorld};
+use crate::{ScriptError, SharedBridge, SharedGrids, SharedWorld};
 
 /// The map's local script layer: input → gesture/UI logic → submitted
 /// commands. See the module docs for the API surface and entry points.
@@ -89,6 +90,18 @@ impl LocalBackend {
             has_action: false,
             has_pointer: false,
         }
+    }
+
+    /// Give the local layer read access to the sim's grid frames
+    /// ([`RhaiBackend::grids`](crate::RhaiBackend::grids)): `grid_world` /
+    /// `grid_local` / `entity_grid` / `grid_riders`, so a per-client script can
+    /// turn a cursor hit into a hull cell. READ-only by construction — the
+    /// mutators live in the sim layer, because moving a hull or re-seating an
+    /// entity is shared, hashed-adjacent state, not a per-client decision.
+    /// Registering after construction is fine (Rhai resolves at call time), the
+    /// same as [`RhaiBackend::set_bridge`](crate::RhaiBackend::set_bridge).
+    pub fn set_grids(&mut self, grids: &SharedGrids) {
+        register_grid_read_api(&mut self.engine, grids);
     }
 
     /// Compile `source` (the map's entry script, or its dedicated
@@ -197,8 +210,15 @@ impl LocalBackend {
             .ast
             .as_ref()
             .ok_or_else(|| ScriptError::Run("no local script loaded".to_string()))?;
+        // `Dynamic`, not `()`: a Rhai function yields its last evaluated
+        // statement's value even when the map wrote a semicolon, so a handler
+        // ending in a value-returning verb (`entity_attach`, `submit_command`'s
+        // neighbours, `ui_clicks`) would otherwise die with "Output type
+        // incorrect: bool (expecting ())" — a message about nothing the author
+        // did wrong. A trigger's return value is meaningless by design; drop it.
         self.engine
-            .call_fn::<()>(&mut self.scope, ast, name, args)
+            .call_fn::<rhai::Dynamic>(&mut self.scope, ast, name, args)
+            .map(|_| ())
             .map_err(|e| ScriptError::Run(e.to_string()))
     }
 }

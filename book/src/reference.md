@@ -134,6 +134,9 @@ to place in a command payload.
 | `model_drop(model, cells)` | nudge an actor's or character's sprites down/up by `cells` |
 | `entity_set_model(entity, model)` | bind an entity to a render model |
 | `entity_set_grid(entity, grid)` | bind an entity to a `grid_spawn` grid so it rides that grid's transform (its position is read as grid-local); `-1` unbinds; unbound entities render in the global frame. Binding the fog observer also moves fog/`deck_clip` onto that grid |
+| `entity_attach(entity, grid)` | bind *and* rewrite the position into that grid's frame, so the entity does not move in the world — stepping onto a hull. An entity already riding another grid hops straight across. Returns whether it happened (requires `host_api` 16) |
+| `entity_detach(entity)` | the inverse: rewrite into world coordinates and unbind — stepping off. Returns whether it was riding anything |
+| `entity_grid(entity)` | the grid an entity rides, or `-1` |
 | `entity_set_anim(entity, state)` | set an entity's animation: an actor state, or a character's `.rkc` clip name (an unknown name keeps the current one) |
 | `entity_set_facing(entity, yaw)` | set an entity's facing yaw (radians): an actor picks its directional sprite, a character turns its geometry |
 | `entity_set_tint(entity, tint)` | multiply an actor's sprite by a `0xRRGGBB` tint (billboard actors only) |
@@ -224,6 +227,8 @@ Spawn and paint additional voxel grids independent of the world grid (e.g. ships
 
 **Cell shape.** A `grid_spawn` grid keeps the world grid's *column* cell: `SCALE×SCALE×1` voxels, so sim z is unscaled and a cell is a thin slab. A `grid_spawn_cubic` grid makes the cell a cube (`SCALE³` voxels), so z scales like x/y. The shape belongs to the grid: `voxel_fill_in`, `grid_pivot`, the seat of an entity bound with `entity_set_grid`, and `deck_clip` all follow the grid they are given.
 
+A map whose entities ride a moving grid usually wants `camera_grid` too (see the camera table): those entities' positions are grid-local, so a world-fixed camera has view-relative input steering in the grid's frame while the player watches the world's — "forward" points somewhere new every time the grid turns.
+
 Prefer the cubic grid whenever the map turns a grid about anything but the vertical, or wants to convert a point between the grid and the world: sim→world on a column cell is anisotropic, and only a rotation about z survives it — a tilted turn renders honestly but is not the rotation the script asked for. The cubic cell makes that map a similarity transform, so every orientation is exact. The trade is that vertical geometry is cell-quantised there: a wall is a whole number of cells tall, and the finest stair step is one cell.
 
 | Function | Result |
@@ -233,7 +238,38 @@ Prefer the cubic grid whenever the map turns a grid about anything but the verti
 | `voxel_fill_in(grid, x0, y0, z0, x1, y1, z1, color)` | fill a solid box of voxels in the given dynamic grid (same coords as `voxel_fill`) |
 | `grid_orient(grid, axis, angle)` | turn a grid to a 3D orientation: `angle` radians about the (auto-normalised) `axis` in SIM coordinates (+z up), replacing its rotation — entities riding it and its fog/`deck_clip` follow; a zero-length axis is ignored |
 | `grid_pivot(grid, point)` | the grid-local sim-cell `point` `grid_orient` turns the grid about — a hull spanning cells `0..=19` turns in place about `9.5`, not about the corner its local origin sits on. Sticky; call once at spawn |
+| `grid_move(grid, point)` | move the grid to sim-space `point`, replacing `grid_spawn`'s offset — a hull under way. Fixed-point, so a hull can drift a fraction of a cell per tick; riders and fog follow (requires `host_api` 16) |
+| `grid_despawn(grid)` | retire the grid: its voxels leave the scene and the handle dies for good (handles are never reused, so a stale one is inert). Riders are **detached alive**, keeping their world pose — killing them is the map's call, not the renderer's |
+| `voxel_set_in(grid, x, y, z, color)` | paint one cell of a dynamic grid |
+| `voxel_clear_in(grid, x, y, z)` | erase one cell — `voxel_fill_in`'s inverse, the door / hull-breach primitive. Render-only: a dynamic grid still feeds no collision, so the map must open its own passability rule too |
 | `vision_observer(entity, grid)` | fog/`deck_clip` overload that rides the given dynamic grid instead of the world grid (movable hull). Names the fog's grid only — it does not bind the entity, and an observer bound via `entity_set_grid` fogs the grid it rides instead |
+
+## Grid frames — *simulation* (reads: any layer)
+
+A grid's *voxels* are presentation, but its **frame** — where it sits, what it
+is turned to, who rides it — is kept a second time in fixed-point, so a map may
+convert points between a grid and the world and act on the answer. The frame is
+a pure function of the map's own deterministic calls, so every peer computes the
+same one: results may steer `tick()`, exactly like `voxel_solid` or `nav_path`.
+
+The reads below are registered in both layers (the local layer uses them to turn
+a cursor hit into a hull cell); the verbs that *move* a hull or re-seat an entity
+are simulation-only.
+
+| Function | Result |
+|---|---|
+| `grid_world(grid, point)` | a grid-local sim point in world coordinates; an unknown or despawned handle converts as the identity |
+| `grid_local(grid, point)` | the inverse — a world point in the grid's frame |
+| `grid_riders(grid)` | every entity riding the grid, ascending |
+
+Conversion is exact to fixed-point rounding, not bit-exact. Convert at the
+moments that mean something — a crew member steps off the hull, an item is
+dropped — rather than round-tripping every tick, which would integrate that
+rounding into a drift.
+
+On a column-cell grid the frame is only *drawn* faithfully for a rotation about
+the vertical (see the cell-shape note above), so a map that converts coordinates
+through a tilted hull wants `grid_spawn_cubic`.
 
 ## Camera, lighting, sky — *presentation*
 
@@ -245,6 +281,7 @@ Prefer the cubic grid whenever the map turns a grid about anything but the verti
 | `camera_dist(dist)` | set the camera's distance from its focus |
 | `camera_pan(dx, dy)` | shift the camera focus by a sim-space delta — an RTS-style scroll, accumulated host-side |
 | `camera_cutout(radius, feather)` | dissolve geometry between the camera and its focus inside a keyhole (sim cells; `radius <= 0` off) |
+| `camera_grid(grid)` | make the camera RIDE a dynamic grid: its orbit frame turns with that grid, so the grid holds still on screen and the world sweeps past; `-1` returns it to the world frame (requires `host_api` 17) |
 | `deck_clip(z_lo, z_hi)` | show only the sim-z band `z_lo..=z_hi`, cutting the ceiling above it away |
 | `vision_observer(entity)` | declare the local fog-of-war viewpoint (per-client); `-1` clears it |
 | `vision_config(cone_deg, range, peripheral)` | tune the observer's vision cone / reach / peripheral radius (cells) |

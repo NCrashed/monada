@@ -22,7 +22,8 @@ use monada_net::SimDriver;
 use monada_sim::{Command, PlayerId, StateHasher};
 
 use crate::{
-    PhysicsSim, RhaiBackend, ScriptBackend, ScriptError, SharedBridge, SharedPhysics, SharedWorld,
+    PhysicsSim, RhaiBackend, ScriptBackend, ScriptError, SharedBridge, SharedGrids, SharedPhysics,
+    SharedWorld,
 };
 
 /// A lockstep [`SimDriver`] backed by a compiled Rhai map.
@@ -119,6 +120,14 @@ impl RhaiDriver {
     #[must_use]
     pub fn physics(&self) -> Option<&SharedPhysics> {
         self.phys.as_ref()
+    }
+
+    /// The grid frame table the map's `grid_*` verbs write — for the host to
+    /// hand to the local layer ([`LocalBackend::set_grids`](crate::LocalBackend::set_grids))
+    /// and to read grid poses between ticks.
+    #[must_use]
+    pub fn grids(&self) -> &SharedGrids {
+        self.backend.grids()
     }
 }
 

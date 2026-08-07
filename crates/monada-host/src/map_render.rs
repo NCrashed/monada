@@ -1101,7 +1101,7 @@ pub struct MapRender {
     /// compacted so handles stay stable. Painted by `voxel_fill_in`. Kept
     /// separate from [`world_grid`](Self::world_grid) so terrain/fog never attach
     /// to a decorative grid.
-    grids: Vec<GridId>,
+    grids: Vec<Option<GridId>>,
     /// Per-`grids` rotation anchor, keyed by `GridId`. Once `grid_orient` can
     /// turn a grid about a pivot, `transform.origin` is DERIVED (spawn origin
     /// composed with the pivot swing), so the spawn origin can no longer be
@@ -1166,6 +1166,19 @@ pub struct MapRender {
     ring_model: Option<roxlap_render::SpriteModelId>,
     /// Live ring instance ids, torn down and re-issued each frame.
     ring_ids: Vec<roxlap_render::SpriteInstanceId>,
+    /// Static-sprite props that ride a TURNING grid, computed by
+    /// `build_instances` for [`sync_props`](Self::sync_props) to place:
+    /// `(sprite model index, world seat, grid rotation, pivot drop)`. They
+    /// cannot use the static instance list — it has no orientation — so they
+    /// live on the dynamic layer, posed by the grid's own basis.
+    prop_targets: Vec<(usize, DVec3, DQuat, f64)>,
+    /// Sprite models registered with the renderer's dynamic layer, by their
+    /// index in [`SpriteSet::models`]. Registered lazily, once per model.
+    prop_models: BTreeMap<usize, roxlap_render::SpriteModelId>,
+    /// Live prop instance ids, torn down and re-issued each frame like
+    /// [`ring_ids`](Self::ring_ids) — a handful of crates per hull, so the
+    /// churn is cheaper than tracking per-entity lifetimes.
+    prop_ids: Vec<roxlap_render::SpriteInstanceId>,
     /// An active pointer drag's anchor (sim-space ground point), set by
     /// `drag_begin`; the far corner rides `cursor_ground`. Render-side
     /// gesture state — the stateless local script layer cannot hold it.
@@ -1256,6 +1269,10 @@ pub struct MapRender {
     /// The entity under the cursor (`pick_entity`), refreshed per frame
     /// by the host alongside the ray; `-1` = none.
     cursor_entity: i64,
+    /// The grid the camera rides (`camera_grid`): its orbit frame is turned by
+    /// that grid.s rotation, so a ship.s deck holds still on screen while the
+    /// sky turns. `None` = the world frame (every map before this one).
+    camera_grid: Option<GridId>,
     /// Third-person wall cutout (`camera_cutout`): keyhole `(radius, feather)`
     /// in sim cells, projected to pixels each frame around the camera focus.
     /// `None` = no cutout. Render-side, never hashed.
@@ -1356,8 +1373,12 @@ impl MapRender {
             char_targets: Vec::new(),
             clips_registered: false,
             highlighted: BTreeSet::new(),
+            camera_grid: None,
             ring_model: None,
             ring_ids: Vec::new(),
+            prop_targets: Vec::new(),
+            prop_models: BTreeMap::new(),
+            prop_ids: Vec::new(),
             drag_anchor: None,
             status: String::new(),
             camera: OrbitCamera::framing(DVec3::new(0.0, 0.0, GROUND_Z)),
@@ -1781,7 +1802,7 @@ impl MapRender {
         );
         let id = self.scene.add_grid(GridTransform::at(pos));
         let idx = self.grids.len() as i64;
-        self.grids.push(id);
+        self.grids.push(Some(id));
         // A fresh grid turns about its own local origin until the map names a
         // pivot — the pose `GridTransform::at` just set.
         self.grid_anchors.insert(
@@ -1800,6 +1821,18 @@ impl MapRender {
     /// answer `false`: they are not script grids and never carry an anchor.
     fn grid_is_cubic(&self, id: GridId) -> bool {
         self.grid_anchors.get(&id).is_some_and(|a| a.cubic)
+    }
+
+    /// Resolve a script grid handle to its scene grid. `None` for a negative,
+    /// out-of-range or DESPAWNED handle — the slot of a retired grid is kept as
+    /// a tombstone rather than compacted, so every later handle keeps its value
+    /// and a stale one can never address a grid spawned after it.
+    fn grid_id(&self, handle: i64) -> Option<GridId> {
+        usize::try_from(handle)
+            .ok()
+            .and_then(|i| self.grids.get(i))
+            .copied()
+            .flatten()
     }
 
     /// Write a `grid_spawn` grid's pose: `rotation`, plus the origin that keeps
@@ -1865,6 +1898,7 @@ impl MapRender {
     pub fn build_instances(&mut self, world: &World) {
         self.sprites.instances.clear();
         self.actor_targets.clear();
+        self.prop_targets.clear();
         self.char_targets.clear();
         // Capture the fog-of-war observer's world pose (feet + facing yaw) while
         // we have the World; `render_into` builds the `FowObserver` from it.
@@ -1899,10 +1933,38 @@ impl MapRender {
                     let drop = self.sprites.models.get(si).map_or(SCALE * 0.5, |m| {
                         f64::from(m.kv6.zsiz) - f64::from(m.kv6.zpiv)
                     });
-                    self.sprites.instances.push(SpriteInstanceDesc {
-                        model: si,
-                        pos: [w.x as f32, w.y as f32, (w.z - drop) as f32],
-                    });
+                    // A prop riding a grid goes on the DYNAMIC layer, always.
+                    // Two reasons, and the second is the one that bites:
+                    //
+                    // 1. It has to TURN with its grid. roxlap's static instance
+                    //    (`SpriteInstanceDesc`) carries a position and nothing
+                    //    else, so a crate left there keeps its world-axis
+                    //    alignment while the hull rolls under it.
+                    // 2. In a dynamic-layer map the static set is uploaded
+                    //    EXACTLY ONCE (re-uploading resets the actors), so a
+                    //    static instance is FROZEN at wherever it stood on the
+                    //    first rendered frame. Routing only *turning* grids here
+                    //    left every prop a ghost: the hull is still unturned on
+                    //    frame 0, so each crate was baked into the static set and
+                    //    then ALSO drawn posed — one copy riding the ship, one
+                    //    hanging in space where it started.
+                    //
+                    // Hence the test is "does it ride a grid", not "is that grid
+                    // turning": a grid at rest poses with the identity basis,
+                    // which is exactly what the static path would have drawn.
+                    let rot = self
+                        .entity_grid
+                        .get(&e)
+                        .and_then(|&g| self.scene.grid(g))
+                        .map(|g| g.transform.rotation);
+                    if let (true, Some(rot)) = (self.dynamic_layer(), rot) {
+                        self.prop_targets.push((si, w, rot, drop));
+                    } else {
+                        self.sprites.instances.push(SpriteInstanceDesc {
+                            model: si,
+                            pos: [w.x as f32, w.y as f32, (w.z - drop) as f32],
+                        });
+                    }
                 }
                 Some(&ModelRef::Actor(ai)) => {
                     // A directional billboard actor: seat its bottom-centre
@@ -2203,6 +2265,26 @@ impl MapRender {
 
     pub fn camera(&self) -> Camera {
         let mut cam = self.camera.to_roxlap();
+        // Ride a grid (`camera_grid`): turn the WHOLE orbit frame — the eye
+        // offset and the view basis — by that grid's rotation, so the deck stays
+        // put on screen and the sky turns around it instead. Without this a
+        // tumbling hull spins under a world-fixed camera, and since the crew's
+        // position is grid-LOCAL, the direction "W" moves them in changes every
+        // tick: the player is steering in the ship's frame while looking at the
+        // world's. Composing here fixes both at once, and needs nothing from the
+        // map's movement math — its view-relative input is already hull-local.
+        if let Some(rot) = self
+            .camera_grid
+            .and_then(|g| self.scene.grid(g))
+            .map(|g| g.transform.rotation)
+        {
+            let turn = |v: [f64; 3]| (rot * DVec3::from_array(v)).to_array();
+            cam.forward = turn(cam.forward);
+            cam.right = turn(cam.right);
+            cam.down = turn(cam.down);
+            cam.pos =
+                (self.camera.center - DVec3::from_array(cam.forward) * self.camera.dist).to_array();
+        }
         // Volume maps: third-person camera collision (the keyhole cutout
         // is gone, so nothing else keeps the eye out of rock — a flipped
         // vehicle by the mountain face was a full-screen sandstone wall).
@@ -2591,6 +2673,7 @@ impl MapRender {
         }
         self.update_actors(renderer, camera, dt);
         self.update_characters(renderer, dt);
+        self.sync_props(renderer);
         self.sync_rings(renderer);
         // Deck cutaway: clip the grid above the local crew's deck so the camera
         // sees inside (set before building `frame`, which doesn't touch scene).
@@ -2712,6 +2795,48 @@ impl MapRender {
                 model,
                 pos: [pos.x as f32, pos.y as f32, (pos.z - age * PUFF_RISE) as f32],
             });
+        }
+    }
+
+    /// Place the props that ride a turning grid, on the renderer's DYNAMIC
+    /// sprite layer — the only one that takes an orientation.
+    ///
+    /// The pose is the grid's rotation applied to the model's own axes, and the
+    /// pivot drop turns WITH it: the drop is a model-space offset ("the bottom
+    /// face is this far below the pivot"), so on a hull rolled onto its side it
+    /// has to push the crate sideways, not down. Leaving it in world z is what
+    /// makes a rotated prop sink through its own deck.
+    ///
+    /// Instances are torn down and re-issued each frame, like
+    /// [`sync_rings`](Self::sync_rings): a map carries a handful of props, and
+    /// the alternative is tracking a per-entity instance across model rebinds,
+    /// grid hops and despawns for no visible gain.
+    fn sync_props(&mut self, renderer: &mut SceneRenderer) {
+        for id in self.prop_ids.drain(..) {
+            renderer.remove_sprite_instance(id);
+        }
+        for (si, seat, rot, drop) in std::mem::take(&mut self.prop_targets) {
+            let model = if let Some(&m) = self.prop_models.get(&si) {
+                m
+            } else {
+                let Some(sprite) = self.sprites.models.get(si) else {
+                    continue;
+                };
+                let m = renderer.add_sprite_model(&sprite.kv6);
+                self.prop_models.insert(si, m);
+                m
+            };
+            let axis = |v: DVec3| [v.x as f32, v.y as f32, v.z as f32];
+            let pos = seat + rot * DVec3::new(0.0, 0.0, -drop);
+            let xf = DynSpriteTransform {
+                pos: axis(pos),
+                right: axis(rot * DVec3::X),
+                up: axis(rot * DVec3::Y),
+                forward: axis(rot * DVec3::Z),
+            };
+            if let Some(id) = renderer.add_sprite_instance_posed(model, xf) {
+                self.prop_ids.push(id);
+            }
         }
     }
 
@@ -3087,7 +3212,7 @@ impl HostBridge for MapRender {
             // uses): the entity returns to the global frame — a crew member who
             // steps off the hull, a prop released from a platform.
             self.entity_grid.remove(&e);
-        } else if let Some(&id) = usize::try_from(grid).ok().and_then(|i| self.grids.get(i)) {
+        } else if let Some(id) = self.grid_id(grid) {
             // Resolve the script's grid handle (index into `grids`) to a GridId;
             // an out-of-range handle is ignored, matching `voxel_fill_in`.
             self.entity_grid.insert(e, id);
@@ -3103,7 +3228,7 @@ impl HostBridge for MapRender {
 
     fn grid_orient(&mut self, grid: i64, axis: FixedVec3, angle: Fixed) {
         // Resolve the handle as `voxel_fill_in`/`entity_set_grid` do.
-        let Some(&id) = usize::try_from(grid).ok().and_then(|i| self.grids.get(i)) else {
+        let Some(id) = self.grid_id(grid) else {
             return;
         };
         // Build a full 3D rotation from axis + angle. The axis arrives in SIM
@@ -3257,8 +3382,87 @@ impl HostBridge for MapRender {
         self.spawn_grid(wx, wy, wz, true)
     }
 
+    fn grid_move(&mut self, grid: i64, origin: FixedVec3) {
+        let Some(id) = self.grid_id(grid) else {
+            return;
+        };
+        let Some(anchor) = self.grid_anchors.get_mut(&id) else {
+            return;
+        };
+        // The origin TRANSLATES the grid's frame — it is not a point inside it —
+        // so it takes `world_of`'s linear part only (no cell-centre half-step),
+        // scaled in z by the grid's own cell height exactly as `spawn_grid`
+        // scales its integer offset. `grid_move(grid_spawn's cells)` therefore
+        // lands the grid back where it spawned.
+        let cell_z = cell_z_voxels(anchor.cubic) as f64;
+        anchor.spawn_origin = DVec3::new(
+            -origin.x.to_f64() * SCALE,
+            origin.y.to_f64() * SCALE,
+            -origin.z.to_f64() * cell_z,
+        );
+        // Re-derive the pose through the single writer, so a move composes with
+        // whatever rotation and pivot the grid already carries.
+        let rotation = self
+            .scene
+            .grid(id)
+            .map_or(DQuat::IDENTITY, |g| g.transform.rotation);
+        self.apply_grid_pose(id, rotation);
+    }
+
+    fn grid_despawn(&mut self, grid: i64) {
+        let Some(id) = self.grid_id(grid) else {
+            return; // unknown or already retired — inert, by design
+        };
+        // Order matters: tear the fog down while the grid still EXISTS, then
+        // remove it. `retarget_vision` un-clips the grid being left behind and
+        // detaches the twin, both of which reach into the scene for it.
+        let before = self.vision_grid();
+        self.entity_grid.retain(|_, &mut g| g != id);
+        if self.named_vision_grid == Some(id) {
+            self.named_vision_grid = None;
+        }
+        if self.vision_grid() != before {
+            self.retarget_vision(before);
+        }
+        self.scene.remove_grid(id);
+        self.grid_anchors.remove(&id);
+        // Tombstone the handle rather than compacting the table: later handles
+        // keep their values, and this one stays inert forever.
+        if let Ok(i) = usize::try_from(grid) {
+            if let Some(slot) = self.grids.get_mut(i) {
+                *slot = None;
+            }
+        }
+    }
+
+    fn camera_grid(&mut self, grid: i64) {
+        // `-1` (or any dead handle) puts the camera back in the world frame.
+        self.camera_grid = self.grid_id(grid);
+    }
+
+    fn voxel_set_in(&mut self, grid: i64, x: i64, y: i64, z: i64, color: i64) {
+        self.voxel_fill_in(grid, x, y, z, x, y, z, color);
+    }
+
+    fn voxel_clear_in(&mut self, grid: i64, x: i64, y: i64, z: i64) {
+        let Some(id) = self.grid_id(grid) else {
+            return;
+        };
+        // One cell back to air — the `voxel_fill_in` inverse, through the same
+        // cell-shape branch so a cubic grid clears the whole cube, not the
+        // column convention's single voxel row out of the middle of it.
+        let (lo, hi) = if self.grid_is_cubic(id) {
+            cell_box_to_cubic(x, y, z, x, y, z)
+        } else {
+            sim_box_to_world(x, y, z, x, y, z)
+        };
+        if let Some(g) = self.scene.grid_mut(id) {
+            g.set_rect(lo, hi, None);
+        }
+    }
+
     fn grid_pivot(&mut self, grid: i64, point: FixedVec3) {
-        let Some(&id) = usize::try_from(grid).ok().and_then(|i| self.grids.get(i)) else {
+        let Some(id) = self.grid_id(grid) else {
             return;
         };
         // `point` is a grid-local SIM cell, the frame `voxel_fill_in` paints in,
@@ -3295,7 +3499,7 @@ impl HostBridge for MapRender {
         // coordinate transform as voxel_fill (world X mirrored), with the cell's
         // z height taken from the grid: a cube on a `grid_spawn_cubic` grid, the
         // column convention's single voxel row otherwise.
-        let Some(&id) = self.grids.get(grid as usize) else {
+        let Some(id) = self.grid_id(grid) else {
             return;
         };
         let (lo, hi) = if self.grid_is_cubic(id) {
@@ -3735,7 +3939,7 @@ impl HostBridge for MapRender {
     fn vision_observer_in(&mut self, entity: i64, grid: i64) {
         // Fog rides the named `grid_spawn` grid (the crew's hull); an out-of-range
         // handle leaves it on the world grid rather than blindly picking one.
-        let g = self.grids.get(grid as usize).copied();
+        let g = self.grid_id(grid);
         self.set_observer(entity, g);
     }
 
@@ -4138,7 +4342,11 @@ mod tests {
             .scene
             .raycast_clipped(col, down, 4096.0)
             .expect("ray hits the off-origin grid at the mirrored column");
-        assert_eq!(hit.grid, r.grids[g as usize], "hit the spawned grid");
+        assert_eq!(
+            hit.grid,
+            r.grid_id(g).expect("live grid"),
+            "hit the spawned grid"
+        );
         // World z-down: sim height wz sits at world z GROUND_Z - wz (unscaled).
         assert!(
             (hit.world.z - (GROUND_Z - wz as f64)).abs() < 1.0,
@@ -4157,7 +4365,7 @@ mod tests {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
         let (wx, wy, wz) = (4_i64, 3_i64, 0_i64);
         let g = r.grid_spawn(wx, wy, wz);
-        let gid = r.grids[g as usize];
+        let gid = r.grid_id(g).expect("live grid");
         // Turn the hull a quarter-turn about local +z via the real API.
         r.grid_orient(
             g,
@@ -4221,7 +4429,7 @@ mod tests {
     fn grid_orient_is_a_full_3d_rotation() {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
         let g = r.grid_spawn(0, 0, 0);
-        let gid = r.grids[g as usize];
+        let gid = r.grid_id(g).expect("live grid");
 
         // Pitch 90° about local +x: +y turns onto +z (out of the horizontal plane).
         r.grid_orient(
@@ -4310,7 +4518,7 @@ mod tests {
     fn an_unpivoted_grid_still_turns_about_its_local_origin() {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
         let g = r.grid_spawn(4, 3, 0);
-        let gid = r.grids[g as usize];
+        let gid = r.grid_id(g).expect("live grid");
         let spawned = r.scene.grid(gid).expect("grid").transform.origin;
         r.grid_orient(
             g,
@@ -4335,7 +4543,7 @@ mod tests {
     fn grid_orient_axis_is_in_sim_coordinates() {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
         let g = r.grid_spawn(0, 0, 0);
-        let gid = r.grids[g as usize];
+        let gid = r.grid_id(g).expect("live grid");
         r.grid_orient(
             g,
             FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::from_int(1)),
@@ -4366,7 +4574,10 @@ mod tests {
         assert!(g >= 0, "cubic grid handle allocated");
         r.voxel_fill_in(g, 0, 0, 0, 0, 0, 0, 0x8055_5555);
 
-        let hull = r.scene.grid(r.grids[g as usize]).expect("grid");
+        let hull = r
+            .scene
+            .grid(r.grid_id(g).expect("live grid"))
+            .expect("grid");
         let gz = GROUND_Z as i32;
         let s = SCALE as i32;
         let solid = |x: i32, y: i32, z: i32| hull.voxel_color(IVec3::new(x, y, z)).is_some();
@@ -4424,7 +4635,10 @@ mod tests {
         );
 
         // And that plane really is the top of the painted cube.
-        let hull = r.scene.grid(r.grids[g as usize]).expect("grid");
+        let hull = r
+            .scene
+            .grid(r.grid_id(g).expect("live grid"))
+            .expect("grid");
         let column = IVec3::new(-(cx as i32) * SCALE as i32 - 1, cy as i32 * SCALE as i32, 0);
         let top = seat.z as i32;
         assert!(
@@ -4562,6 +4776,366 @@ mod tests {
         );
     }
 
+    /// The contract the whole grid-entities slice rests on: the frame a MAP
+    /// computes with (`monada-script`'s fixed-point [`GridStore`], which answers
+    /// `grid_world`) and the frame the host DRAWS are the same frame. Feed both
+    /// the identical calls a script would make, then require that seating a
+    /// point through the store and mapping it sim→world lands where `place`
+    /// renders it.
+    ///
+    /// They cannot be bit-equal — the store turns a fixed-point quaternion, the
+    /// renderer an `f64` one — so this also pins HOW closely they agree:
+    /// measured at ~1e-6 world voxels over a 20-cell hull (a cell is `SCALE`
+    /// voxels, so ~1e-7 of a cell), asserted at 1e-5 to leave room for a
+    /// platform's `f64` `sin`/`cos` differing in its last bits. A map may
+    /// therefore convert a hull-local point and act on the answer without the
+    /// cell it lands in drifting away from the pixel the player sees.
+    #[test]
+    fn the_sim_frame_and_the_drawn_frame_agree() {
+        let (ox, oy, oz) = (4_i64, 3_i64, 2_i64);
+        let pivot = FixedVec3::new(
+            Fixed::from_f64(9.5),
+            Fixed::from_f64(9.5),
+            Fixed::from_int(2),
+        );
+        let axis = FixedVec3::new(Fixed::from_f64(0.3), Fixed::ZERO, Fixed::from_int(1));
+        let angle = Fixed::from_f64(0.7);
+
+        // The script's calls, once into the sim's frame table…
+        let mut store = monada_script::GridStore::new();
+        let handle = store.spawn(
+            FixedVec3::new(
+                Fixed::from_int(ox as i32),
+                Fixed::from_int(oy as i32),
+                Fixed::from_int(oz as i32),
+            ),
+            true,
+        );
+        store.set_pivot(handle, pivot);
+        store.orient(handle, axis, angle);
+
+        // …and once into the renderer.
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(ox, oy, oz);
+        r.grid_pivot(g, pivot);
+        r.grid_orient(g, axis, angle);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let crew = world.spawn(arch);
+        r.entity_set_grid(crew.0 as i64, g);
+
+        for local in [
+            FixedVec3::new(Fixed::from_int(5), Fixed::from_int(2), Fixed::from_int(3)),
+            FixedVec3::ZERO,
+            FixedVec3::new(Fixed::from_int(19), Fixed::from_int(19), Fixed::from_int(5)),
+        ] {
+            let drawn = r.place(crew, local);
+            let computed = entity_world_of_in(true, store.to_world(handle, local));
+            assert!(
+                (drawn - computed).length() < 1e-5,
+                "the map's frame and the renderer's disagree at {local:?}: \
+                 drawn {drawn:?}, computed {computed:?}"
+            );
+        }
+    }
+
+    /// `camera_grid` turns the whole orbit frame with its grid, so the deck
+    /// holds still on screen while the world sweeps past. What makes it a
+    /// correctness fix rather than a look: an entity bound to a grid has a
+    /// grid-LOCAL position, so a map reading input relative to a world-fixed
+    /// camera steers in the ship's frame while the player watches the world's —
+    /// "forward" lands somewhere new every tick the hull turns.
+    ///
+    /// Requires the eye to stay on its orbit: the offset from the focus must
+    /// turn with the basis, or riding a rotating grid would swing the camera
+    /// through the hull.
+    #[test]
+    fn the_camera_can_ride_a_grids_rotation() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        r.camera_angle(Fixed::from_f64(0.8), Fixed::from_f64(1.2));
+        r.camera_dist(Fixed::from_int(60));
+        r.camera_focus(FixedVec3::new(
+            Fixed::from_int(6),
+            Fixed::from_int(4),
+            Fixed::ZERO,
+        ));
+        let world_frame = r.camera();
+
+        // Riding an UNTURNED grid changes nothing — the identity composes away.
+        r.camera_grid(g);
+        let at_rest = r.camera();
+        for i in 0..3 {
+            assert!(
+                (at_rest.forward[i] - world_frame.forward[i]).abs() < 1e-12
+                    && (at_rest.pos[i] - world_frame.pos[i]).abs() < 1e-9,
+                "an unturned grid leaves the camera where it was"
+            );
+        }
+
+        // Turn the hull: the basis must turn with it, exactly.
+        r.grid_orient(
+            g,
+            FixedVec3::new(Fixed::from_f64(0.3), Fixed::ZERO, Fixed::from_int(1)),
+            Fixed::from_f64(0.7),
+        );
+        let rot = r
+            .scene
+            .grid(r.grid_id(g).expect("live grid"))
+            .expect("grid")
+            .transform
+            .rotation;
+        let riding = r.camera();
+        let want = rot * DVec3::from_array(world_frame.forward);
+        assert!(
+            (DVec3::from_array(riding.forward) - want).length() < 1e-12,
+            "the view basis rides the hull's rotation"
+        );
+        // …and the eye still sits `dist` back along that turned forward, on the
+        // focus point — not swung off the orbit.
+        let center = r.camera.center;
+        let eye = DVec3::from_array(riding.pos);
+        assert!(
+            ((center - eye).length() - r.camera.dist).abs() < 1e-9,
+            "the eye keeps its orbit distance from the focus"
+        );
+        assert!(
+            ((center - eye).normalize() - DVec3::from_array(riding.forward)).length() < 1e-9,
+            "and still looks straight at it"
+        );
+
+        // `-1` returns the camera to the world frame.
+        r.camera_grid(-1);
+        assert!(
+            (DVec3::from_array(r.camera().forward) - DVec3::from_array(world_frame.forward))
+                .length()
+                < 1e-12,
+            "-1 puts the camera back in the world frame"
+        );
+    }
+
+    /// A prop riding a TURNING grid must be POSED, not merely placed: roxlap's
+    /// static sprite instance carries a position and nothing else, so a crate
+    /// left on that path keeps its world-axis alignment while the hull rolls
+    /// under it — which is exactly what the first live run of the cargo slice
+    /// showed. It has to be routed to the dynamic layer with the grid's basis.
+    ///
+    /// Asserts the routing and the pose, which is what a headless test can
+    /// reach; the pixels still want an eye on them.
+    #[test]
+    fn a_prop_on_a_turning_grid_is_posed_not_axis_aligned() {
+        let mut r = MapRender::new(hero_assets(), None, &[]);
+        // An actor model is what makes this a dynamic-layer map (the static
+        // sprite set is uploaded once instead of every frame), the precondition
+        // for any instance to be posed at all.
+        assert!(
+            r.model_actor("char/hero", &["idle".to_string()], Fixed::from_int(2)) >= 0,
+            "actor model registered"
+        );
+        let crate_model = r.model_box(4, 4, 4, 0x80a8_7a3c);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["held"]);
+        let stowed = world.spawn(arch);
+        let loose = world.spawn(arch);
+        let p = FixedVec3::new(Fixed::from_int(6), Fixed::from_int(2), Fixed::ZERO);
+        world.set_position(stowed, p);
+        world.set_position(loose, p);
+        r.entity_set_model(stowed.0 as i64, crate_model);
+        r.entity_set_model(loose.0 as i64, crate_model);
+        r.entity_set_grid(stowed.0 as i64, g);
+
+        // Even at REST the stowed crate must be posed, not placed: in a
+        // dynamic-layer map the static set is uploaded once, so a static
+        // instance is frozen at its frame-0 spot forever. Routing on "is the
+        // grid turning" left exactly that ghost — the hull is unturned on frame
+        // 0, so the crate was baked in and then also drawn posed.
+        r.build_instances(&world);
+        assert_eq!(
+            r.prop_targets.len(),
+            1,
+            "a grid-bound prop is posed even before the hull turns"
+        );
+        assert_eq!(
+            r.sprites.instances.len(),
+            1,
+            "only the world-frame crate is placed statically"
+        );
+
+        // Roll the hull onto a tilted axis — now the stowed crate must be posed.
+        r.grid_orient(
+            g,
+            FixedVec3::new(Fixed::from_f64(0.3), Fixed::ZERO, Fixed::from_int(1)),
+            Fixed::from_f64(0.7),
+        );
+        r.build_instances(&world);
+        assert_eq!(r.prop_targets.len(), 1, "the crate ON the hull is posed");
+        assert_eq!(
+            r.sprites.instances.len(),
+            1,
+            "the crate in the world frame stays on the static path"
+        );
+
+        let (si, seat, rot, drop) = r.prop_targets[0];
+        assert_eq!(si, crate_model as usize, "posed with its own sprite model");
+        let grid_rot = r
+            .scene
+            .grid(r.grid_id(g).expect("live grid"))
+            .expect("grid")
+            .transform
+            .rotation;
+        assert!(
+            (rot * DVec3::X - grid_rot * DVec3::X).length() < 1e-12,
+            "the prop's basis IS the hull's rotation"
+        );
+        assert!(
+            (seat - r.place(stowed, p)).length() < 1e-9,
+            "and it is seated where the entity rides"
+        );
+        // The pivot drop is a MODEL-space offset, so a rolled hull must push the
+        // crate along the hull's own down, not the world's.
+        let posed = seat + rot * DVec3::new(0.0, 0.0, -drop);
+        let naive = seat - DVec3::new(0.0, 0.0, drop);
+        assert!(
+            drop > 0.0 && (posed - naive).length() > 1e-6,
+            "the seat correction turns with the hull (drop {drop})"
+        );
+    }
+
+    /// `grid_move` re-places a grid after it was spawned — a hull under way —
+    /// and its riders go with it: a bound entity's seat shifts by exactly the
+    /// move, in the grid's own cell shape (a cubic grid scales z like x/y).
+    /// Composes with a rotation already set, since both go through the one pose
+    /// writer.
+    #[test]
+    fn grid_move_carries_its_riders() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        r.grid_orient(
+            g,
+            FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::from_int(1)),
+            Fixed::from_f64(std::f64::consts::FRAC_PI_2),
+        );
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let crew = world.spawn(arch);
+        let p = FixedVec3::new(Fixed::from_int(5), Fixed::from_int(2), Fixed::from_int(1));
+        world.set_position(crew, p);
+        r.entity_set_grid(crew.0 as i64, g);
+        let before = r.place(crew, p);
+
+        r.grid_move(
+            g,
+            FixedVec3::new(Fixed::from_int(3), Fixed::from_int(-2), Fixed::from_int(1)),
+        );
+        let after = r.place(crew, p);
+        // sim (3, -2, 1) through `world_of`'s linear part on a cubic grid:
+        // x mirrors and scales, y scales, z scales AND flips (z-down).
+        let want = before + DVec3::new(-3.0 * SCALE, -2.0 * SCALE, -SCALE);
+        assert!(
+            (after - want).length() < 1e-9,
+            "the rider rides the move: want {want:?}, got {after:?}"
+        );
+
+        // And moving back to the spawn offset restores the original seat.
+        r.grid_move(g, FixedVec3::ZERO);
+        assert!(
+            (r.place(crew, p) - before).length() < 1e-9,
+            "grid_move(spawn offset) is the pose grid_spawn gave it"
+        );
+    }
+
+    /// `grid_despawn` retires the whole frame: the scene grid goes, riders lose
+    /// their binding, the fog that rode it is dropped, and the handle is inert
+    /// forever — while the NEXT spawn gets a fresh handle that works. The
+    /// tombstone matters: a compacted table would hand grid 1's identity to a
+    /// stale reference to grid 0.
+    #[test]
+    fn grid_despawn_retires_the_grid_its_riders_and_its_fog() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        let gid = r.grid_id(g).expect("live grid");
+        r.voxel_fill_in(g, -4, -4, 0, 4, 4, 0, 0x8055_5f6b);
+        r.vision_config(110, 6, 3);
+        r.deck_clip(0, 2);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let crew = world.spawn(arch);
+        let off = Fixed::from_f64(1.0 / 32.0);
+        world.set_position(crew, FixedVec3::new(off, off, Fixed::ZERO));
+        r.entity_set_grid(crew.0 as i64, g);
+        r.vision_observer(crew.0 as i64);
+        r.build_instances(&world);
+        r.apply_deck_clip();
+        let _ = r.update_fow(0.016);
+        assert!(r.fow.is_some(), "the fog armed on the hull");
+        assert_eq!(r.vision_grid(), Some(gid), "and rides it");
+
+        r.grid_despawn(g);
+
+        assert!(r.grid_id(g).is_none(), "the handle is retired");
+        assert!(r.scene.grid(gid).is_none(), "the scene grid is gone");
+        assert!(!r.grid_anchors.contains_key(&gid), "and so is its anchor");
+        assert!(r.entity_grid.is_empty(), "the rider's binding went with it");
+        assert!(r.fow.is_none(), "the fog that rode it was dropped");
+        assert_ne!(r.vision_grid(), Some(gid), "and no longer names it");
+
+        // A retired handle is inert, not a hit on the next grid.
+        let next = r.grid_spawn_cubic(0, 0, 0);
+        assert_ne!(next, g, "handles are never reused");
+        r.voxel_fill_in(g, 0, 0, 0, 0, 0, 0, 0x80FF_0000);
+        let fresh = r.grid_id(next).expect("the new grid is live");
+        assert!(
+            r.scene
+                .grid(fresh)
+                .expect("grid")
+                .voxel_color(IVec3::new(-1, 0, GROUND_Z as i32))
+                .is_none(),
+            "a paint through the dead handle must not land in the new grid"
+        );
+    }
+
+    /// `voxel_clear_in` is `voxel_fill_in`'s inverse — the door primitive. On a
+    /// cubic grid it must erase the whole CUBE: clearing the column
+    /// convention's single voxel row would leave 15 rows of a "removed" wall
+    /// standing, and the map would have no way to see it.
+    #[test]
+    fn voxel_clear_in_erases_a_whole_cubic_cell() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        r.voxel_fill_in(g, 0, 0, 0, 1, 0, 0, 0x8055_5f6b); // two cells side by side
+        let gid = r.grid_id(g).expect("live grid");
+        let gz = GROUND_Z as i32;
+        let s = SCALE as i32;
+        let solid = |r: &MapRender, x: i32, z: i32| {
+            r.scene
+                .grid(gid)
+                .expect("grid")
+                .voxel_color(IVec3::new(x, 0, z))
+                .is_some()
+        };
+        assert!(
+            solid(&r, -1, gz) && solid(&r, -1, gz + s - 1),
+            "cell 0 solid"
+        );
+
+        r.voxel_clear_in(g, 0, 0, 0);
+        assert!(!solid(&r, -1, gz), "the cube's top row is air");
+        assert!(!solid(&r, -1, gz + s - 1), "and so is its bottom row");
+        assert!(
+            solid(&r, -s - 1, gz) && solid(&r, -s - 1, gz + s - 1),
+            "the neighbouring cell is untouched"
+        );
+
+        // Clearing through a dead handle is a no-op, not a panic.
+        r.grid_despawn(g);
+        r.voxel_clear_in(g, 1, 0, 0);
+    }
+
     /// The grid binding is per-entity render state with a full lifecycle: `-1`
     /// unbinds (a crew member steps off the hull and seats in the global frame
     /// again), and a despawned entity's binding is retired rather than leaking —
@@ -4644,7 +5218,7 @@ mod tests {
     fn naming_a_fog_grid_never_binds_the_observer() {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
         let named = r.grid_spawn(6, 4, 0);
-        let named_id = r.grids[named as usize];
+        let named_id = r.grid_id(named).expect("live grid");
         let mut world = World::new(0);
         let arch = world.register_archetype(&["deck"]);
         let observer = world.spawn(arch);
@@ -4666,7 +5240,7 @@ mod tests {
         // The explicit binding is what seats the crew — and the fog derives from
         // it, so a second hull can't disagree with the one the crew rides.
         let hull = r.grid_spawn(1, 9, 0);
-        let hull_id = r.grids[hull as usize];
+        let hull_id = r.grid_id(hull).expect("live grid");
         r.entity_set_grid(observer.0 as i64, hull);
         assert_eq!(
             r.vision_grid(),
@@ -4768,7 +5342,7 @@ mod tests {
 
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
         let g = r.grid_spawn(0, 0, 0); // at the world origin ⇒ pure rotation below
-        let gid = r.grids[g as usize];
+        let gid = r.grid_id(g).expect("live grid");
         // Turn the hull a quarter-turn about world +z. `grid_spawn` only sets a
         // translation, so there is no host API for this yet — poke the transform
         // directly, exactly as a future `grid_rotate` would.
@@ -4845,7 +5419,7 @@ mod tests {
         // +y, flipping both assertions.
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
         let g = r.grid_spawn(0, 0, 0); // world origin ⇒ pure rotation, no offset
-        let gid = r.grids[g as usize];
+        let gid = r.grid_id(g).expect("live grid");
         r.scene.grid_mut(gid).expect("grid").transform.rotation =
             DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
 
@@ -4929,7 +5503,7 @@ mod tests {
         // makes the grid-local observer invariant to grid rotation, so the mask
         // is unchanged and `sync` early-outs on this frame (the exact case the
         // fix guards). The crew's grid-local pose is likewise unchanged.
-        let gid = r.grids[g as usize];
+        let gid = r.grid_id(g).expect("live grid");
         let turned = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
         r.scene.grid_mut(gid).expect("real grid").transform.rotation = turned;
         r.build_instances(&world);

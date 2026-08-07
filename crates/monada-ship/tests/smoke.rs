@@ -13,7 +13,7 @@
 
 // The `deck` field is a small integer stored as fixed-point; reading it back
 // as i64 through f64 is exact for the 0/1 values here.
-#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 
 use std::sync::{Arc, Mutex};
 
@@ -242,4 +242,190 @@ fn stairwell_round_trips_both_ways() {
     let after = crew_pos(&world);
     let moved = (after.x - before.x).to_f64().abs() + (after.y - before.y).to_f64().abs();
     assert!(moved > 0.5, "crew walks after descending (moved = {moved})");
+}
+
+// --- cargo + airlock (grid membership, docs/plans/grid-entities.md S-4) ------
+// A crate is an entity whose FRAME is the gameplay: stowed it rides the hull,
+// released through the open airlock it is left behind in the world while the
+// ship turns away. These tests read the sim's own frame table (the same one
+// `grid_world` answers from), so they check the map's semantics, not the
+// renderer's.
+
+const CRATE: ArchetypeId = ArchetypeId(2);
+
+/// One command with the button mask the local layer would fold into `arg.z`
+/// (1 = use, 2 = airlock). A press is one tick with the bit set: the sim acts
+/// on the rising edge, so holding it does not repeat.
+fn input_btn(mx: i32, my: i32, btn: i32) -> Command {
+    Command::on(
+        VERB_INPUT,
+        EntityId(0),
+        FixedVec3::new(
+            Fixed::from_int(mx),
+            Fixed::from_int(my),
+            Fixed::from_int(btn),
+        ),
+    )
+}
+
+fn crate_of(world: &SharedWorld, i: usize) -> EntityId {
+    world.lock().unwrap().entities(CRATE)[i]
+}
+
+/// A crate's position in its own frame, and the grid it rides (`-1` = the
+/// world frame — it was released).
+fn crate_local(world: &SharedWorld, i: usize) -> FixedVec3 {
+    let k = crate_of(world, i);
+    world.lock().unwrap().position(k).expect("crate exists")
+}
+
+fn crate_grid(world: &SharedWorld, b: &RhaiBackend, i: usize) -> i64 {
+    let k = crate_of(world, i);
+    b.grids().lock().unwrap().grid_of(k)
+}
+
+/// A crate in WORLD coordinates, composed through whatever frame it rides —
+/// exactly what the map's `grid_world` computes.
+fn crate_world(world: &SharedWorld, b: &RhaiBackend, i: usize) -> FixedVec3 {
+    let k = crate_of(world, i);
+    let p = { world.lock().unwrap().position(k).expect("crate exists") };
+    let grids = b.grids().lock().unwrap();
+    grids.to_world(grids.grid_of(k), p)
+}
+
+fn crew_carry(world: &SharedWorld) -> i64 {
+    let w = world.lock().unwrap();
+    let e = w.entities(CREW)[0];
+    w.field(e, "carry")
+        .expect("crew has a carry field")
+        .to_f64() as i64
+}
+
+fn moved(a: FixedVec3, b: FixedVec3) -> f64 {
+    (a.x - b.x).to_f64().abs() + (a.y - b.y).to_f64().abs() + (a.z - b.z).to_f64().abs()
+}
+
+/// Walk the crew to the starboard airlock at hull cell (19, 9): north until the
+/// y=10 divider parks it in the door's row, then east into the doorway.
+fn walk_to_airlock(b: &mut RhaiBackend) {
+    hold(b, 1, 1, 80); // north until the y=10 divider parks it
+    hold(b, 1, -1, 140); // east along the divider to the starboard rim
+                         // The east run drifts a third of a cell south (the input is not exactly
+                         // axis-aligned), which puts a footprint corner in row 8 — rim wall beside
+                         // the doorway. Re-seat in the door row, then step in.
+    hold(b, 1, 1, 12);
+    hold(b, 1, -1, 30);
+}
+
+#[test]
+fn a_stowed_crate_rides_the_hull() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0));
+    let local_before = crate_local(&world, 0);
+    let world_before = crate_world(&world, &b, 0);
+
+    hold(&mut b, 0, 0, 60); // the hull turns and sways under it
+
+    assert_eq!(crate_grid(&world, &b, 0), 0, "still aboard the hull");
+    assert!(
+        moved(crate_local(&world, 0), local_before) < 1e-9,
+        "a stowed crate does not move in the ship's own frame"
+    );
+    assert!(
+        moved(crate_world(&world, &b, 0), world_before) > 1.0,
+        "but the hull carried it somewhere else in the world"
+    );
+}
+
+#[test]
+fn use_picks_a_crate_up_and_sets_it_down() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0)); // spawn at (5, 2); crate 0 waits at (6, 2)
+    assert_eq!(crew_carry(&world), 0, "hands free");
+
+    step(&mut b, &input_btn(0, 0, 1)); // press E
+    assert_eq!(
+        crew_carry(&world),
+        crate_of(&world, 0).0 as i64 + 1,
+        "picked up the nearest crate (its id + 1, since 0 means empty hands)"
+    );
+
+    hold(&mut b, 1, 1, 20); // carry it a few cells
+    assert!(
+        moved(crate_local(&world, 0), crew_pos(&world)) < 1e-9,
+        "the carried crate sits on its crew member's cell"
+    );
+
+    step(&mut b, &input_btn(0, 0, 1)); // press E again, on the deck
+    assert_eq!(crew_carry(&world), 0, "hands free again");
+    assert_eq!(
+        crate_grid(&world, &b, 0),
+        0,
+        "set down INSIDE the ship, so it stays in the ship's frame"
+    );
+}
+
+#[test]
+fn a_crate_released_through_the_airlock_stays_in_space() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0));
+    step(&mut b, &input_btn(0, 0, 2)); // F: cycle the airlock open
+    step(&mut b, &input_btn(0, 0, 1)); // E: pick the crate up
+    assert!(crew_carry(&world) != 0, "carrying it to the airlock");
+
+    walk_to_airlock(&mut b);
+    let x = crew_pos(&world).x.to_f64();
+    assert!(x > 18.6, "the crew reached the open doorway (x = {x})");
+
+    step(&mut b, &input_btn(0, 0, 1)); // E: let go, in the doorway
+    assert_eq!(
+        crate_grid(&world, &b, 0),
+        -1,
+        "released into the WORLD frame, not stowed"
+    );
+    let released_at = crate_world(&world, &b, 0);
+    let crew_before = crew_pos(&world);
+
+    hold(&mut b, 0, 0, 90); // the ship turns and sways away from it
+
+    assert!(
+        moved(crate_world(&world, &b, 0), released_at) < 1e-9,
+        "the crate stays exactly where it was let go"
+    );
+    assert!(
+        moved(crew_pos(&world), crew_before) < 1e-9,
+        "the crew has not walked — its own cell is unchanged…"
+    );
+    let crew_world = {
+        let p = crew_pos(&world);
+        let grids = b.grids().lock().unwrap();
+        grids.to_world(0, p)
+    };
+    assert!(
+        moved(crew_world, released_at) > 1.0,
+        "…yet the hull carried the CREW away from the crate it left behind"
+    );
+    assert_eq!(
+        count(&world, CRATE),
+        2,
+        "releasing a crate does not destroy it"
+    );
+}
+
+#[test]
+fn the_airlock_gates_its_doorway() {
+    // Closed, the doorway is rim wall like the rest of the hull.
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0));
+    walk_to_airlock(&mut b);
+    let shut = crew_pos(&world).x.to_f64();
+    assert!(shut < 18.6, "a closed airlock stops the crew (x = {shut})");
+
+    // Open, the same walk carries the crew into it.
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0));
+    step(&mut b, &input_btn(0, 0, 2));
+    walk_to_airlock(&mut b);
+    let open = crew_pos(&world).x.to_f64();
+    assert!(open > 18.6, "an open airlock lets the crew in (x = {open})");
 }

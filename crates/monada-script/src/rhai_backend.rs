@@ -16,8 +16,11 @@ use monada_fixed::{trig, Fixed, FixedVec3};
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 use rhai::{Array, Dynamic, Engine, ImmutableString, Scope, AST};
 
+use crate::grids::{register_grid_api, shared_grids};
 use crate::physics::register_physics_api;
-use crate::{ScriptBackend, ScriptError, SharedBridge, SharedPhysics, SharedWorld, UiEvent};
+use crate::{
+    ScriptBackend, ScriptError, SharedBridge, SharedGrids, SharedPhysics, SharedWorld, UiEvent,
+};
 
 /// The buffer `ui_emit_event` pushes into and [`drain_ui_events`] empties.
 /// Shared (`Arc<Mutex<_>>`) for the same reason as [`SharedWorld`]:
@@ -68,6 +71,12 @@ pub struct RhaiBackend {
     /// kept so [`set_physics`](RhaiBackend::set_physics) can dual-write the
     /// volume-routed terrain verbs (store + render).
     bridge: Option<SharedBridge>,
+    /// The deterministic frame table behind the `grid_*` verbs
+    /// (docs/plans/grid-entities.md). Always present — a grid's frame is sim
+    /// truth, so it must answer identically on a headless peer and a rendering
+    /// one — and handed to the host via [`grids`](RhaiBackend::grids) so the
+    /// local layer can read it too.
+    grids: SharedGrids,
 }
 
 impl RhaiBackend {
@@ -84,6 +93,11 @@ impl RhaiBackend {
         let events: UiEventBuffer = Arc::new(Mutex::new(Vec::new()));
         register_number_types(&mut engine);
         register_host_api(&mut engine, &world, &events);
+        // The grid verbs work against the frame table alone until a bridge
+        // arrives (`set_bridge` re-registers them dual-writing), so a bridgeless
+        // headless backend still spawns grids and answers `grid_world`.
+        let grids = shared_grids();
+        register_grid_api(&mut engine, &grids, &world, None);
         RhaiBackend {
             engine,
             ast: None,
@@ -95,7 +109,16 @@ impl RhaiBackend {
             tick_dt: None,
             events,
             bridge: None,
+            grids,
         }
+    }
+
+    /// The frame table the `grid_*` verbs write, for the host's render mirror
+    /// and for handing to the local layer
+    /// ([`LocalBackend::set_grids`](crate::LocalBackend::set_grids)).
+    #[must_use]
+    pub fn grids(&self) -> &SharedGrids {
+        &self.grids
     }
 
     /// Set the tick duration for a fixed-rate map. The value is passed to the
@@ -114,6 +137,11 @@ impl RhaiBackend {
     /// construction is fine.
     pub fn set_bridge(&mut self, bridge: &SharedBridge) {
         register_bridge_api(&mut self.engine, bridge);
+        // AFTER the bridge API, whose own `grid_spawn` / `grid_orient` /
+        // `grid_pivot` / `entity_set_grid` would otherwise shadow these: the
+        // frame table is the authority, the renderer its mirror.
+        let (grids, world) = (self.grids.clone(), self.world.clone());
+        register_grid_api(&mut self.engine, &grids, &world, Some(bridge));
         self.bridge = Some(bridge.clone());
     }
 
@@ -132,8 +160,15 @@ impl RhaiBackend {
             .ast
             .as_ref()
             .ok_or_else(|| ScriptError::Run("no script loaded".to_string()))?;
+        // `Dynamic`, not `()`: a Rhai function yields its last evaluated
+        // statement's value even when the map wrote a semicolon, so an `init`
+        // ending in a value-returning verb (`entity_create`, `entity_despawn`,
+        // `entity_attach`) died with "Output type incorrect: i64 (expecting
+        // ())" — a message about nothing the author did wrong. A trigger's
+        // return value is meaningless by design; drop it.
         self.engine
-            .call_fn::<()>(&mut self.scope, ast, name, args)
+            .call_fn::<rhai::Dynamic>(&mut self.scope, ast, name, args)
+            .map(|_| ())
             .map_err(|e| ScriptError::Run(e.to_string()))
     }
 }
@@ -182,7 +217,8 @@ impl ScriptBackend for RhaiBackend {
             command.arg,
         );
         self.engine
-            .call_fn::<()>(&mut self.scope, ast, "command", args)
+            .call_fn::<rhai::Dynamic>(&mut self.scope, ast, "command", args)
+            .map(|_| ())
             .map_err(|e| ScriptError::Run(e.to_string()))
     }
 
@@ -191,7 +227,7 @@ impl ScriptBackend for RhaiBackend {
         // state via the host API. A command-driven map (no `tick` handler)
         // still advances the counter — it just runs no per-tick logic.
         self.world.lock().expect("world mutex").tick += 1;
-        if self.has_tick_with_dt {
+        let ran = if self.has_tick_with_dt {
             let dt = self
                 .tick_dt
                 .expect("tick(dt) handler requires set_tick_hz before on_tick");
@@ -200,7 +236,16 @@ impl ScriptBackend for RhaiBackend {
             self.call("tick", ())
         } else {
             Ok(())
+        };
+        // Retire grid bindings whose entity the tick despawned. Once per tick,
+        // here rather than in the store, because this is the one place that
+        // holds both the world and the frame table (the host does the same for
+        // its render-side bindings in `build_instances`).
+        {
+            let world = self.world.lock().expect("world mutex");
+            self.grids.lock().expect("grids mutex").retain(&world);
         }
+        ran
     }
 
     fn drain_ui_events(&mut self) -> Vec<UiEvent> {
