@@ -22,8 +22,10 @@
 
 use std::collections::{BTreeMap, BinaryHeap};
 
+pub mod portal;
 pub mod volume;
 
+pub use portal::{PortalGraph, BLOCK};
 pub use volume::{MoverProfile, NavVolume, Stand, VolumeLimits, VolumeWorld};
 
 /// The world a path is planned against: a heightfield + explicit blockers.

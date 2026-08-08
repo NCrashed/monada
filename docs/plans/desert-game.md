@@ -617,11 +617,12 @@ golden in `monada-hashes.txt`.
 - **D-2 — 3D navigation.** `monada-nav` stand graph, mover profiles,
   incremental invalidation, retained paths. *Gate:* property tests; a unit
   routes over a berm and through a bore; 200 concurrent movers inside
-  budget. **Partially met** (§13a): the graph, the profiles, the automatic
-  invalidation and the retained paths are in and tested, and short routes
-  are comfortable at 1.4 ms. The long armour detour around the ridge costs
-  41 ms — over a tick — so the portal graph the plan held in reserve is
-  the slice's remaining work.
+  budget. **Met** (§13a): the stand graph, the mover profiles, automatic
+  invalidation, retained paths, and the portal hierarchy the plan held in
+  reserve. A long armour detour costs 6.9 ms against the flat search's 41,
+  and a route no barrier crosses still takes the direct path at 1.6 ms.
+  What is left is a per-tick cap on simultaneous plans — rules-side, and
+  not a pathfinding question.
 - **D-3 — terraforming and settling.** The store's incremental chunk hash +
   batched carve (§13a) first, then the three verbs as terrain edits, the
   granular pass (§4d) and the terraform work budget (§4e). *Gate:* a berm, a
@@ -755,12 +756,12 @@ on the generated 256×256 desert, after D-2 landed:
 | Case | Cost |
 |---|---|
 | Mission load (paint 65k columns) | 1.02 s |
-| Infantry crossing the map (over the ridge, 208 waypoints) | **1.4 ms** |
-| Armour crossing the map (around the ridge, 305 waypoints) | **41 ms** |
-| …at a 10k / 4k / 1k node budget | 16 / 6.2 / 1.4 ms, goal not reached |
+| Infantry crossing the map (over the ridge, 208 waypoints) | **1.4 ms** flat · **1.6 ms** with the hierarchy in place |
+| Armour crossing the map (around the ridge) | **41 ms** flat · **6.9 ms** hierarchical (325 waypoints, 6.5% longer) |
+| …at a 10k / 4k / 1k node budget | flat: 16 / 6.2 / 1.4 ms, goal not reached · hierarchical: 6.5 ms and arrives at every budget |
 | Raise a 40-cell wall | 0.34 ms |
-| Re-plan through the change | 40.6 ms |
-| 200 movers ordered at once | 5.2 s |
+| Re-plan through the change | 40.6 ms flat · **6.2 ms** hierarchical |
+| 200 movers ordered at once | 5.2 s flat · **1.19 s** hierarchical (5.9 ms each) |
 
 The per-node cost is **≈1.0 µs**, and it is linear in the budget — the
 sweep is a straight line. So the number that matters is how many nodes a
@@ -770,13 +771,26 @@ the octile heuristic points *straight through* the barrier, so the search
 expands nearly everything on the near side before rounding its end. Forty
 thousand nodes, 41 ms, one and a quarter ticks.
 
-That is the case §4c predicted and named an escape hatch for, so
-profiling has now called it in: **a coarse portal graph over 8×8-tile
-blocks is D-2's remaining work**, not a contingency. Until it lands, the
-mitigations are the ones already in the code — a node budget with the
-"walk as far as you can" contract, and paths retained rather than
-re-planned per cell — plus a per-tick cap on how many units may plan,
-which is rules-side and cheap.
+That is the case §4c predicted and named an escape hatch for, and
+profiling called it in, so **the portal graph is built**: the map is cut
+into 16-cell blocks, each border's crossable runs become one portal
+apiece, and a route is a handful of block hops refined into cells by the
+same concrete search. Armour's crossing went 41 ms → 6.9 ms, the re-plan
+40.6 → 6.2, and the 200-mover burst 5.2 s → 1.19 s. The path is 6.5%
+longer than optimal, which is the trade a hierarchy exists to make.
+
+Two things the measurement changed about the design. The block is 16
+cells rather than the plan's 8 *tiles* (32 cells), because building a
+block costs its area while the number to build costs only the route's
+length. And the hierarchy is **not** used unconditionally: it first
+spends a small budget on the direct search and only builds blocks when
+that fails. Without that, infantry crossing the ridge — a route with no
+barrier, previously 1.4 ms — paid 112 ms to build a hierarchy it did not
+need, which is a clean regression on the case that was already fine.
+
+What remains is the 200-at-once burst, and it is not a pathfinding
+problem: 5.9 ms per plan is comfortably inside a tick, so the answer is a
+per-tick cap on how many units may plan, which is rules-side and cheap.
 
 Two attempts along the way are worth recording because one of them was
 wrong. Removing a per-probe `Vec` allocation (ten per popped node) did
@@ -832,7 +846,7 @@ per mission load.
 | Volume store at 4× the digger: memory, hash | **measured (§13a) — clear.** 4 MB, hash 0.02 ms/tick | Nothing owed; snapshots are cheap at this size |
 | Terrain render cost at 256×256×64 | **measured (§13a) — passes on GPU.** 14.1 ms tactical with 400 posed vehicles; 62 ms on the CPU raycaster at 720p (31 ms even at RTS-demo scale) | The GPU backend is the target, as it already is for every demo; mip-0 stays pinned (LOD buys nothing and would break the deck cutaway). CPU fallback lives at 640×360. Re-measure at D-6 and D-9 — the 2.6 ms of headroom is where HUD, shroud and the sim mirror have to fit |
 | Terraforming churn — edits per tick blowing up hash, render re-uploads, nav invalidation, settle work | **measured (§13a) — the store needs work.** 7.01 µs/cell for per-voxel writes vs 0.07 for a batched box | Incremental chunk hash + a batched carve verb (§13a), then the terraform work budget (§4e) caps the rest |
-| 3D nav cost at 400 movers | **measured (§13a) — the escape hatch is now required.** ≈1.0 µs/node; infantry crosses the map in 1.4 ms, armour needs 41 ms because it must round the ridge and the heuristic points through it | Budget + retained paths ship today; a per-tick plan cap is rules-side and cheap; the coarse portal graph over 8×8-tile blocks is D-2's remaining work rather than a contingency |
+| 3D nav cost at 400 movers | **measured and addressed (§13a).** The flat search cost 41 ms on a long detour; the portal hierarchy brings it to 6.9 ms, and a scout pass keeps unobstructed routes at their old 1.6 ms | Retained paths + the hierarchy ship. Remaining: a per-tick cap on how many units may plan at once (5.9 ms each is fine; 200 in one tick is not) |
 | roxlap sprite path at 400 posed instances | **measured (§13a) — L4 is cheap.** Free yaw costs ~20 % over axis-aligned | Shroud culling (`fow_cull`), model voxel budget, infantry stays billboards |
 | Granular pass is a new determinism surface inside the engine | D-3 | Canonical sweep order over a dirty set, per-tick budget, snapshot-equivalence test, rules-side fallback |
 | Native rules can express nondeterminism Rhai structurally could not | continuous | Lint wall, restricted dependencies, oracle matrix, nightly long-run; wasm (D-12) restores the structural guarantee |

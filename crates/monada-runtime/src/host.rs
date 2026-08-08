@@ -366,10 +366,8 @@ pub trait Host: WorldRead {
             return Vec::new();
         };
         let sim = phys.lock().expect("physics mutex");
-        nav.lock()
-            .expect("nav mutex")
-            .for_profile(profile)
-            .path(&sim.terrain, from, to, limits)
+        let mut cache = nav.lock().expect("nav mutex");
+        cache.route(profile, &sim.terrain, from, to, limits)
     }
 
     /// The stand a mover of this profile would occupy at `(x, y)` nearest

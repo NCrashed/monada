@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use monada_nav::{MoverProfile, NavVolume, VolumeWorld};
+use monada_nav::{MoverProfile, NavVolume, PortalGraph, VolumeLimits, VolumeWorld};
 
 use crate::VolumeStore;
 
@@ -38,6 +38,9 @@ fn key(p: MoverProfile) -> ProfileKey {
 #[derive(Default)]
 pub struct NavCache {
     volumes: BTreeMap<ProfileKey, NavVolume>,
+    /// The coarse graph, one per profile beside its stand graph: where a
+    /// block may be crossed depends on who is crossing it.
+    portals: BTreeMap<ProfileKey, PortalGraph>,
 }
 
 impl NavCache {
@@ -63,6 +66,29 @@ impl NavCache {
         for volume in self.volumes.values_mut() {
             volume.invalidate(lo, hi);
         }
+        for portals in self.portals.values_mut() {
+            portals.invalidate(lo, hi);
+        }
+    }
+
+    /// A route for this profile, planned over blocks and refined into
+    /// cells — the hierarchy the flat search needs once a barrier stands
+    /// between a mover and its goal (§13a).
+    pub fn route(
+        &mut self,
+        profile: MoverProfile,
+        world: &impl VolumeWorld,
+        from: (i64, i64, i64),
+        to: (i64, i64, i64),
+        limits: &VolumeLimits,
+    ) -> Vec<(i64, i64, i64)> {
+        let k = key(profile);
+        let nav = self
+            .volumes
+            .entry(k)
+            .or_insert_with(|| NavVolume::new(profile));
+        let portals = self.portals.entry(k).or_default();
+        portals.path(nav, world, from, to, limits)
     }
 
     /// Total cached columns across profiles — for tests and for a host
