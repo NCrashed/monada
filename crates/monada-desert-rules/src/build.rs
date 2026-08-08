@@ -461,6 +461,31 @@ impl Yards {
         lost
     }
 
+    /// The structure standing on a cell, if any.
+    #[must_use]
+    pub fn at(&self, x: i64, y: i64) -> Option<EntityId> {
+        self.standing
+            .iter()
+            .find(|(_, s)| s.covers(x, y))
+            .map(|(&e, _)| e)
+    }
+
+    /// Take `hit` tenths of health off a structure; returns whether it
+    /// fell.
+    ///
+    /// A structure's health is [`Standing::health`], the same pool sand
+    /// decay eats and repair refills. Combat does *not* keep a second
+    /// one: two accounts of how hurt a refinery is would disagree the
+    /// first time a shell landed on a building already sinking into the
+    /// sand under it.
+    pub fn hurt(&mut self, entity: EntityId, hit: u32) -> bool {
+        let Some(s) = self.standing.get_mut(&entity) else {
+            return false;
+        };
+        s.health = s.health.saturating_sub(hit);
+        s.health == 0
+    }
+
     /// Spend credits mending one structure. Returns what it cost.
     pub fn repair(&mut self, economy: &mut Economy, entity: EntityId, rate: u32) -> u32 {
         let Some(s) = self.standing.get_mut(&entity) else {

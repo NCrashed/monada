@@ -18,7 +18,7 @@ use crate::shape::VoxelShape;
 const AXIS_EPS: Fixed = Fixed::from_bits(1 << 16);
 
 /// One raycast hit.
-pub(crate) struct RayHit {
+pub struct RayHit {
     pub cell: (i64, i64, i64),
     /// Distance along the ray, in voxels (`dir` is unit length).
     pub t: Fixed,
@@ -38,7 +38,12 @@ pub(crate) struct RayHit {
 ///   no gradient estimation is involved.
 /// - Ties between axes (corner crossings) break in fixed x → y → z
 ///   order — part of the determinism contract.
-pub(crate) fn cast(
+///
+/// # Panics
+/// Debug-asserts that `dir` is unit length: `t` is measured in voxels
+/// along it, so a non-unit direction would silently change what every
+/// distance in the result means.
+pub fn cast(
     field: &dyn VoxelField,
     origin: FixedVec3,
     dir: FixedVec3,

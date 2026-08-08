@@ -27,12 +27,14 @@ use monada_sim::{ArchetypeId, EntityId};
 use std::collections::BTreeMap;
 
 pub mod build;
+pub mod combat;
 pub mod economy;
 pub mod gen;
 pub mod harvest;
 pub mod mover;
 pub mod terraform;
 
+pub use combat::{Armour, Battle, Weapon};
 pub use build::{Blueprint, Exposure, Queue, Refusal, Standing, Yards};
 pub use economy::{Building, Economy, Player, PlayerNo, Structure};
 pub use gen::{Desert, DesertParams, Surface};
@@ -105,6 +107,7 @@ fn model_of(kind: Structure) -> (i64, i64, i64, i64) {
 
 const MODEL_MCV: (i64, i64, i64, i64) = (32, 24, 16, 0x80b8_9060);
 const MODEL_HARVESTER: (i64, i64, i64, i64) = (28, 20, 12, 0x80c8_9840);
+const MODEL_SOLDIER: (i64, i64, i64, i64) = (14, 14, 18, 0x80c0_5040);
 
 /// The middle of a site's footprint.
 fn site_centre(site: build::Site) -> (i64, i64) {
@@ -227,6 +230,8 @@ pub struct DesertRules {
     mcvs: BTreeMap<EntityId, PlayerNo>,
     /// Every harvester in service.
     fleet: Fleet,
+    /// Everyone who can shoot, and everything in the air (§7).
+    battle: Battle,
     /// Which corner the D-1 patrol vehicle is currently crossing to.
     patrol_goal: Option<(i64, i64)>,
     /// Where each player-ordered mover is headed, if anywhere.
@@ -270,6 +275,7 @@ impl DesertRules {
             yards: Yards::new(),
             mcvs: BTreeMap::new(),
             fleet: Fleet::new(),
+            battle: Battle::new(),
             patrol_goal: None,
             orders: BTreeMap::new(),
             dash: None,
@@ -510,6 +516,11 @@ impl MapRules for DesertRules {
             VEHICLE,
         );
         self.economy.end_tick();
+        // Shells land and guns fire AFTER the ground has finished moving:
+        // a line of fire is a question about the terrain, and asking it
+        // before this tick.s craters and slumps have settled answers
+        // about a map that no longer exists.
+        self.battle.run(host, &mut self.yards);
         self.march(host);
         self.report(host);
 
@@ -542,12 +553,15 @@ impl MapRules for DesertRules {
             &self.mcvs,
             &self.orders,
             &self.fleet,
+            &self.battle,
         ))
         .unwrap_or_default()
     }
 
     fn restore(&mut self, bytes: &[u8]) {
-        if let Ok((router, terraform, economy, yards, mcvs, orders, fleet)) = postcard::from_bytes(bytes) {
+        if let Ok((router, terraform, economy, yards, mcvs, orders, fleet, battle)) =
+            postcard::from_bytes(bytes)
+        {
             self.router = router;
             self.terraform = terraform;
             self.economy = economy;
@@ -555,6 +569,7 @@ impl MapRules for DesertRules {
             self.mcvs = mcvs;
             self.orders = orders;
             self.fleet = fleet;
+            self.battle = battle;
         }
     }
 }
@@ -588,6 +603,21 @@ impl DesertRules {
         );
         work.order((sx - 4, sy - 10), (sx - 1, sy + 9), Work::Vitrify { depth: 2 });
         Terraform::crater(host, (sx, sy + 22), 8);
+
+        // A duel across the berm, so D-6's rule is visible rather than
+        // merely tested: two guns that cannot see each other through
+        // packed fill, and a mortar that does not care. The berm going up
+        // beside them is the same one the Surfling order above builds.
+        let gun = |rules: &mut DesertRules, owner: PlayerNo, at: (i64, i64), weapon: Weapon| {
+            let e = rules.spawn_unit(host, owner, at, MODEL_SOLDIER);
+            rules
+                .battle
+                .enlist(e, owner, combat::Armour::Light, weapon);
+        };
+        gun(self, 0, (sx + 8, sy - 2), Weapon::Cannon);
+        gun(self, 0, (sx + 8, sy + 2), Weapon::Mortar);
+        gun(self, 1, (sx + 18, sy - 2), Weapon::Cannon);
+        gun(self, 1, (sx + 18, sy + 2), Weapon::Cannon);
     }
 
     /// Land a player's opening force: an MCV, a harvester, and the

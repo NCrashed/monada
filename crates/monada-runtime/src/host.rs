@@ -108,6 +108,42 @@ pub trait WorldRead {
         })
     }
 
+    /// The first solid cell the segment `from → to` enters, or `None` if
+    /// nothing is in the way.
+    ///
+    /// **Line of fire, and the reason a berm is worth building** (§7). On
+    /// a flat map "can this gun see that tank" is a distance; on a
+    /// volumetric one it is a question about the ground between them, and
+    /// answering it is what makes a Surfling rampart a firing position, a
+    /// Dweller trench cover, and artillery the counter to both.
+    ///
+    /// Marches the same integer DDA the physics solver uses rather than a
+    /// second one of its own — two ray marchers over the same store would
+    /// agree everywhere except the corners, and the corners are where a
+    /// shot grazes a berm.
+    ///
+    /// Endpoints are cell centres. A shot from inside solid rock hits at
+    /// once, which is the honest answer.
+    fn volume_ray(&self, from: (i64, i64, i64), to: (i64, i64, i64)) -> Option<(i64, i64, i64)> {
+        let p = self.volume()?;
+        let sim = p.lock().expect("physics mutex");
+        let centre = |c: (i64, i64, i64)| {
+            FixedVec3::new(
+                Fixed::from_int(i32::try_from(c.0).unwrap_or(0)) + Fixed::from_ratio(1, 2),
+                Fixed::from_int(i32::try_from(c.1).unwrap_or(0)) + Fixed::from_ratio(1, 2),
+                Fixed::from_int(i32::try_from(c.2).unwrap_or(0)) + Fixed::from_ratio(1, 2),
+            )
+        };
+        let (a, b) = (centre(from), centre(to));
+        let span = b - a;
+        let len = span.length();
+        if len <= Fixed::ZERO {
+            return None;
+        }
+        let dir = span.scale(Fixed::ONE / len);
+        monada_physics::raycast::cast(&sim.terrain, a, dir, len).map(|hit| hit.cell)
+    }
+
     // --- collision queries -----------------------------------------------
     //
     // Deterministic reads over the terrain the map painted: a pure

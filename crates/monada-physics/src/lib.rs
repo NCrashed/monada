@@ -39,7 +39,15 @@ mod drill;
 mod field;
 mod ids;
 mod material;
-mod raycast;
+/// Marching a voxel field along a ray.
+///
+/// Public because line of fire is a *game* question as much as a physics
+/// one: on a volumetric map, whether a berm stands between a gun and its
+/// target is the whole difference the third dimension makes
+/// (docs/plans/desert-game.md §7). A map has to be able to ask it with
+/// the same integer DDA the solver uses, rather than rolling a second
+/// one that rounds differently and disagrees at the corners.
+pub mod raycast;
 mod shape;
 mod solver;
 mod wheels;

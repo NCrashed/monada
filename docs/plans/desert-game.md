@@ -723,7 +723,28 @@ golden in `monada-hashes.txt`.
   a widget you cannot see.
 - **D-6 — combat.** Units, turrets, projectiles, terrain-blocked direct fire,
   arcing weapons, cover, splash craters, wrecks; the FX bridge. *Gate:* a
-  scripted skirmish resolves identically every run.
+  scripted skirmish resolves identically every run. **Met**: four against
+  four, fixed positions, twice, agreeing to the last tenth of health. The
+  slice's payload is the one thing about this combat that is not the
+  genre's — **direct fire is blocked by the actual voxels between muzzle
+  and target**, not by a cover flag on a tile. Every terraforming verb of
+  D-3 is therefore also a combat verb, and the tests say so: a cannon
+  cannot shoot through a berm and a mortar goes over it; a unit in a
+  trench is safe until somebody fills the cut back in; a gun on a
+  platform shoots over a wall its twin on the flat cannot see past.
+  Splash craters the ground and the crater slumps, so a battlefield is a
+  different place afterwards — and, because spice is terrain, an
+  artillery duel over a field is an economic act too. A shell flies at a
+  *place*, not at a unit, which is what makes a slow weapon dodgeable.
+  Buildings take damage on the same health pool sand decay eats and
+  repair refills; two accounts of how hurt a refinery is would disagree
+  the first time a shell landed on one already sinking. `monada-physics`
+  gained a public `raycast` — line of fire is a game question, and a map
+  must not roll a second ray marcher that rounds differently at the
+  corners. **Not in this slice**: wrecks as physics bodies, turret
+  entities of their own, and the FX bridge (shells and explosions are
+  resolved but not drawn — the render side's transient-geometry path is
+  the same one the debris puffs need, and both want doing together).
 - **D-7 — shroud and radar.** Two-deck reveal (spike both implementations),
   radar canvas, sensor structures. *Gate:* shroud is frame-rate-independent
   and a no-op headless.
