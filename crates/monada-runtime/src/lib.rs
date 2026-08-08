@@ -129,8 +129,14 @@ pub use volume::VolumeStore;
 /// map's, not the language's, so the number moves. Additive twice over:
 /// a map that declares nothing granular leaves the automaton inert, and
 /// an inert automaton contributes nothing to the digest, so every
-/// existing golden holds.
-pub const HOST_API_VERSION: u32 = 18;
+/// existing golden holds; 19 = the HUD canvas on the shared host surface
+/// — `ui_size` / `ui_clear` / `ui_text` / `ui_button` forward to the
+/// bridge's immediate-mode canvas, so a native map draws a sidebar
+/// (docs/plans/desert-game.md §7, D-5) the same way a Rhai map already
+/// could. Additive and presentation-only: they are no-ops without a
+/// bridge, so a headless peer runs the identical rules and draws
+/// nothing.
+pub const HOST_API_VERSION: u32 = 19;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a

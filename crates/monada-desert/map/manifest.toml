@@ -7,7 +7,7 @@ engine_version = "0.0.1"
 # a script (decision L1), but they reach the engine through the same host
 # surface, so the same compatibility gate applies: a host outside this
 # range refuses the map instead of desyncing.
-host_api = 18
+host_api = 19
 
 # Skirmish is 2..4 (D-9); D-1 is one player watching one vehicle.
 players = 1
@@ -26,3 +26,55 @@ terrain = "volume"
 # its bindings.
 script_runtime = "native"
 entry = "compiled-in"
+
+# Rebindable input actions (docs/plans/input-bindings.md). The build flow
+# of §7: pick a structure from the sidebar with a number key, then click
+# the ground to say where. Selecting the MCV and pressing `deploy` turns
+# it into a construction yard.
+[[action]]
+id = "select"
+kind = "button"
+default = ["MouseLeft"]
+label = { en = "Select / place" }
+
+[[action]]
+id = "order"
+kind = "button"
+default = ["MouseRight"]
+label = { en = "Order" }
+
+[[action]]
+id = "pan"
+kind = "axis2"
+default = { up = "KeyW", down = "KeyS", left = "KeyA", right = "KeyD" }
+label = { en = "Pan camera" }
+
+[[action]]
+id = "deploy"
+kind = "button"
+default = ["KeyG"]
+label = { en = "Deploy MCV" }
+
+[[action]]
+id = "repair"
+kind = "button"
+default = ["KeyR"]
+label = { en = "Repair" }
+
+[[action]]
+id = "build1"
+kind = "button"
+default = ["Digit1"]
+label = { en = "Build wind trap" }
+
+[[action]]
+id = "build2"
+kind = "button"
+default = ["Digit2"]
+label = { en = "Build refinery" }
+
+[[action]]
+id = "build3"
+kind = "button"
+default = ["Digit3"]
+label = { en = "Build silo" }

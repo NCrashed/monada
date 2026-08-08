@@ -22,7 +22,7 @@ use monada_runtime::{
 use monada_sim::EntityId;
 
 use monada_desert_rules::economy::{
-    Economy, Player, Structure, CREDITS_PER_CELL, REFINERY_CAPACITY,
+    Economy, Player, Structure, BASE_CAPACITY, CREDITS_PER_CELL, REFINERY_CAPACITY, SILO_CAPACITY,
 };
 use monada_desert_rules::harvest::{Fleet, Task};
 use monada_desert_rules::mover::Router;
@@ -145,7 +145,7 @@ impl Mine {
             kind: Structure::Refinery,
         }];
         self.economy.begin_tick();
-        self.economy.count(refinery.iter());
+        self.economy.count(refinery.iter().copied());
         self.fleet.run(
             self.backend.host(),
             &mut self.economy,
@@ -379,18 +379,19 @@ fn losing_a_silo_spills_what_it_held() {
         },
     ];
     economy.begin_tick();
-    economy.count(with_silo.iter());
-    economy.player(0).deposit(1_800);
+    economy.count(with_silo.iter().copied());
+    let full = BASE_CAPACITY + REFINERY_CAPACITY + SILO_CAPACITY;
+    economy.player(0).deposit(full);
     economy.end_tick();
-    assert_eq!(economy.get(0).expect("player").credits, 1_800);
+    assert_eq!(economy.get(0).expect("player").credits, full);
 
     // The shell lands. Next tick there is one less place to put things.
     economy.begin_tick();
-    economy.count(with_silo[..1].iter());
+    economy.count(with_silo[..1].iter().copied());
     economy.end_tick();
     let p = economy.get(0).expect("player");
-    assert_eq!(p.credits, REFINERY_CAPACITY);
-    assert_eq!(p.spilled, 1_800 - REFINERY_CAPACITY);
+    assert_eq!(p.credits, BASE_CAPACITY + REFINERY_CAPACITY);
+    assert_eq!(p.spilled, SILO_CAPACITY);
 }
 
 #[test]

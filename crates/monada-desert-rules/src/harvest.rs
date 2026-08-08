@@ -115,6 +115,16 @@ impl Fleet {
         );
     }
 
+    /// Point every one of a player.s harvesters at a new refinery — what
+    /// happens the moment one is built, and the moment one dies.
+    pub fn rehome(&mut self, owner: PlayerNo, home: (i64, i64)) {
+        for unit in self.units.values_mut() {
+            if unit.owner == owner {
+                unit.home = home;
+            }
+        }
+    }
+
     /// Take one out of service.
     pub fn discharge(&mut self, unit: EntityId) {
         self.units.remove(&unit);

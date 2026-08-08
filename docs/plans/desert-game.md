@@ -699,7 +699,28 @@ golden in `monada-hashes.txt`.
 - **D-5 — base building.** Sidebar (panels, model icons, hover, clipped
   list), 3D placement rules, buried and elevated structures, repair.
   *Gate:* a headless build order produces an exact base on both a plateau
-  and in a pit.
+  and in a pit. **Met**: the same four-structure order runs on both sites
+  and grades its own pads to the level each site sits at. What the third
+  dimension adds to Dune II's two placement questions ("is the tile free,
+  does it touch your base") is three more, and they are the interesting
+  ones:
+  - **Is it level, and can it be made level?** A yard grades its own pad
+    up to `MAX_GRADE`; anything steeper is refused, by name, and has to
+    be terraformed first. Surfling platform-first construction (§6a) is
+    therefore a placement rule rather than flavour text.
+  - **Will the ground bear it?** Rock, packed fill and glass hold; raw
+    sand takes the building and then gives way under it. Dune II's
+    concrete rule, except the concrete is a material a faction makes.
+  - **How deep is it?** A pad is buried or elevated relative to the
+    ground at *standoff* distance — not the cell next door, which would
+    read the middle of a wide plateau as level. Nothing consumes it yet;
+    D-6 does, when direct fire starts caring what is in the way.
+  The MCV deploy deferred from D-4 landed here, and it has to search for
+  a pad rather than demand the cell it stands on — on a dune sea an
+  eight-cell footprint is almost never level by luck. The sidebar is a
+  text build list on number keys, not panels with icons: real art and a
+  clipped scrolling list are D-11's, and a build flow you can use beats
+  a widget you cannot see.
 - **D-6 — combat.** Units, turrets, projectiles, terrain-blocked direct fire,
   arcing weapons, cover, splash craters, wrecks; the FX bridge. *Gate:* a
   scripted skirmish resolves identically every run.

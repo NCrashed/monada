@@ -26,12 +26,14 @@ use monada_runtime::{
 use monada_sim::{ArchetypeId, EntityId};
 use std::collections::BTreeMap;
 
+pub mod build;
 pub mod economy;
 pub mod gen;
 pub mod harvest;
 pub mod mover;
 pub mod terraform;
 
+pub use build::{Blueprint, Exposure, Refusal, Standing, Yards};
 pub use economy::{Building, Economy, Player, PlayerNo, Structure};
 pub use gen::{Desert, DesertParams, Surface};
 pub use harvest::{Fleet, Yield};
@@ -40,6 +42,61 @@ pub use terraform::{JobId, Spent, Terraform, Work};
 
 /// What a player starts a skirmish with. Dune II's number.
 pub const STARTING_CREDITS: u32 = 1_000;
+
+/// Health mended per repair command, in tenths of a point.
+pub const REPAIR_RATE: u32 = 40;
+
+/// How far an MCV will look for a pad it can deploy on.
+pub const DEPLOY_SEARCH: i64 = 12;
+
+/// The command verbs this map's local layer submits (§7).
+pub mod verb {
+    /// Put a structure on the build line. `arg.z` names the kind.
+    pub const ORDER: u32 = 1;
+    /// Place whatever is finished at `arg`.
+    pub const PLACE: u32 = 2;
+    /// Deploy the MCV named by `target`.
+    pub const DEPLOY: u32 = 3;
+    /// Mend the structure named by `target`.
+    pub const REPAIR: u32 = 4;
+}
+
+/// The catalogue index a command carries, back to a kind.
+#[must_use]
+fn kind_of(index: i32) -> Option<Structure> {
+    build::CATALOGUE.get(usize::try_from(index).ok()?).map(|b| b.kind)
+}
+
+/// `(w, h, d, colour)` of each structure's placeholder model. Real art is
+/// D-11; what these have to do today is be different from each other at
+/// a glance.
+fn model_of(kind: Structure) -> (i64, i64, i64, i64) {
+    match kind {
+        Structure::Yard => (56, 56, 26, 0x80b0_a890),
+        Structure::Refinery => (56, 56, 20, 0x80a8_a098),
+        Structure::Silo => (28, 28, 16, 0x8090_8078),
+        Structure::WindTrap => (28, 28, 30, 0x8060_8ca0),
+    }
+}
+
+const MODEL_MCV: (i64, i64, i64, i64) = (32, 24, 16, 0x80b8_9060);
+const MODEL_HARVESTER: (i64, i64, i64, i64) = (28, 20, 12, 0x80c8_9840);
+
+/// The middle of a site's footprint.
+fn site_centre(site: build::Site) -> (i64, i64) {
+    (site.at.0 + site.span / 2, site.at.1 + site.span / 2)
+}
+
+/// A refusal, as a player should read it.
+fn refusal(why: build::Refusal) -> &'static str {
+    match why {
+        build::Refusal::NoGround => "there is no ground there",
+        build::Refusal::TooSteep => "the ground is too steep — grade a pad first",
+        build::Refusal::Obstructed => "something is in the way",
+        build::Refusal::Unconnected => "too far from the rest of the base",
+        build::Refusal::Occupied => "something already stands there",
+    }
+}
 
 /// Sand's angle of repose, as the steepest drop it will hold: one cell
 /// (§4d). Spice behaves the same — it is dust. Everything else on the
@@ -140,8 +197,10 @@ pub struct DesertRules {
     terraform: Terraform,
     /// Credits, storage and power, per player (§7).
     economy: Economy,
-    /// Every structure standing, and whose it is.
-    buildings: BTreeMap<EntityId, Building>,
+    /// Every structure standing, plus each player.s build line (§7).
+    yards: Yards,
+    /// Undeployed MCVs, and whose they are.
+    mcvs: BTreeMap<EntityId, PlayerNo>,
     /// Every harvester in service.
     fleet: Fleet,
     /// Which corner the D-1 patrol vehicle is currently crossing to.
@@ -173,7 +232,8 @@ impl DesertRules {
             router: Router::new(),
             terraform: Terraform::new(),
             economy: Economy::new(),
-            buildings: BTreeMap::new(),
+            yards: Yards::new(),
+            mcvs: BTreeMap::new(),
             fleet: Fleet::new(),
             patrol_goal: None,
             spent: Spent::default(),
@@ -341,13 +401,38 @@ impl MapRules for DesertRules {
         }
     }
 
+    fn command(&mut self, host: &dyn Host, player: monada_sim::PlayerId, command: &monada_sim::Command) {
+        let who = PlayerNo::try_from(player.0).unwrap_or(0);
+        let at = (
+            i64::from(command.arg.x.floor_to_int()),
+            i64::from(command.arg.y.floor_to_int()),
+        );
+        match command.verb {
+            verb::ORDER => {
+                if let Some(kind) = kind_of(command.arg.z.floor_to_int()) {
+                    self.yards.queue(who).order(&mut self.economy, who, kind);
+                }
+            }
+            verb::PLACE => self.place_ready(host, who, at),
+            verb::DEPLOY => self.deploy(host, command.target),
+            verb::REPAIR => {
+                self.yards.repair(&mut self.economy, command.target, REPAIR_RATE);
+            }
+            _ => {}
+        }
+    }
+
     fn tick(&mut self, host: &dyn Host, _dt: Fixed) {
         // Power before work, because power is what work costs (§4e): the
         // buildings standing at the top of the tick decide how fast the
         // engineers dig during it.
         self.economy.begin_tick();
-        self.economy.count(self.buildings.values());
+        self.economy.count(self.yards.economy_view());
         let allowance = self.economy.player(0).allowance();
+        self.yards.queue(0).tick(&mut self.economy, 0);
+        for gone in self.yards.weather(&mut self.economy) {
+            host.entity_despawn(gone);
+        }
 
         // Then the ground: settling and the terraform orders both change
         // what the movers below are about to walk on, and a unit that
@@ -390,18 +475,20 @@ impl MapRules for DesertRules {
             &self.router,
             &self.terraform,
             &self.economy,
-            &self.buildings,
+            &self.yards,
+            &self.mcvs,
             &self.fleet,
         ))
         .unwrap_or_default()
     }
 
     fn restore(&mut self, bytes: &[u8]) {
-        if let Ok((router, terraform, economy, buildings, fleet)) = postcard::from_bytes(bytes) {
+        if let Ok((router, terraform, economy, yards, mcvs, fleet)) = postcard::from_bytes(bytes) {
             self.router = router;
             self.terraform = terraform;
             self.economy = economy;
-            self.buildings = buildings;
+            self.yards = yards;
+            self.mcvs = mcvs;
             self.fleet = fleet;
         }
     }
@@ -438,53 +525,115 @@ impl DesertRules {
         Terraform::crater(host, (sx, sy + 22), 8);
     }
 
-    /// Found a player's starting base: a refinery, a silo to overflow
-    /// into, a wind trap to pay for the digging, and one harvester.
+    /// Land a player's opening force: an MCV, a harvester, and the
+    /// credits to build with.
     ///
-    /// The gate for this slice is "a scripted schedule mines an exact
-    /// credit total at an exact tick" — this is the schedule, and D-5
-    /// replaces it with an MCV the player deploys where they like.
+    /// Dune II's opening, and the reason it is the right one here: the
+    /// MCV has to *find a pad*. On a dune sea nothing is level, so where
+    /// a player deploys is already a decision about terrain, before a
+    /// single terraform order is given.
     fn found_base(&mut self, host: &dyn Host, owner: PlayerNo, at: (i64, i64)) {
-        let buildings = *self
-            .building_kind
-            .get_or_insert_with(|| host.archetype(&["owner", "kind"]));
-        let units = *self
+        self.economy.found(owner, STARTING_CREDITS);
+        self.mcv(host, owner, at);
+        // The refinery comes later, so the harvester's first home is the
+        // MCV's cell; deploying re-homes the fleet.
+        let harvester = self.spawn_unit(host, owner, (at.0 + 4, at.1 + 4), MODEL_HARVESTER);
+        self.fleet.enlist(harvester, owner, at);
+    }
+
+    /// Spawn an MCV, the mobile thing a base starts as.
+    fn mcv(&mut self, host: &dyn Host, owner: PlayerNo, at: (i64, i64)) -> EntityId {
+        let mcv = self.spawn_unit(host, owner, at, MODEL_MCV);
+        self.mcvs.insert(mcv, owner);
+        mcv
+    }
+
+    fn spawn_unit(
+        &mut self,
+        host: &dyn Host,
+        owner: PlayerNo,
+        at: (i64, i64),
+        model: (i64, i64, i64, i64),
+    ) -> EntityId {
+        let kind = *self
             .unit_kind
             .get_or_insert_with(|| host.archetype(&["owner", "load"]));
+        let e = host.entity_create(kind);
+        host.entity_set_model(e, host.model_box(model.0, model.1, model.2, model.3));
+        host.entity_set_field(e, "owner", Fixed::from_int(i32::from(owner)));
+        host.entity_set_position(e, Self::seat(host, at.0, at.1));
+        e
+    }
 
-        self.economy.found(owner, STARTING_CREDITS);
+    /// Turn an MCV into a construction yard where it stands.
+    ///
+    /// It looks for a pad near itself rather than demanding the exact
+    /// cell: an eight-cell footprint on a dune almost never happens to be
+    /// level, and "deploy failed, drive one cell east and try again" is
+    /// not a game.
+    fn deploy(&mut self, host: &dyn Host, mcv: EntityId) {
+        let Some(&owner) = self.mcvs.get(&mcv) else {
+            return;
+        };
+        let pos = host.entity_position(mcv);
+        let at = (
+            i64::from(pos.x.floor_to_int()),
+            i64::from(pos.y.floor_to_int()),
+        );
+        let Some(site) = self
+            .yards
+            .find_site(host, owner, Structure::Yard, at, DEPLOY_SEARCH)
+        else {
+            host.status("no level ground to deploy on — grade a pad first");
+            return;
+        };
+        self.mcvs.remove(&mcv);
+        host.entity_despawn(mcv);
+        self.router.forget(mcv);
+        let yard = self.raise(host, owner, Structure::Yard, site);
+        // Harvesters serve the yard until a refinery exists.
+        let _ = yard;
+    }
 
-        let refinery = (at.0, at.1);
-        for (kind, cell, model) in [
-            (
-                Structure::Refinery,
-                refinery,
-                host.model_box(40, 40, 20, 0x80a8_a098),
-            ),
-            (
-                Structure::Silo,
-                (at.0 + 5, at.1),
-                host.model_box(24, 24, 14, 0x8090_8078),
-            ),
-            (
-                Structure::WindTrap,
-                (at.0, at.1 + 5),
-                host.model_box(24, 24, 26, 0x8060_8ca0),
-            ),
-        ] {
-            let e = host.entity_create(buildings);
-            host.entity_set_model(e, model);
-            host.entity_set_field(e, "owner", Fixed::from_int(i32::from(owner)));
-            host.entity_set_position(e, Self::seat(host, cell.0, cell.1));
-            self.buildings.insert(e, Building { owner, kind });
+    /// Put a finished structure down, if the site will take it.
+    fn place_ready(&mut self, host: &dyn Host, who: PlayerNo, at: (i64, i64)) {
+        let Some(kind) = self.yards.queue(who).take() else {
+            return;
+        };
+        match self.yards.survey(host, who, kind, at) {
+            Ok(site) => {
+                let e = self.raise(host, who, kind, site);
+                if kind == Structure::Refinery {
+                    self.fleet.rehome(who, site_centre(site));
+                }
+                let _ = e;
+            }
+            Err(why) => {
+                self.yards.queue(who).put_back(kind);
+                host.status(&format!("cannot build there: {}", refusal(why)));
+            }
         }
+    }
 
-        let model = host.model_box(28, 20, 12, 0x80c8_9840);
-        let harvester = host.entity_create(units);
-        host.entity_set_model(harvester, model);
-        host.entity_set_field(harvester, "owner", Fixed::from_int(i32::from(owner)));
-        host.entity_set_position(harvester, Self::seat(host, at.0 + 3, at.1 + 3));
-        self.fleet.enlist(harvester, owner, refinery);
+    /// Grade the pad, spawn the entity, and record the structure.
+    fn raise(
+        &mut self,
+        host: &dyn Host,
+        who: PlayerNo,
+        kind: Structure,
+        site: build::Site,
+    ) -> EntityId {
+        let archetype = *self
+            .building_kind
+            .get_or_insert_with(|| host.archetype(&["owner", "health"]));
+        let e = host.entity_create(archetype);
+        let model = model_of(kind);
+        host.entity_set_model(e, host.model_box(model.0, model.1, model.2, model.3));
+        host.entity_set_field(e, "owner", Fixed::from_int(i32::from(who)));
+        self.yards.raise(host, who, kind, site, e);
+        let (cx, cy) = site_centre(site);
+        host.entity_set_position(e, Self::seat(host, cx, cy));
+        e
     }
 
     /// The HUD line: whichever of the two loops is doing something.
@@ -566,6 +715,13 @@ pub struct DesertLocal {
     /// slider that cuts down to a Dweller bore is the same two numbers
     /// (§4f).
     clip: (i64, i64),
+    /// Which catalogue entry the player has picked, if any: the next
+    /// ground click places it. Purely local — where a player is pointing
+    /// is not part of the world.
+    picked: Option<usize>,
+    /// Edge detection for the click and key actions, so a held button is
+    /// one order rather than thirty a second.
+    held: [bool; 6],
 }
 
 impl Default for DesertLocal {
@@ -577,7 +733,19 @@ impl Default for DesertLocal {
             pitch: Fixed::from_ratio(105, 100),
             dist: Fixed::from_int(700),
             clip: (gen::BEDROCK_Z, gen::SKY_Z),
+            picked: None,
+            held: [false; 6],
         }
+    }
+}
+
+impl DesertLocal {
+    /// Whether an action went down this frame.
+    fn pressed(&mut self, host: &dyn LocalHost, slot: usize, id: &str) -> bool {
+        let now = host.action_down(id);
+        let edge = now && !self.held[slot];
+        self.held[slot] = now;
+        edge
     }
 }
 
@@ -586,16 +754,99 @@ impl LocalRules for DesertLocal {
         host.camera_angle(self.yaw, self.pitch);
         host.camera_dist(self.dist);
         host.deck_clip(self.clip.0, self.clip.1);
-        host.status("the desert — D-1");
+        host.status("the desert — D-5");
     }
 
     fn local_frame(&mut self, host: &dyn LocalHost, _dt: Fixed) {
-        // Follow whatever is moving. One vehicle today; a selection
-        // tomorrow (D-3), which is why the camera reads the world rather
-        // than being told where to look.
-        if let Some(&vehicle) = host.entities().first() {
-            host.camera_focus(host.entity_position(vehicle));
+        // Follow the selection if there is one, and whatever is moving if
+        // there is not — the camera reads the world rather than being told
+        // where to look.
+        let focus = host.highlighted().or_else(|| host.entities().first().copied());
+        if let Some(e) = focus {
+            host.camera_focus(host.entity_position(e));
         }
+
+        // The build list: a structure is chosen with a number key, then
+        // placed with a ground click. Icons and panels are D-11 — what
+        // this owes today is a flow a player can actually use.
+        for (slot, (index, id)) in [(1_usize, "build1"), (2, "build2"), (3, "build3")]
+            .into_iter()
+            .enumerate()
+        {
+            if self.pressed(host, slot, id) {
+                self.picked = Some(index);
+                host.submit_command(
+                    verb::ORDER,
+                    EntityId(0),
+                    FixedVec3::new(
+                        Fixed::ZERO,
+                        Fixed::ZERO,
+                        Fixed::from_int(i32::try_from(index).unwrap_or(0)),
+                    ),
+                );
+            }
+        }
+
+        if self.pressed(host, 0, "select") {
+            if let Some(point) = host.pick_ground() {
+                host.submit_command(verb::PLACE, EntityId(0), point);
+            }
+            if let Some(e) = host.pick_entity() {
+                host.highlight(e);
+            }
+        }
+        if self.pressed(host, 4, "deploy") {
+            if let Some(e) = host.highlighted() {
+                host.submit_command(verb::DEPLOY, e, FixedVec3::ZERO);
+            }
+        }
+        if self.pressed(host, 5, "repair") {
+            if let Some(e) = host.highlighted() {
+                host.submit_command(verb::REPAIR, e, FixedVec3::ZERO);
+            }
+        }
+
+        self.sidebar(host);
+    }
+}
+
+impl DesertLocal {
+    /// Draw the build list.
+    ///
+    /// Immediate mode: cleared and redrawn every frame, so "grey out what
+    /// you cannot afford" is a comparison rather than a widget that has
+    /// to be told when the money changed. The prices come from the same
+    /// [`CATALOGUE`](build::CATALOGUE) the simulation charges from, which
+    /// is the only way the two can never disagree.
+    fn sidebar(&self, host: &dyn LocalHost) {
+        let (w, _h) = host.ui_size();
+        if w == 0 {
+            return; // headless, or a host that draws no HUD
+        }
+        host.ui_clear();
+        let x = w - 180;
+        host.ui_text(x, 12, "BUILD", 18);
+        for (i, bp) in build::CATALOGUE.iter().enumerate().skip(1) {
+            let y = 12 + i64::try_from(i).unwrap_or(0) * 22;
+            let mark = if self.picked == Some(i) { ">" } else { " " };
+            host.ui_text(
+                x,
+                y + 18,
+                &format!("{mark}{i}  {}  {}", name_of(bp.kind), bp.cost),
+                14,
+            );
+        }
+    }
+}
+
+/// A structure's name, as a player reads it.
+#[must_use]
+pub fn name_of(kind: Structure) -> &'static str {
+    match kind {
+        Structure::Yard => "yard",
+        Structure::Refinery => "refinery",
+        Structure::Silo => "silo",
+        Structure::WindTrap => "wind trap",
     }
 }
 

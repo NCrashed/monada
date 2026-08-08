@@ -178,6 +178,52 @@ pub trait WorldRead {
             b.lock().expect("bridge mutex").status(text);
         }
     }
+
+    // --- the HUD canvas ---------------------------------------------------
+    //
+    // Immediate mode, redrawn every frame: `ui_clear`, then a fresh set of
+    // images, labels and buttons. A sidebar is not state the engine keeps
+    // for a map (docs/plans/desert-game.md §7) — it is what the map draws
+    // this frame, which is what makes a build list that greys out what you
+    // cannot afford a two-line change rather than a widget tree.
+    //
+    // These belong to the LOCAL layer in practice, but they live here for
+    // the same reason the rest of the presentation verbs do: they are
+    // no-ops without a bridge, so a headless peer runs the identical rules
+    // and draws nothing.
+
+    /// The HUD canvas size, in its own units.
+    fn ui_size(&self) -> (i64, i64) {
+        self.bridge().map_or((0, 0), |b| {
+            let b = b.lock().expect("bridge mutex");
+            (b.ui_width(), b.ui_height())
+        })
+    }
+
+    /// Start a frame's HUD: everything drawn before this is gone.
+    fn ui_clear(&self) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").ui_clear();
+        }
+    }
+
+    /// Draw a label.
+    fn ui_text(&self, x: i64, y: i64, text: &str, size: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").ui_text(x, y, text, size);
+        }
+    }
+
+    /// Draw a clickable button from three textures (idle, hover,
+    /// pressed); its `bit` comes back through
+    /// [`ui_clicks`](LocalHost::ui_clicks).
+    fn ui_button(&self, tex: (i64, i64, i64), x: i64, y: i64, bit: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .ui_button(tex.0, tex.1, tex.2, x, y, bit);
+        }
+    }
 }
 
 /// The **simulation** layer's surface: everything in [`WorldRead`] plus

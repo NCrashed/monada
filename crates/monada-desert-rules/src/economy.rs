@@ -40,14 +40,25 @@ pub const HARVESTER_CAPACITY: u32 = 140;
 pub const HARVEST_RATE: u32 = 1;
 pub const UNLOAD_RATE: u32 = 4;
 
-/// Credits a refinery and a silo each hold. Overflow is lost, which is
-/// the whole reason to build the second silo.
+/// What a player can bank with no storage of their own — the field HQ
+/// allowance.
+///
+/// Without it a player starts with a capacity of zero, so the opening
+/// treasury spills the instant it is counted and the first tick of a
+/// match quietly takes the money away. Storage is what a building adds
+/// *on top of* this, not a precondition for having any.
+pub const BASE_CAPACITY: u32 = 1_000;
+
+/// Credits a yard, a refinery and a silo each hold. Overflow is lost,
+/// which is the whole reason to build the second silo.
+pub const YARD_CAPACITY: u32 = 500;
 pub const REFINERY_CAPACITY: u32 = 1_000;
 pub const SILO_CAPACITY: u32 = 1_000;
 
 /// Power a wind trap makes, and what the buildings that have one draw.
 /// Faction generators differ in *placement*, not in output (§7).
 pub const WINDTRAP_POWER: u32 = 100;
+pub const YARD_DRAW: u32 = 20;
 pub const REFINERY_DRAW: u32 = 30;
 pub const SILO_DRAW: u32 = 5;
 
@@ -55,6 +66,9 @@ pub const SILO_DRAW: u32 = 5;
 /// building — its footprint, its models, what it can produce — is D-5's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Structure {
+    /// The construction yard: what an MCV becomes, and the only thing
+    /// that may be built without touching an existing base.
+    Yard,
     Refinery,
     Silo,
     WindTrap,
@@ -65,6 +79,7 @@ impl Structure {
     #[must_use]
     pub fn capacity(self) -> u32 {
         match self {
+            Structure::Yard => YARD_CAPACITY,
             Structure::Refinery => REFINERY_CAPACITY,
             Structure::Silo => SILO_CAPACITY,
             Structure::WindTrap => 0,
@@ -76,6 +91,7 @@ impl Structure {
     #[must_use]
     pub fn power(self) -> (u32, u32) {
         match self {
+            Structure::Yard => (0, YARD_DRAW),
             Structure::Refinery => (0, REFINERY_DRAW),
             Structure::Silo => (0, SILO_DRAW),
             Structure::WindTrap => (WINDTRAP_POWER, 0),
@@ -176,8 +192,8 @@ impl Economy {
     /// Start a player with a treasury and nothing else.
     pub fn found(&mut self, who: PlayerNo, credits: u32) {
         let p = self.player(who);
-        p.capacity = REFINERY_CAPACITY;
-        p.credits = credits.min(p.capacity);
+        p.capacity = BASE_CAPACITY.max(credits);
+        p.credits = credits;
     }
 
     /// Clear the derived totals before a tick recounts the buildings.
@@ -188,14 +204,14 @@ impl Economy {
     /// dozen entities.
     pub fn begin_tick(&mut self) {
         for p in self.players.values_mut() {
-            p.capacity = 0;
+            p.capacity = BASE_CAPACITY;
             p.made = 0;
             p.used = 0;
         }
     }
 
     /// Recount storage and power from the buildings that are standing.
-    pub fn count<'a>(&mut self, buildings: impl Iterator<Item = &'a Building>) {
+    pub fn count(&mut self, buildings: impl Iterator<Item = Building>) {
         for b in buildings {
             let (made, used) = b.kind.power();
             let p = self.player(b.owner);

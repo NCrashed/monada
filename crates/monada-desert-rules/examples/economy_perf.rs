@@ -113,7 +113,7 @@ fn main() {
         for _ in 0..ticks {
             let one = Instant::now();
             economy.begin_tick();
-            economy.count(refinery.iter());
+            economy.count(refinery.iter().copied());
             fleet.run(host, &mut economy, &mut router, &sites, VEHICLE);
             economy.end_tick();
             worst = worst.max(ms(one));
