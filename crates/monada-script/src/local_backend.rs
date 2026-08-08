@@ -291,6 +291,44 @@ fn register_input_api(engine: &mut Engine, bridge: &SharedBridge) {
     });
 }
 
+/// The Rhai local layer through the host's language-agnostic seam, so a
+/// `MapSim` can hold a script layer or a compiled one behind one handle
+/// (docs/plans/desert-game.md D-1).
+impl crate::LocalLayer for LocalBackend {
+    fn has_local_tick(&self) -> bool {
+        LocalBackend::has_local_tick(self)
+    }
+
+    fn has_local_frame(&self) -> bool {
+        LocalBackend::has_local_frame(self)
+    }
+
+    fn on_local_init(&mut self) -> Result<(), ScriptError> {
+        LocalBackend::on_local_init(self)
+    }
+
+    fn on_local_frame(&mut self, dt: Fixed) -> Result<(), ScriptError> {
+        LocalBackend::on_local_frame(self, dt)
+    }
+
+    fn on_local_tick(&mut self, dt: Fixed) -> Result<(), ScriptError> {
+        LocalBackend::on_local_tick(self, dt)
+    }
+
+    fn on_action(&mut self, id: &str, down: bool) -> Result<(), ScriptError> {
+        LocalBackend::on_action(self, id, down)
+    }
+
+    fn on_pointer(
+        &mut self,
+        button: i64,
+        point: FixedVec3,
+        entity: i64,
+    ) -> Result<(), ScriptError> {
+        LocalBackend::on_pointer(self, button, point, entity)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};

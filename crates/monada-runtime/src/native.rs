@@ -16,7 +16,9 @@ use monada_fixed::{Fixed, FixedVec3};
 use monada_sim::{Command, EntityId, PlayerId, StateHash, StateHasher};
 
 use crate::host::{Host, LocalHost, RuntimeHost};
-use crate::{ScriptBackend, ScriptError, SharedBridge, SharedPhysics, SharedWorld, UiEvent};
+use crate::{
+    ScriptBackend, ScriptError, SharedBridge, SharedPhysics, SharedTerrain, SharedWorld, UiEvent,
+};
 
 /// A map's rules, as compiled code rather than a script.
 ///
@@ -264,9 +266,45 @@ pub trait LocalRules: Send {
     }
 }
 
+/// The entry points a host drives on a map's local layer, whichever
+/// language wrote it.
+///
+/// The host loop should not know or care whether this client's gestures
+/// come from a Rhai `pointer` handler or from compiled [`LocalRules`] —
+/// it delivers the same five events either way. Errors are in the
+/// signature because a *script* can raise; a compiled layer answers `Ok`
+/// and the host's error path stays one path.
+pub trait LocalLayer {
+    /// Whether the map assembles its own per-tick input command, in which
+    /// case the host must not inject its legacy input snapshot.
+    fn has_local_tick(&self) -> bool;
+    /// Whether the map wants a per-frame call at all (a host that knows it
+    /// does not can skip the call and its HUD drain).
+    fn has_local_frame(&self) -> bool;
+
+    /// # Errors
+    /// Whatever the layer's language raises.
+    fn on_local_init(&mut self) -> Result<(), ScriptError>;
+    /// # Errors
+    /// Whatever the layer's language raises.
+    fn on_local_frame(&mut self, dt: Fixed) -> Result<(), ScriptError>;
+    /// # Errors
+    /// Whatever the layer's language raises.
+    fn on_local_tick(&mut self, dt: Fixed) -> Result<(), ScriptError>;
+    /// # Errors
+    /// Whatever the layer's language raises.
+    fn on_action(&mut self, id: &str, down: bool) -> Result<(), ScriptError>;
+    /// A click gesture. `entity` is the host's picked id, `-1` for none —
+    /// the script surface's shape, converted for typed rules.
+    ///
+    /// # Errors
+    /// Whatever the layer's language raises.
+    fn on_pointer(&mut self, button: i64, point: FixedVec3, entity: i64)
+        -> Result<(), ScriptError>;
+}
+
 /// The local layer's backend: compiled [`LocalRules`] over a
-/// [`LocalHost`]. Mirrors `LocalBackend`'s entry points method for
-/// method, so a host drives either without knowing which it holds.
+/// [`LocalHost`].
 pub struct NativeLocalBackend {
     rules: Box<dyn LocalRules>,
     host: RuntimeHost,
@@ -274,42 +312,69 @@ pub struct NativeLocalBackend {
 
 impl NativeLocalBackend {
     /// Build the local layer over the shared world (read-only through
-    /// [`LocalHost`]) and this client's bridge.
+    /// [`LocalHost`]), this client's bridge, and — critically — the
+    /// simulation's **own** terrain store.
+    ///
+    /// Not a fresh one: a local layer with its own store reads empty
+    /// ground, so every cursor ray would land on a world that is not
+    /// there while the simulation walks the one that is.
     #[must_use]
-    pub fn new(world: &SharedWorld, bridge: &SharedBridge, rules: Box<dyn LocalRules>) -> Self {
-        let mut host = RuntimeHost::new(world.clone());
+    pub fn new(
+        world: &SharedWorld,
+        bridge: &SharedBridge,
+        terrain: &SharedTerrain,
+        rules: Box<dyn LocalRules>,
+    ) -> Self {
+        let mut host = RuntimeHost::with_terrain(world.clone(), terrain);
         host.set_bridge(bridge);
         NativeLocalBackend { rules, host }
     }
 
-    /// Whether the map owns its per-tick input encoding.
-    #[must_use]
-    pub fn has_local_tick(&self) -> bool {
+    /// Share the simulation's volume terrain, for a `terrain = "volume"`
+    /// map whose local layer needs to read the ground under the cursor.
+    pub fn set_volume(&mut self, phys: &SharedPhysics) {
+        self.host.set_volume(phys);
+    }
+}
+
+impl LocalLayer for NativeLocalBackend {
+    fn has_local_tick(&self) -> bool {
         self.rules.owns_tick_input()
     }
 
-    /// Run the map's `local_init`.
-    pub fn on_local_init(&mut self) {
+    fn has_local_frame(&self) -> bool {
+        true
+    }
+
+    fn on_local_init(&mut self) -> Result<(), ScriptError> {
         self.rules.local_init(&self.host);
+        Ok(())
     }
 
-    /// Run the map's `local_frame` for one rendered frame.
-    pub fn on_local_frame(&mut self, dt: Fixed) {
+    fn on_local_frame(&mut self, dt: Fixed) -> Result<(), ScriptError> {
         self.rules.local_frame(&self.host, dt);
+        Ok(())
     }
 
-    /// Run the map's `local_tick` for one scheduled sim tick.
-    pub fn on_local_tick(&mut self, dt: Fixed) {
+    fn on_local_tick(&mut self, dt: Fixed) -> Result<(), ScriptError> {
         self.rules.local_tick(&self.host, dt);
+        Ok(())
     }
 
-    /// Deliver one action edge.
-    pub fn on_action(&mut self, id: &str, down: bool) {
+    fn on_action(&mut self, id: &str, down: bool) -> Result<(), ScriptError> {
         self.rules.action(&self.host, id, down);
+        Ok(())
     }
 
-    /// Deliver one click gesture.
-    pub fn on_pointer(&mut self, button: i64, point: FixedVec3, entity: Option<EntityId>) {
-        self.rules.pointer(&self.host, button, point, entity);
+    #[allow(clippy::cast_sign_loss)]
+    fn on_pointer(
+        &mut self,
+        button: i64,
+        point: FixedVec3,
+        entity: i64,
+    ) -> Result<(), ScriptError> {
+        let picked = (entity >= 0).then_some(EntityId(entity as u64));
+        self.rules.pointer(&self.host, button, point, picked);
+        Ok(())
     }
 }

@@ -34,6 +34,7 @@ pub use rhai_backend::RhaiBackend;
 // own modules keep referring to `crate::HostBridge` and friends).
 pub use monada_runtime::{
     check_host_api, shared_physics, shared_terrain, shared_world, DrillToolDef, HostBridge,
+    LocalLayer, LocalRules, MapRules, NativeBackend, NativeLocalBackend,
     MaterialId, NullBridge, PhysicsSim, ScriptBackend, ScriptError, SharedBridge, SharedPhysics,
     SharedTerrain, SharedWorld, UiEvent, VolumeStore, VoxelStore, HOST_API_OLDEST,
     HOST_API_VERSION,

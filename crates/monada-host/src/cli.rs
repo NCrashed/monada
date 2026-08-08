@@ -36,12 +36,12 @@ pub fn config_for_map(map: Map) -> RunConfig {
     if let Some(path) = replay_path {
         let replay = load_replay(&path, &map);
         return RunConfig::Replay {
-            run: MapRun { map },
+            run: MapRun::scripted(map),
             replay,
         };
     }
     RunConfig::Map {
-        run: MapRun { map },
+        run: MapRun::scripted(map),
         net: role,
     }
 }

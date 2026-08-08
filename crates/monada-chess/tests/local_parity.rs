@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use monada_chess::{ChessLocal, ChessRules};
 use monada_fixed::{Fixed, FixedVec3};
-use monada_runtime::{HostBridge, NativeBackend, NativeLocalBackend, ScriptBackend};
+use monada_runtime::{HostBridge, LocalLayer, NativeBackend, NativeLocalBackend, ScriptBackend};
 use monada_script::{shared_world, LocalBackend, SharedBridge, SharedWorld};
 use monada_sim::EntityId;
 
@@ -137,10 +137,12 @@ fn run_rhai_local(clicks: &[Click], player: Option<i64>) -> Emitted {
 fn run_native_local(clicks: &[Click], player: Option<i64>) -> Emitted {
     let world = started_world();
     let (rec, bridge) = recorder(player);
-    let mut local = NativeLocalBackend::new(&world, &bridge, Box::new(ChessLocal));
-    local.on_local_init();
+    let terrain = monada_runtime::shared_terrain();
+    let mut local =
+        NativeLocalBackend::new(&world, &bridge, &terrain, Box::new(ChessLocal));
+    local.on_local_init().expect("local_init");
     for &(x, y) in clicks {
-        local.on_pointer(0, square(x, y), None);
+        local.on_pointer(0, square(x, y), -1).expect("pointer");
     }
     let out = std::mem::take(&mut rec.lock().expect("recorder").out);
     out
@@ -208,9 +210,11 @@ fn the_command_names_the_selected_piece() {
     // — the one place a local layer can silently address the wrong thing.
     let world = started_world();
     let (rec, bridge) = recorder(None);
-    let mut local = NativeLocalBackend::new(&world, &bridge, Box::new(ChessLocal));
+    let terrain = monada_runtime::shared_terrain();
+    let mut local =
+        NativeLocalBackend::new(&world, &bridge, &terrain, Box::new(ChessLocal));
     for &(x, y) in &[(4, 1), (4, 3)] {
-        local.on_pointer(0, square(x, y), None);
+        local.on_pointer(0, square(x, y), -1).expect("pointer");
     }
     let out = &rec.lock().expect("recorder").out;
     let pawn = {
@@ -237,11 +241,13 @@ fn the_gesture_follows_the_world() {
     let (rec, bridge) = recorder(None);
     let mut sim = NativeBackend::new(world.clone(), Box::new(ChessRules::new()));
     sim.set_bridge(&bridge);
-    let mut local = NativeLocalBackend::new(&world, &bridge, Box::new(ChessLocal));
+    let terrain = monada_runtime::shared_terrain();
+    let mut local =
+        NativeLocalBackend::new(&world, &bridge, &terrain, Box::new(ChessLocal));
 
     // Click e2 then e4, then route the command the way the host would.
-    local.on_pointer(0, square(4, 1), None);
-    local.on_pointer(0, square(4, 3), None);
+    local.on_pointer(0, square(4, 1), -1).expect("pointer");
+    local.on_pointer(0, square(4, 3), -1).expect("pointer");
     let (verb, target, (tx, ty)) = rec.lock().expect("recorder").out.commands[0];
     sim.on_command(
         monada_sim::PlayerId(0),
@@ -255,14 +261,14 @@ fn the_gesture_follows_the_world() {
 
     // e2 is now empty, so a click there selects nothing.
     rec.lock().expect("recorder").out = Emitted::default();
-    local.on_pointer(0, square(4, 1), None);
+    local.on_pointer(0, square(4, 1), -1).expect("pointer");
     assert!(
         rec.lock().expect("recorder").out.selection.is_empty(),
         "the pawn has left e2; nothing to select there"
     );
     // …and the pawn is selectable on e4, which is black's turn now, so it
     // must NOT be selectable — the gesture reads `to_move` from the world.
-    local.on_pointer(0, square(4, 3), None);
+    local.on_pointer(0, square(4, 3), -1).expect("pointer");
     assert!(
         rec.lock().expect("recorder").out.selection.is_empty(),
         "white just moved; white pieces are not selectable"

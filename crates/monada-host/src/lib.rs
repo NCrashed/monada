@@ -44,8 +44,9 @@ use monada_format::{Map, SimHz, Terrain};
 use monada_net::{LockstepSession, MatchInfo, QuicTransport, Replay, SessionConfig, SimDriver};
 use monada_render::CircleScene;
 use monada_script::{
-    shared_physics, shared_world, LocalBackend, PhysicsSim, RhaiBackend, RhaiDriver, ScriptBackend,
-    SharedBridge, SharedPhysics, SharedWorld, COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
+    shared_physics, shared_world, LocalBackend, LocalLayer, LocalRules, MapRules, NativeBackend,
+    NativeLocalBackend, PhysicsSim, RhaiBackend, RhaiDriver, ScriptBackend, SharedBridge,
+    SharedPhysics, SharedWorld, COMMAND_DEMO_SCRIPT, WALK_CIRCLE_SCRIPT,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
@@ -124,6 +125,35 @@ pub enum NetRole {
 /// board and defines its own pieces/interaction.
 pub struct MapRun {
     pub map: Map,
+    /// Compiled rules, for a map whose logic is linked rather than
+    /// scripted (decision L1 of docs/plans/desert-game.md). The archive
+    /// still carries the manifest, the assets and the input bindings —
+    /// only `entry` goes unread, because there is nothing to compile.
+    pub native: Option<NativeMap>,
+}
+
+/// A native map's two halves, handed over by its launcher: the
+/// simulation's rules and this client's gesture layer.
+pub struct NativeMap {
+    pub rules: Box<dyn MapRules>,
+    pub local: Box<dyn LocalRules>,
+}
+
+impl MapRun {
+    /// A scripted map — the shape every demo before the desert takes.
+    #[must_use]
+    pub fn scripted(map: Map) -> MapRun {
+        MapRun { map, native: None }
+    }
+
+    /// A map whose rules are compiled in.
+    #[must_use]
+    pub fn native(map: Map, rules: Box<dyn MapRules>, local: Box<dyn LocalRules>) -> MapRun {
+        MapRun {
+            map,
+            native: Some(NativeMap { rules, local }),
+        }
+    }
 }
 
 /// What the host runs this session. Built by the CLI (`main.rs`) or by a
@@ -280,10 +310,14 @@ struct Net {
 /// the Rhai engine as a [`HostBridge`](monada_script::HostBridge)).
 struct MapSim {
     world: SharedWorld,
-    backend: Box<RhaiBackend>,
-    /// The map's local, unsynchronized script layer: pointer gestures,
-    /// action edges, per-tick input assembly (plan step 3).
-    local_layer: Box<LocalBackend>,
+    /// The map's simulation, whichever runtime wrote it: a Rhai script
+    /// or compiled rules. The host drives the same four triggers either
+    /// way (docs/plans/desert-game.md D-1).
+    backend: Box<dyn ScriptBackend>,
+    /// The map's local, unsynchronized layer: pointer gestures, action
+    /// edges, per-tick input assembly (plan step 3) — script or compiled,
+    /// behind the same seam as the backend above.
+    local_layer: Box<dyn LocalLayer>,
     render: Arc<Mutex<MapRender>>,
     /// `Some(1/hz)` for a real-time map (drive its `tick` on the wall clock),
     /// `None` for a command-driven one (chess: advance only on clicks).
@@ -890,63 +924,120 @@ impl App {
     /// spawns its entities, and sets the HUD status.
     fn new_map(run: MapRun) -> Sim {
         let world = shared_world(SEED);
-        let mut backend = RhaiBackend::new(world.clone());
-        let script = run
-            .map
-            .entry_script()
-            .expect("map declares an entry script")
-            .to_string();
-        let local_script = run
-            .map
-            .local_script()
-            .expect("map declares a local script")
-            .to_string();
         // Hotseat: one window drives every side, so there is no single
-        // local player (-1) — the script enforces turns by piece colour.
-        let mut map_render = MapRender::new(run.map.assets, None, &run.map.manifest.actions);
-        if run.map.manifest.terrain == Terrain::Volume {
+        // local player (-1) — the map enforces turns itself.
+        let MapRun { map, native } = run;
+        let manifest = map.manifest.clone();
+        let scripts = native.is_none().then(|| {
+            (
+                map.entry_script().expect("map declares an entry script").to_string(),
+                map.local_script().expect("map declares a local script").to_string(),
+            )
+        });
+        let mut map_render = MapRender::new(map.assets, None, &manifest.actions);
+        if manifest.terrain == Terrain::Volume {
             map_render.set_volume_terrain();
         }
         let render = Arc::new(Mutex::new(map_render));
-        // Bridge must be set before `init` calls model_box / voxel_fill / …
         let bridge: SharedBridge = render.clone();
-        backend.set_bridge(&bridge);
-        // …and physics after the bridge (its `voxel_*` re-registrations
-        // dual-write store + render) but still before `init`.
-        let phys = volume_physics(&run.map.manifest);
-        if let Some(phys) = &phys {
-            backend.set_physics(phys);
-        }
-        if let SimHz::Fixed(hz) = run.map.manifest.sim_hz {
-            backend.set_tick_hz(hz);
-        }
-        backend.load(&script).expect("compile map script");
-        backend.on_init().expect("map init");
-        backend.drain_ui_events();
-        // The local layer boots after the sim's `init` so `local_init`
-        // observes the populated world — and reads the same grid frames the
-        // sim's `grid_*` verbs just wrote, so a cursor hit can be expressed in
-        // a hull's coordinates.
-        let mut local_layer = LocalBackend::new(&world, &bridge);
-        local_layer.set_grids(backend.grids());
-        // …and the same ground: collision now lives in the runtime store,
-        // so the local layer has to be handed the simulation own copy.
-        local_layer.set_terrain(&bridge, backend.terrain());
-        local_layer
-            .load(&local_script)
-            .expect("compile local script");
-        local_layer.on_local_init().expect("map local_init");
+        let phys = volume_physics(&manifest);
+        let hz = match manifest.sim_hz {
+            SimHz::Fixed(hz) => Some(hz),
+            SimHz::OnCommand => None,
+        };
+
+        let (backend, local_layer): (Box<dyn ScriptBackend>, Box<dyn LocalLayer>) =
+            if let Some(native) = native {
+                Self::boot_native(&world, &bridge, phys.as_ref(), hz, native)
+            } else {
+                let (script, local) = scripts.expect("a scripted map has scripts");
+                Self::boot_scripted(&world, &bridge, phys.as_ref(), hz, &script, &local)
+            };
         Sim::Map(Box::new(MapSim {
             world,
-            backend: Box::new(backend),
-            local_layer: Box::new(local_layer),
+            backend,
+            local_layer,
             render,
-            tick_dt: tick_dt(run.map.manifest.sim_hz),
+            tick_dt: tick_dt(manifest.sim_hz),
             accumulator: 0.0,
             // Hotseat: one local player drives the real-time input.
             local: PlayerId(0),
             phys,
         }))
+    }
+
+    /// Boot a Rhai map: compile the entry script, run `init`, then bring
+    /// up the local layer over the world `init` populated.
+    ///
+    /// The order is the contract, not a preference. The bridge comes
+    /// before `init` (which calls `model_box` / `voxel_fill`), physics
+    /// after the bridge (its volume `voxel_*` shadow the column ones) and
+    /// still before `init`, and the local layer last so `local_init` sees
+    /// a populated world and the frames the sim's `grid_*` just wrote.
+    fn boot_scripted(
+        world: &SharedWorld,
+        bridge: &SharedBridge,
+        phys: Option<&SharedPhysics>,
+        hz: Option<u32>,
+        script: &str,
+        local_script: &str,
+    ) -> (Box<dyn ScriptBackend>, Box<dyn LocalLayer>) {
+        let mut backend = RhaiBackend::new(world.clone());
+        backend.set_bridge(bridge);
+        if let Some(phys) = phys {
+            backend.set_physics(phys);
+        }
+        if let Some(hz) = hz {
+            backend.set_tick_hz(hz);
+        }
+        backend.load(script).expect("compile map script");
+        backend.on_init().expect("map init");
+        backend.drain_ui_events();
+
+        let mut local_layer = LocalBackend::new(world, bridge);
+        local_layer.set_grids(backend.grids());
+        // …and the same ground: collision lives in the runtime store, so
+        // the local layer has to be handed the simulation's own copy.
+        local_layer.set_terrain(bridge, backend.terrain());
+        local_layer.load(local_script).expect("compile local script");
+        local_layer.on_local_init().expect("map local_init");
+        (Box::new(backend), Box::new(local_layer))
+    }
+
+    /// Boot a native map: the same order, with linked rules in place of a
+    /// compiled script (decision L1). Nothing is read from `entry` — the
+    /// archive is here for its assets, manifest and bindings.
+    fn boot_native(
+        world: &SharedWorld,
+        bridge: &SharedBridge,
+        phys: Option<&SharedPhysics>,
+        hz: Option<u32>,
+        native: NativeMap,
+    ) -> (Box<dyn ScriptBackend>, Box<dyn LocalLayer>) {
+        let mut backend = NativeBackend::new(world.clone(), native.rules);
+        backend.set_bridge(bridge);
+        if let Some(phys) = phys {
+            backend.set_volume(phys);
+        }
+        if let Some(hz) = hz {
+            backend.set_tick_hz(hz);
+        }
+        backend.on_init().expect("map init");
+
+        // The local layer shares the simulation's stores rather than
+        // making its own — a cursor that reads private ground reads empty
+        // ground.
+        let mut local_layer = NativeLocalBackend::new(
+            world,
+            bridge,
+            backend.host().terrain_store(),
+            native.local,
+        );
+        if let Some(phys) = phys {
+            local_layer.set_volume(phys);
+        }
+        local_layer.on_local_init().expect("map local_init");
+        (Box::new(backend), Box::new(local_layer))
     }
 
     /// Build a networked scripted-map match: connect over QUIC, then run
