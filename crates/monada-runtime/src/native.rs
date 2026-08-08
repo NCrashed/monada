@@ -12,10 +12,10 @@
 //! The same [`MapRules`] source compiles to wasm later (§3f); only the
 //! linkage changes.
 
-use monada_fixed::Fixed;
-use monada_sim::{Command, PlayerId, StateHash, StateHasher};
+use monada_fixed::{Fixed, FixedVec3};
+use monada_sim::{Command, EntityId, PlayerId, StateHash, StateHasher};
 
-use crate::host::{Host, RuntimeHost};
+use crate::host::{Host, LocalHost, RuntimeHost};
 use crate::{ScriptBackend, ScriptError, SharedBridge, SharedWorld, UiEvent};
 
 /// A map's rules, as compiled code rather than a script.
@@ -150,5 +150,111 @@ impl ScriptBackend for NativeBackend {
         // Rules push HUD events through the bridge, not through a
         // script-side buffer; nothing to drain here yet.
         Vec::new()
+    }
+}
+
+/// A map's **local** layer, as compiled code — the native counterpart of
+/// `LocalBackend`'s script handlers (docs/plans/input-bindings.md §1).
+///
+/// One instance runs per client beside [`MapRules`], over a
+/// [`LocalHost`], and reaches the simulation only by submitting commands.
+/// Every entry point is optional: a map implements the gestures it has.
+///
+/// Unlike [`MapRules`], this trait carries **no determinism contract**.
+/// Its state is per-client by definition (a drag anchor, a hover, a
+/// camera), never hashed, never sent; the type system already prevents it
+/// from touching the world (see [`LocalHost`]).
+pub trait LocalRules: Send {
+    /// Once, after the simulation's `init` — camera and UI setup.
+    fn local_init(&mut self, host: &dyn LocalHost) {
+        let _ = host;
+    }
+
+    /// Once per **rendered frame**: hover, tooltips, camera smoothing.
+    /// Its rate is client-dependent, so nothing it submits may assume a
+    /// frequency.
+    fn local_frame(&mut self, host: &dyn LocalHost, dt: Fixed) {
+        let (_, _) = (host, dt);
+    }
+
+    /// Once per scheduled sim tick on this client: poll actions and
+    /// assemble the per-tick input command (real-time maps).
+    fn local_tick(&mut self, host: &dyn LocalHost, dt: Fixed) {
+        let (_, _) = (host, dt);
+    }
+
+    /// An edge event for a map-declared action (press = `true`).
+    fn action(&mut self, host: &dyn LocalHost, id: &str, down: bool) {
+        let (_, _, _) = (host, id, down);
+    }
+
+    /// A click gesture: which button, where on the ground, and what was
+    /// under the cursor.
+    fn pointer(
+        &mut self,
+        host: &dyn LocalHost,
+        button: i64,
+        point: FixedVec3,
+        entity: Option<EntityId>,
+    ) {
+        let (_, _, _, _) = (host, button, point, entity);
+    }
+
+    /// Whether this map assembles its own per-tick input command in
+    /// [`local_tick`](LocalRules::local_tick). When `true` the host must
+    /// not inject its legacy input snapshot — the map owns the encoding
+    /// end to end (the `has_local_tick` question asked of a script).
+    fn owns_tick_input(&self) -> bool {
+        false
+    }
+}
+
+/// The local layer's backend: compiled [`LocalRules`] over a
+/// [`LocalHost`]. Mirrors `LocalBackend`'s entry points method for
+/// method, so a host drives either without knowing which it holds.
+pub struct NativeLocalBackend {
+    rules: Box<dyn LocalRules>,
+    host: RuntimeHost,
+}
+
+impl NativeLocalBackend {
+    /// Build the local layer over the shared world (read-only through
+    /// [`LocalHost`]) and this client's bridge.
+    #[must_use]
+    pub fn new(world: &SharedWorld, bridge: &SharedBridge, rules: Box<dyn LocalRules>) -> Self {
+        let mut host = RuntimeHost::new(world.clone());
+        host.set_bridge(bridge);
+        NativeLocalBackend { rules, host }
+    }
+
+    /// Whether the map owns its per-tick input encoding.
+    #[must_use]
+    pub fn has_local_tick(&self) -> bool {
+        self.rules.owns_tick_input()
+    }
+
+    /// Run the map's `local_init`.
+    pub fn on_local_init(&mut self) {
+        self.rules.local_init(&self.host);
+    }
+
+    /// Run the map's `local_frame` for one rendered frame.
+    pub fn on_local_frame(&mut self, dt: Fixed) {
+        self.rules.local_frame(&self.host, dt);
+    }
+
+    /// Run the map's `local_tick` for one scheduled sim tick.
+    pub fn on_local_tick(&mut self, dt: Fixed) {
+        self.rules.local_tick(&self.host, dt);
+    }
+
+    /// Deliver one action edge.
+    pub fn on_action(&mut self, id: &str, down: bool) {
+        self.rules.action(&self.host, id, down);
+    }
+
+    /// Deliver one click gesture.
+    pub fn on_pointer(&mut self, button: i64, point: FixedVec3, entity: Option<EntityId>) {
+        self.rules.pointer(&self.host, button, point, entity);
     }
 }

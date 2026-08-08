@@ -27,8 +27,8 @@ mod host;
 mod native;
 mod volume;
 
-pub use host::{Host, RuntimeHost};
-pub use native::{MapRules, NativeBackend};
+pub use host::{Host, LocalHost, RuntimeHost, WorldRead};
+pub use native::{LocalRules, MapRules, NativeBackend, NativeLocalBackend};
 // Re-exported because it is part of VolumeStore's own API surface
 // (`set`/`fill`/`get` speak MaterialId) — consumers of the store should
 // not need a direct monada-physics edge for the id newtype.

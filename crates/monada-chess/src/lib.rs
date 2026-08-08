@@ -43,7 +43,7 @@
 #![allow(clippy::items_after_statements)]
 
 use monada_fixed::{Fixed, FixedVec3};
-use monada_runtime::{Host, MapRules};
+use monada_runtime::{Host, LocalHost, LocalRules, MapRules};
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
 /// The reasoning board: piece codes by `y * 8 + x`, `-1` for empty.
@@ -328,6 +328,82 @@ impl MapRules for ChessRules {
         };
         let suffix = if in_check { " — check" } else { "" };
         host.status(&format!("{prefix}{} to move{suffix}", side(next)));
+    }
+}
+
+/// Chess's **local** layer: the select → move click gesture, per client.
+///
+/// The twin of the script's `pointer(button, point, entity)`. It holds no
+/// state of its own — the selection lives in the host's per-client
+/// highlight, exactly as the script reads it back through `highlighted()`
+/// — and reaches the simulation only by submitting a `MOVE`.
+///
+/// It names the archetypes by literal id the way the script does, because
+/// the local layer does not run `init` and so never learns them: `init`
+/// registers `piece` first and `game` second on every peer, which is what
+/// makes 0 and 1 stable rather than lucky.
+#[derive(Default)]
+pub struct ChessLocal;
+
+impl ChessLocal {
+    const PIECE: ArchetypeId = ArchetypeId(0);
+    const GAME: ArchetypeId = ArchetypeId(1);
+
+    /// The piece standing on `(x, y)`, or `None` — the local layer's own
+    /// scan, over the read-only world view.
+    fn piece_at(host: &dyn LocalHost, x: i32, y: i32) -> Option<EntityId> {
+        host.entities_of(Self::PIECE).into_iter().find(|&e| {
+            let p = host.entity_position(e);
+            p.x.floor_to_int() == x && p.y.floor_to_int() == y
+        })
+    }
+}
+
+impl LocalRules for ChessLocal {
+    fn pointer(
+        &mut self,
+        host: &dyn LocalHost,
+        button: i64,
+        point: FixedVec3,
+        _entity: Option<EntityId>,
+    ) {
+        if button != 0 {
+            return; // left button only
+        }
+        let g = host.entities_of(Self::GAME)[0];
+        if host.entity_field(g, "winner").floor_to_int() != -1 {
+            return; // game decided
+        }
+        let to_move = host.entity_field(g, "to_move").floor_to_int();
+        // Networked: this client may only act on its own side. `None` is
+        // hotseat (one window drives both sides), so no gating.
+        if let Some(lp) = host.local_player() {
+            if i32::try_from(lp).unwrap_or(-1) != to_move {
+                return;
+            }
+        }
+        let sx = point.x.floor_to_int();
+        let sy = point.y.floor_to_int();
+        if !in_b(sx, sy) {
+            return; // off the board
+        }
+
+        match host.highlighted() {
+            // First click: select a piece of the side to move.
+            None => {
+                if let Some(p) = Self::piece_at(host, sx, sy) {
+                    if host.entity_field(p, "color").floor_to_int() == to_move {
+                        host.highlight(p);
+                        host.status("piece selected — pick a destination");
+                    }
+                }
+            }
+            // Second click: commit the move (the host routes the command).
+            Some(sel) => {
+                host.highlight_clear();
+                host.submit_command(MOVE, sel, square(sx, sy));
+            }
+        }
     }
 }
 

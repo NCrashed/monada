@@ -23,22 +23,15 @@ use monada_sim::{ArchetypeId, EntityId};
 
 use crate::{SharedBridge, SharedWorld};
 
-/// The engine surface a map's rules call.
+/// What **both** layers may do: read the world, and draw.
 ///
-/// Grows verb by verb as the native backend's maps need them; the Rhai
-/// registration in `monada-script` remains the exhaustive list until the
-/// migration finishes (docs/plans/desert-game.md D-0).
-pub trait Host {
-    /// Declare an archetype with the given field names; returns its id.
-    fn archetype(&self, fields: &[&str]) -> ArchetypeId;
-    /// Spawn an entity of `archetype`.
-    fn entity_create(&self, archetype: ArchetypeId) -> EntityId;
-    /// Remove an entity; returns whether it existed.
-    fn entity_despawn(&self, entity: EntityId) -> bool;
-    /// Set an entity's position (sim cells).
-    fn entity_set_position(&self, entity: EntityId, pos: FixedVec3);
-    /// Set a named fixed-point field.
-    fn entity_set_field(&self, entity: EntityId, name: &str, value: Fixed);
+/// The split below is the determinism wall expressed as types. The Rhai
+/// runtime gets the same guarantee by registering a different function
+/// list per scope; here the sim layer receives a [`Host`] — which has no
+/// input queries at all — and the local layer a [`LocalHost`] — which has
+/// no mutators and no RNG. Neither can reach the other's half by
+/// accident, and a rules author does not have to remember which is which.
+pub trait WorldRead {
     /// An entity's position, or the zero vector.
     fn entity_position(&self, entity: EntityId) -> FixedVec3;
     /// Read a named field, or zero.
@@ -47,13 +40,6 @@ pub trait Host {
     fn entities(&self) -> Vec<EntityId>;
     /// The entities of one archetype, ascending.
     fn entities_of(&self, archetype: ArchetypeId) -> Vec<EntityId>;
-    /// A fixed-point value in `[0, 1)` from the world's seeded generator.
-    fn rng01(&self) -> Fixed;
-    /// An integer in `0..n` from the world's seeded generator. Unsigned
-    /// where the script surface says `i64`: a Rhai map has one numeric
-    /// type, compiled rules do not, and the conversion belongs at the
-    /// language boundary rather than in the world.
-    fn rng_below(&self, n: u64) -> u64;
 
     /// The render / input seam, when one is attached. `None` on a
     /// headless peer (the oracle, a dedicated server), where presentation
@@ -139,10 +125,84 @@ pub trait Host {
     }
 }
 
+/// The **simulation** layer's surface: everything in [`WorldRead`] plus
+/// the verbs that change hashed state. Deliberately has no way to observe
+/// input — a tick may never depend on where this client's cursor is.
+///
+/// Grows verb by verb as the native backend's maps need them; the Rhai
+/// registration in `monada-script` remains the exhaustive list until the
+/// migration finishes (docs/plans/desert-game.md D-0).
+pub trait Host: WorldRead {
+    /// Declare an archetype with the given field names; returns its id.
+    fn archetype(&self, fields: &[&str]) -> ArchetypeId;
+    /// Spawn an entity of `archetype`.
+    fn entity_create(&self, archetype: ArchetypeId) -> EntityId;
+    /// Remove an entity; returns whether it existed.
+    fn entity_despawn(&self, entity: EntityId) -> bool;
+    /// Set an entity's position (sim cells).
+    fn entity_set_position(&self, entity: EntityId, pos: FixedVec3);
+    /// Set a named fixed-point field.
+    fn entity_set_field(&self, entity: EntityId, name: &str, value: Fixed);
+    /// A fixed-point value in `[0, 1)` from the world's seeded generator.
+    fn rng01(&self) -> Fixed;
+    /// An integer in `0..n` from the world's seeded generator. Unsigned
+    /// where the script surface says `i64`: a Rhai map has one numeric
+    /// type, compiled rules do not, and the conversion belongs at the
+    /// language boundary rather than in the world.
+    fn rng_below(&self, n: u64) -> u64;
+}
+
+/// The **local** layer's surface: everything in [`WorldRead`] plus input,
+/// selection and command submission — the per-client half, none of which
+/// is hashed. It cannot mutate the world or draw from the shared RNG,
+/// which is what makes "the local layer can never desync a match" a
+/// property of the type rather than a review note.
+///
+/// Selection lives here and nowhere else: what this player has clicked is
+/// a fact about this client, so the simulation is not offered it at all.
+pub trait LocalHost: WorldRead {
+    /// Whether a `button` action is held.
+    fn action_down(&self, id: &str) -> bool;
+    /// An `axis` action's value: `-1`, `0` or `+1`.
+    fn action_axis(&self, id: &str) -> i64;
+    /// An `axis2` action's value as `(x, y)`.
+    fn action_axis2(&self, id: &str) -> (i64, i64);
+    /// The cursor's ground point, or `None` on a miss.
+    fn pick_ground(&self) -> Option<FixedVec3>;
+    /// The entity under the cursor, or `None`.
+    fn pick_entity(&self) -> Option<EntityId>;
+    /// The sim-space angle from the local player toward the cursor.
+    fn aim_yaw(&self) -> Fixed;
+    /// HUD button bits clicked since the last call (take-and-clear).
+    fn ui_clicks(&self) -> i64;
+    /// The local player's id, or `None` when there is no single one
+    /// (hotseat, where one window drives every side).
+    fn local_player(&self) -> Option<i64>;
+    /// Queue a command for the host to route into the tick stream — the
+    /// only channel from this layer into the simulation.
+    fn submit_command(&self, verb: u32, target: EntityId, arg: FixedVec3);
+
+    /// Mark an entity as locally selected (replaces the selection).
+    fn highlight(&self, entity: EntityId);
+    /// Add an entity to the selection (multi-select).
+    fn highlight_add(&self, entity: EntityId);
+    /// Clear the local selection.
+    fn highlight_clear(&self);
+    /// The (first) selected entity, or `None`.
+    fn highlighted(&self) -> Option<EntityId>;
+}
+
 /// Entity ids cross the bridge as the script surface's `i64`.
 #[allow(clippy::cast_possible_wrap)]
 fn entity_arg(entity: EntityId) -> i64 {
     entity.0 as i64
+}
+
+/// The inverse: a bridge's `i64`, with the script's `-1` sentinel read as
+/// "nothing".
+#[allow(clippy::cast_sign_loss)]
+fn entity_opt(id: i64) -> Option<EntityId> {
+    (id >= 0).then_some(EntityId(id as u64))
 }
 
 /// The [`Host`] implementation over monada's own runtime state: the
@@ -180,6 +240,40 @@ impl RuntimeHost {
     }
 }
 
+impl WorldRead for RuntimeHost {
+    fn entity_position(&self, entity: EntityId) -> FixedVec3 {
+        self.world
+            .lock()
+            .expect("world mutex")
+            .position(entity)
+            .unwrap_or(FixedVec3::ZERO)
+    }
+
+    fn entity_field(&self, entity: EntityId, name: &str) -> Fixed {
+        self.world
+            .lock()
+            .expect("world mutex")
+            .field(entity, name)
+            .unwrap_or(Fixed::ZERO)
+    }
+
+    fn entities(&self) -> Vec<EntityId> {
+        self.world.lock().expect("world mutex").all_entities()
+    }
+
+    fn entities_of(&self, archetype: ArchetypeId) -> Vec<EntityId> {
+        self.world
+            .lock()
+            .expect("world mutex")
+            .entities(archetype)
+            .to_vec()
+    }
+
+    fn bridge(&self) -> Option<&SharedBridge> {
+        self.bridge.as_ref()
+    }
+}
+
 impl Host for RuntimeHost {
     fn archetype(&self, fields: &[&str]) -> ArchetypeId {
         self.world
@@ -210,34 +304,6 @@ impl Host for RuntimeHost {
             .set_field(entity, name, value);
     }
 
-    fn entity_position(&self, entity: EntityId) -> FixedVec3 {
-        self.world
-            .lock()
-            .expect("world mutex")
-            .position(entity)
-            .unwrap_or(FixedVec3::ZERO)
-    }
-
-    fn entity_field(&self, entity: EntityId, name: &str) -> Fixed {
-        self.world
-            .lock()
-            .expect("world mutex")
-            .field(entity, name)
-            .unwrap_or(Fixed::ZERO)
-    }
-
-    fn entities(&self) -> Vec<EntityId> {
-        self.world.lock().expect("world mutex").all_entities()
-    }
-
-    fn entities_of(&self, archetype: ArchetypeId) -> Vec<EntityId> {
-        self.world
-            .lock()
-            .expect("world mutex")
-            .entities(archetype)
-            .to_vec()
-    }
-
     fn rng01(&self) -> Fixed {
         self.world.lock().expect("world mutex").rng.next_fixed_01()
     }
@@ -245,8 +311,89 @@ impl Host for RuntimeHost {
     fn rng_below(&self, n: u64) -> u64 {
         self.world.lock().expect("world mutex").rng.gen_below(n)
     }
+}
 
-    fn bridge(&self) -> Option<&SharedBridge> {
-        self.bridge.as_ref()
+/// Every local verb forwards to the bridge, because every one of them is
+/// about *this client*: what it is holding down, where its cursor is,
+/// what it has selected. With no bridge there is no client, so the reads
+/// answer "nothing" and the writes are dropped — which is exactly what a
+/// headless peer should observe.
+impl LocalHost for RuntimeHost {
+    fn action_down(&self, id: &str) -> bool {
+        self.bridge()
+            .is_some_and(|b| b.lock().expect("bridge mutex").action_down(id))
+    }
+
+    fn action_axis(&self, id: &str) -> i64 {
+        self.bridge()
+            .map_or(0, |b| b.lock().expect("bridge mutex").action_axis(id))
+    }
+
+    fn action_axis2(&self, id: &str) -> (i64, i64) {
+        self.bridge()
+            .map_or((0, 0), |b| b.lock().expect("bridge mutex").action_axis2(id))
+    }
+
+    fn pick_ground(&self) -> Option<FixedVec3> {
+        self.bridge()
+            .and_then(|b| b.lock().expect("bridge mutex").pick_ground())
+    }
+
+    fn pick_entity(&self) -> Option<EntityId> {
+        self.bridge()
+            .and_then(|b| entity_opt(b.lock().expect("bridge mutex").pick_entity()))
+    }
+
+    fn aim_yaw(&self) -> Fixed {
+        self.bridge().map_or(Fixed::ZERO, |b| {
+            b.lock().expect("bridge mutex").aim_yaw()
+        })
+    }
+
+    fn ui_clicks(&self) -> i64 {
+        self.bridge()
+            .map_or(0, |b| b.lock().expect("bridge mutex").ui_clicks())
+    }
+
+    fn local_player(&self) -> Option<i64> {
+        self.bridge()
+            .and_then(|b| b.lock().expect("bridge mutex").local_player())
+    }
+
+    fn submit_command(&self, verb: u32, target: EntityId, arg: FixedVec3) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").submit_command(
+                i64::from(verb),
+                entity_arg(target),
+                arg,
+            );
+        }
+    }
+
+    fn highlight(&self, entity: EntityId) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .highlight(entity_arg(entity));
+        }
+    }
+
+    fn highlight_add(&self, entity: EntityId) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .highlight_add(entity_arg(entity));
+        }
+    }
+
+    fn highlight_clear(&self) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").highlight_clear();
+        }
+    }
+
+    fn highlighted(&self) -> Option<EntityId> {
+        self.bridge()
+            .and_then(|b| entity_opt(b.lock().expect("bridge mutex").highlighted()))
     }
 }
