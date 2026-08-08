@@ -1177,6 +1177,11 @@ pub struct MapRender {
     entity_grid: BTreeMap<EntityId, GridId>,
     /// Per-entity live actor state (only for entities bound to an actor
     /// model). Created on bind, driven by `entity_set_anim` / `_facing`.
+    /// A script-set facing per entity, in SIM radians. Kept for every
+    /// binding, not just actors: a plain KV6 model turns its geometry
+    /// (decision L4), and which kind an entity is bound to is not settled
+    /// until `build_instances` walks it.
+    entity_yaw: BTreeMap<EntityId, f64>,
     entity_actors: BTreeMap<EntityId, ActorInst>,
     /// Per-entity live character state (entities bound to a `.rkc` model).
     /// The character twin of [`entity_actors`](Self::entity_actors), driven
@@ -1409,6 +1414,7 @@ impl MapRender {
             characters: Vec::new(),
             models: BTreeMap::new(),
             entity_grid: BTreeMap::new(),
+            entity_yaw: BTreeMap::new(),
             entity_actors: BTreeMap::new(),
             entity_chars: BTreeMap::new(),
             actor_targets: Vec::new(),
@@ -1963,11 +1969,33 @@ impl MapRender {
         let drop = self.sprites.models.get(si).map_or(SCALE * 0.5, |m| {
             f64::from(m.kv6.zsiz) - f64::from(m.kv6.zpiv)
         });
-        let rot = self
+        let grid_rot = self
             .entity_grid
             .get(&e)
             .and_then(|&g| self.scene.grid(g))
             .map(|g| g.transform.rotation);
+        // A script-set facing turns the model's geometry (L4). It composes
+        // with the grid's rotation rather than replacing it: a tank parked
+        // on a listing hull points where it was told to, in the hull's
+        // frame, exactly as a crew member does.
+        //
+        // ANY recorded facing routes here, including zero. Skipping the
+        // identity looks like a free optimisation and is a freeze: a
+        // recorded facing already made this a dynamic-layer map, so the
+        // static set is uploaded once, and an instance left on the static
+        // path stops moving. The desert's vehicle drives due +x with
+        // heading 0 until it reaches the map edge, so it sat still on
+        // screen while the simulation drove it across the dunes.
+        let facing = self.entity_yaw.get(&e).copied().map(|y| {
+            // World yaw, not sim yaw: `world_of` mirrors X, so a sim
+            // heading reads as `PI - yaw` on screen (`facing_to_world_yaw`).
+            DQuat::from_rotation_z(facing_to_world_yaw(y))
+        });
+        let rot = match (grid_rot, facing) {
+            (Some(g), Some(f)) => Some(g * f),
+            (Some(g), None) => Some(g),
+            (None, f) => f,
+        };
         if let (true, Some(rot)) = (self.dynamic_layer(), rot) {
             self.prop_targets.push((si, w, rot, drop));
         } else {
@@ -2694,7 +2722,11 @@ impl MapRender {
     /// it uploads its static sprite set exactly once and mirrors the
     /// selection markers through the dynamic path instead.
     fn dynamic_layer(&self) -> bool {
-        !self.actors.is_empty() || !self.characters.is_empty()
+        // A turned plain model joins actors and characters here: it has to
+        // be a POSED instance rather than a positional one, and the posed
+        // layer is what `set_sprites` resets — so the static set must be
+        // uploaded once instead of rebuilt per frame.
+        !self.actors.is_empty() || !self.characters.is_empty() || !self.entity_yaw.is_empty()
     }
 
     /// Draw this map: upload its sprites and render its scene, lit by the
@@ -3370,6 +3402,13 @@ impl HostBridge for MapRender {
         if let Some(inst) = self.entity_chars.get_mut(&e) {
             inst.facing = yaw.to_f64();
         }
+        // A plain KV6 model turns its GEOMETRY (decision L4 of
+        // docs/plans/desert-game.md): a tank hull is a voxel solid, not a
+        // card, so there is no pre-drawn side to pick — the model itself
+        // yaws in the world. Recorded for every entity, because whether
+        // the binding is a sprite, an actor or a character is not settled
+        // until `build_instances` walks it.
+        self.entity_yaw.insert(e, yaw.to_f64());
     }
 
     fn entity_set_tint(&mut self, entity: i64, tint: i64) {
@@ -5022,6 +5061,105 @@ mod tests {
                 .length()
                 < 1e-12,
             "-1 puts the camera back in the world frame"
+        );
+    }
+
+    /// A plain KV6 model with a script-set facing must turn its GEOMETRY
+    /// (decision L4 of docs/plans/desert-game.md).
+    ///
+    /// A billboard actor answers a facing by picking one of eight
+    /// pre-drawn sides; a voxel hull has no sides to pick, so the model
+    /// itself has to yaw — which means leaving the positional instance
+    /// path for the posed one. Before this, `entity_set_facing` on a
+    /// `model_kv6` / `model_box` binding was silently dropped: the tank
+    /// drove sideways and nothing in the engine complained.
+    ///
+    /// Asserts the routing and the basis, which is what a headless test
+    /// can reach; the pixels still want an eye on them.
+    #[test]
+    fn a_faced_model_turns_its_geometry() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let hull = r.model_box(24, 16, 10, 0x80a8_b48c);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["heading"]);
+        let tank = world.spawn(arch);
+        world.set_position(
+            tank,
+            FixedVec3::new(Fixed::from_int(10), Fixed::from_int(10), Fixed::ZERO),
+        );
+        r.entity_set_model(tank.0 as i64, hull);
+
+        // Unturned: nothing dynamic in the map, so the cheap static path.
+        r.build_instances(&world);
+        assert_eq!(r.prop_targets.len(), 0);
+        assert_eq!(r.sprites.instances.len(), 1, "placed, not posed");
+
+        // A quarter turn to sim +y. The map is now a dynamic-layer map,
+        // because a posed instance is the only way to express it.
+        r.entity_set_facing(tank.0 as i64, Fixed::from_f64(std::f64::consts::FRAC_PI_2));
+        r.build_instances(&world);
+        assert_eq!(r.prop_targets.len(), 1, "a faced model is posed");
+        assert!(
+            r.sprites.instances.is_empty(),
+            "…and leaves the static path, or it would be drawn twice"
+        );
+
+        // The basis must be the WORLD yaw: `world_of` mirrors X, so a sim
+        // heading reads as `PI - yaw` on screen. Getting this backwards
+        // is a tank that turns the wrong way — visible, but only to an
+        // eye that knows which way it asked for.
+        let (_, _, rot, _) = r.prop_targets[0];
+        let nose = rot * DVec3::X;
+        let want = DQuat::from_rotation_z(facing_to_world_yaw(std::f64::consts::FRAC_PI_2))
+            * DVec3::X;
+        assert!(
+            (nose - want).length() < 1e-9,
+            "the hull points at {nose:?}, expected {want:?}"
+        );
+    }
+
+    /// A facing of ZERO must be posed like any other — the regression the
+    /// first live run of the desert caught.
+    ///
+    /// Recording a facing is what makes a map dynamic-layer, and a
+    /// dynamic-layer map uploads its static sprite set exactly once. So
+    /// treating the identity rotation as "nothing to do" and leaving the
+    /// instance on the static path does not skip work, it *freezes the
+    /// model*: the desert's vehicle drives due +x on heading 0 until it
+    /// reaches the map edge, and it sat perfectly still on screen while
+    /// the simulation drove it across the dunes. Headless tests all
+    /// passed, because the world was moving exactly as asked.
+    #[test]
+    fn a_facing_of_zero_is_still_posed() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let hull = r.model_box(24, 16, 10, 0x80a8_b48c);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["heading"]);
+        let tank = world.spawn(arch);
+        world.set_position(tank, FixedVec3::new(Fixed::from_int(3), Fixed::ZERO, Fixed::ZERO));
+        r.entity_set_model(tank.0 as i64, hull);
+        r.entity_set_facing(tank.0 as i64, Fixed::ZERO);
+
+        r.build_instances(&world);
+        assert_eq!(
+            r.prop_targets.len(),
+            1,
+            "a zero facing is a facing: the model must be posed, not left \
+             on the static path this map no longer rebuilds"
+        );
+        assert!(r.sprites.instances.is_empty());
+
+        // …and it must follow the entity, which is the property the freeze
+        // actually broke.
+        world.set_position(tank, FixedVec3::new(Fixed::from_int(9), Fixed::ZERO, Fixed::ZERO));
+        r.build_instances(&world);
+        let (_, seat, _, _) = r.prop_targets[0];
+        assert!(
+            (seat.x - world_of(FixedVec3::new(Fixed::from_int(9), Fixed::ZERO, Fixed::ZERO)).x)
+                .abs()
+                < 1e-9,
+            "the posed instance did not follow the entity"
         );
     }
 
