@@ -3,6 +3,7 @@ members = [
     "crates/monada-fixed",
     "crates/monada-nav",
     "crates/monada-sim",
+    "crates/monada-runtime",
     "crates/monada-script",
     "crates/monada-net",
     "crates/monada-render",
@@ -51,6 +52,7 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 monada-fixed = { path = "crates/monada-fixed", version = "0.0.1" }
 monada-nav = { path = "crates/monada-nav", version = "0.0.1" }
 monada-sim = { path = "crates/monada-sim", version = "0.0.1" }
+monada-runtime = { path = "crates/monada-runtime", version = "0.0.1" }
 monada-script = { path = "crates/monada-script", version = "0.0.1" }
 monada-net = { path = "crates/monada-net", version = "0.0.1" }
 monada-render = { path = "crates/monada-render", version = "0.0.1" }

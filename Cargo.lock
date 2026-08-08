@@ -1818,6 +1818,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "monada-runtime"
+version = "0.0.1"
+dependencies = [
+ "monada-fixed",
+ "monada-nav",
+ "monada-physics",
+ "monada-sim",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "monada-script"
 version = "0.0.1"
 dependencies = [
@@ -1825,6 +1837,7 @@ dependencies = [
  "monada-nav",
  "monada-net",
  "monada-physics",
+ "monada-runtime",
  "monada-sim",
  "rhai",
  "serde",

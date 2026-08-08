@@ -10,6 +10,10 @@ readme.workspace = true
 description = "monada scripting runtime (Rhai v0, WASM post-v0) + the host API wall."
 
 [dependencies]
+# The language-neutral runtime: the host-API contracts, the HostBridge
+# seam and the world services this crate registers Rhai verbs over
+# (docs/plans/desert-game.md §3a, decision L7).
+monada-runtime = { workspace = true }
 monada-sim = { workspace = true }
 monada-fixed = { workspace = true }
 # The deterministic grid pathfinder behind `nav_path`/`nav_block`

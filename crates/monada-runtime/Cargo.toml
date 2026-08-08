@@ -1,0 +1,30 @@
+[package]
+name = "monada-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "monada script runtime: the host-API surface, world services, and the backend-agnostic contracts both script runtimes implement."
+
+[dependencies]
+monada-sim = { workspace = true }
+monada-fixed = { workspace = true }
+# The deterministic grid pathfinder behind `nav_path`/`nav_block`
+# (docs/plans/rts-demo.md §1a); VoxelStore implements its NavWorld.
+monada-nav = { workspace = true }
+# Deterministic voxel rigid bodies for `terrain = "volume"` maps: the
+# volume store speaks MaterialId and the physics sim shares its cells
+# (docs/plans/digger-demo.md §1b).
+monada-physics = { workspace = true }
+# Snapshot serialisation for the volume terrain store (format-agnostic,
+# like monada-sim's World).
+serde = { workspace = true }
+
+[dev-dependencies]
+# Snapshot round-trip test only; production stays format-agnostic.
+serde_json = "1"
+
+[lints]
+workspace = true
