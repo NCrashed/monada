@@ -21,6 +21,10 @@ monada-physics = { workspace = true }
 # Snapshot serialisation for the volume terrain store (format-agnostic,
 # like monada-sim's World).
 serde = { workspace = true }
+# Snapshot encoding — the same compact binary format the lockstep wire
+# already speaks (monada-net), so a save and a packet agree on how a
+# fixed-point world serialises.
+postcard = { version = "1", features = ["use-std"] }
 
 [dev-dependencies]
 # Snapshot round-trip test only; production stays format-agnostic.

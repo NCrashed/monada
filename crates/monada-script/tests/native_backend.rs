@@ -124,6 +124,195 @@ fn a_native_map_advances_the_tick_counter_like_the_script() {
     assert_eq!(world.lock().expect("world mutex").tick, 5);
 }
 
+/// Snapshot equivalence — the strongest determinism test in the repo
+/// (docs/plans/desert-game.md §3d), and the reason saved games are worth
+/// building this way.
+///
+/// Run N ticks, save, restore into a *fresh* world and backend, run M
+/// more: the result must equal an uninterrupted N+M run, bit for bit.
+/// Anything the engine keeps outside the snapshot — a cached derivation,
+/// an RNG stream position, a counter living in the wrong place — shows up
+/// here as a mismatch, which is exactly the class of bug that desyncs a
+/// lockstep match at hour two rather than at minute one.
+#[test]
+fn a_restored_run_matches_an_uninterrupted_one() {
+    const SEED: u64 = 7;
+    for (n, m) in [(1_u64, 1_u64), (40, 60), (13, 7)] {
+        let uninterrupted = run_native(SEED, n + m);
+
+        let world = shared_world(SEED);
+        let mut backend = NativeBackend::new(world.clone(), Box::new(WalkCircle::default()));
+        backend.on_init().expect("init");
+        for _ in 0..n {
+            backend.on_tick().expect("tick");
+        }
+        let save = backend.snapshot().expect("snapshot");
+
+        // A fresh everything, as a new process would have.
+        let world = shared_world(SEED);
+        let mut resumed = NativeBackend::new(world.clone(), Box::new(WalkCircle::default()));
+        resumed.on_init().expect("init");
+        resumed.restore(&save).expect("restore");
+        for _ in 0..m {
+            resumed.on_tick().expect("tick");
+        }
+
+        assert_eq!(
+            uninterrupted,
+            world.lock().expect("world mutex").state_hash(),
+            "resuming after {n} ticks and running {m} more diverged from a \
+             straight {} tick run",
+            n + m
+        );
+    }
+}
+
+/// The same equivalence for a map that draws from the shared RNG **every
+/// tick**. `walk_circle` only rolls during `init`, so on its own it would
+/// pass even if a snapshot dropped the generator's position entirely —
+/// the exact omission that makes a resumed match desync a few minutes
+/// later, once the two peers' streams have drifted apart.
+#[test]
+fn a_restored_run_keeps_the_rng_stream_position() {
+    /// Ten entities, each re-rolled every tick: the world's hash then
+    /// depends on where in the stream the generator stands.
+    #[derive(Default)]
+    struct RngWalk {
+        kind: Option<ArchetypeId>,
+    }
+    impl MapRules for RngWalk {
+        fn init(&mut self, host: &dyn Host) {
+            let a = host.archetype(&["r"]);
+            self.kind = Some(a);
+            for _ in 0..10 {
+                host.entity_create(a);
+            }
+        }
+        fn tick(&mut self, host: &dyn Host, _dt: Fixed) {
+            for e in host.entities() {
+                host.entity_set_field(e, "r", host.rng01());
+            }
+        }
+    }
+
+    let straight = {
+        let world = shared_world(3);
+        let mut b = NativeBackend::new(world.clone(), Box::new(RngWalk::default()));
+        b.on_init().expect("init");
+        for _ in 0..25 {
+            b.on_tick().expect("tick");
+        }
+        let h = world.lock().expect("world mutex").state_hash();
+        h
+    };
+
+    let world = shared_world(3);
+    let mut b = NativeBackend::new(world, Box::new(RngWalk::default()));
+    b.on_init().expect("init");
+    for _ in 0..10 {
+        b.on_tick().expect("tick");
+    }
+    let save = b.snapshot().expect("snapshot");
+
+    let world = shared_world(3);
+    let mut resumed = NativeBackend::new(world.clone(), Box::new(RngWalk::default()));
+    resumed.on_init().expect("init");
+    resumed.restore(&save).expect("restore");
+    for _ in 0..15 {
+        resumed.on_tick().expect("tick");
+    }
+    assert_eq!(
+        straight,
+        world.lock().expect("world mutex").state_hash(),
+        "the resumed run drew different randomness — the snapshot lost the \
+         generator's position"
+    );
+}
+
+/// Restoring must overwrite what `init` produced rather than adding to
+/// it: the RNG has been advanced 300 draws by the fresh `init`, and the
+/// world holds 100 entities that the snapshot's own 100 must replace.
+#[test]
+fn a_restore_replaces_the_world_it_lands_in() {
+    let world = shared_world(1);
+    let mut backend = NativeBackend::new(world.clone(), Box::new(WalkCircle::default()));
+    backend.on_init().expect("init");
+    for _ in 0..5 {
+        backend.on_tick().expect("tick");
+    }
+    let save = backend.snapshot().expect("snapshot");
+
+    // Land it in a world seeded differently and already ticked further.
+    let other = shared_world(99);
+    let mut backend = NativeBackend::new(other.clone(), Box::new(WalkCircle::default()));
+    backend.on_init().expect("init");
+    for _ in 0..50 {
+        backend.on_tick().expect("tick");
+    }
+    backend.restore(&save).expect("restore");
+
+    assert_eq!(
+        world.lock().expect("world mutex").state_hash(),
+        other.lock().expect("world mutex").state_hash(),
+        "a restored world must equal the saved one, whatever it replaced"
+    );
+    assert_eq!(other.lock().expect("world mutex").tick, 5);
+}
+
+/// A rules value with state of its own must get it back — the shape the
+/// desert game needs, where the spice field and the AI's memory live in
+/// the rules rather than in entities (§3c).
+#[test]
+fn rules_state_survives_a_round_trip() {
+    #[derive(Default)]
+    struct Counting {
+        ticks: u32,
+    }
+    impl MapRules for Counting {
+        fn init(&mut self, _host: &dyn Host) {}
+        fn tick(&mut self, _host: &dyn Host, _dt: Fixed) {
+            self.ticks += 1;
+        }
+        fn snapshot(&self) -> Vec<u8> {
+            self.ticks.to_le_bytes().to_vec()
+        }
+        fn restore(&mut self, bytes: &[u8]) {
+            self.ticks = u32::from_le_bytes(bytes.try_into().expect("four bytes"));
+        }
+    }
+
+    let world = shared_world(1);
+    let mut backend = NativeBackend::new(world, Box::new(Counting::default()));
+    backend.on_init().expect("init");
+    for _ in 0..9 {
+        backend.on_tick().expect("tick");
+    }
+    let save = backend.snapshot().expect("snapshot");
+
+    let world = shared_world(1);
+    let mut resumed = NativeBackend::new(world, Box::new(Counting::default()));
+    resumed.on_init().expect("init");
+    resumed.restore(&save).expect("restore");
+    resumed.on_tick().expect("tick");
+    assert_eq!(
+        resumed.rules().snapshot(),
+        10_u32.to_le_bytes().to_vec(),
+        "the rules' own counter should resume at 9, not restart at 0"
+    );
+}
+
+#[test]
+fn a_foreign_blob_is_refused_rather_than_misread() {
+    let world = shared_world(1);
+    let mut backend = NativeBackend::new(world, Box::new(WalkCircle::default()));
+    backend.on_init().expect("init");
+    assert!(backend.restore(b"not a snapshot").is_err());
+    // A truncated tail of a real save is the nastier case: it decodes far
+    // enough to look plausible.
+    let save = backend.snapshot().expect("snapshot");
+    assert!(backend.restore(&save[..save.len() / 2]).is_err());
+}
+
 #[test]
 fn commands_reach_the_rules() {
     #[derive(Default)]

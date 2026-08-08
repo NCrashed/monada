@@ -25,10 +25,12 @@ use monada_sim::{Command, PlayerId, World};
 
 mod host;
 mod native;
+mod snapshot;
 mod volume;
 
 pub use host::{Host, LocalHost, RuntimeHost, WorldRead};
 pub use native::{LocalRules, MapRules, NativeBackend, NativeLocalBackend};
+pub use snapshot::SNAPSHOT_VERSION;
 // Re-exported because it is part of VolumeStore's own API surface
 // (`set`/`fill`/`get` speak MaterialId) — consumers of the store should
 // not need a direct monada-physics edge for the id newtype.
@@ -1130,6 +1132,11 @@ pub struct UiEvent {
 pub enum ScriptError {
     Compile(String),
     Run(String),
+    /// A saved game could not be written or read — a corrupt blob, or one
+    /// from a build whose [`SNAPSHOT_VERSION`] differs. Distinct from
+    /// [`Run`](ScriptError::Run) because nothing about the running map is
+    /// wrong: the *file* is.
+    Snapshot(String),
 }
 
 impl fmt::Display for ScriptError {
@@ -1137,6 +1144,7 @@ impl fmt::Display for ScriptError {
         match self {
             ScriptError::Compile(m) => write!(f, "script compile error: {m}"),
             ScriptError::Run(m) => write!(f, "script run error: {m}"),
+            ScriptError::Snapshot(m) => write!(f, "snapshot error: {m}"),
         }
     }
 }

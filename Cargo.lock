@@ -1826,6 +1826,7 @@ dependencies = [
  "monada-nav",
  "monada-physics",
  "monada-sim",
+ "postcard",
  "serde",
  "serde_json",
 ]

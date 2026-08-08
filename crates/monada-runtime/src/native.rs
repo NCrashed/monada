@@ -117,6 +117,42 @@ impl NativeBackend {
     pub fn rules(&self) -> &dyn MapRules {
         self.rules.as_ref()
     }
+
+    /// A canonical byte image of everything a tick changes: the world and
+    /// the rules' own state (`docs/plans/desert-game.md` §3d). Pairs with
+    /// [`restore`](NativeBackend::restore).
+    ///
+    /// # Errors
+    /// [`ScriptError::Snapshot`] if the state cannot be encoded.
+    ///
+    /// # Panics
+    /// If the world mutex is poisoned — a peer that already crashed
+    /// mid-tick has nothing worth saving.
+    pub fn snapshot(&self) -> Result<Vec<u8>, ScriptError> {
+        let world = self.world.lock().expect("world mutex");
+        crate::snapshot::encode(&world, self.rules.snapshot()).map_err(ScriptError::Snapshot)
+    }
+
+    /// Replace the live state with a snapshot's.
+    ///
+    /// The map must already be loaded and its `init` run — the snapshot
+    /// carries what a tick changes, not what a map builds (models, terrain
+    /// paint, the HUD), so those come from `init` exactly as they do on a
+    /// fresh start. Whatever `init` spawned is then overwritten, RNG
+    /// position included.
+    ///
+    /// # Errors
+    /// [`ScriptError::Snapshot`] if the bytes are not a snapshot this
+    /// build reads.
+    ///
+    /// # Panics
+    /// If the world mutex is poisoned (see [`snapshot`](NativeBackend::snapshot)).
+    pub fn restore(&mut self, bytes: &[u8]) -> Result<(), ScriptError> {
+        let blob = crate::snapshot::decode(bytes).map_err(ScriptError::Snapshot)?;
+        *self.world.lock().expect("world mutex") = blob.world;
+        self.rules.restore(&blob.rules);
+        Ok(())
+    }
 }
 
 impl ScriptBackend for NativeBackend {
