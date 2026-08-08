@@ -25,7 +25,7 @@
 
 use std::collections::BTreeMap;
 
-use monada_runtime::{Host, MaterialId};
+use monada_runtime::{Host, MaterialId, WorldRead};
 use monada_sim::EntityId;
 
 use crate::economy::{Economy, PlayerNo, Structure};
@@ -302,6 +302,11 @@ impl Yards {
 
     /// Can `who` put a `kind` with its lower corner at `at`?
     ///
+    /// The terrain half of this is [`grade`], which the placement ghost
+    /// calls too — a preview that judged a site by its own rules would
+    /// eventually disagree with the answer, and disagreeing with your own
+    /// preview is worse than having none.
+    ///
     /// # Errors
     /// A [`Refusal`] naming what is wrong with the site.
     pub fn survey(
@@ -314,37 +319,14 @@ impl Yards {
         let bp = blueprint(kind).ok_or(Refusal::NoGround)?;
         let span = bp.span;
 
-        let mut lowest = i64::MAX;
-        let mut highest = i64::MIN;
-        let mut firm = true;
         for y in at.1..(at.1 + span) {
             for x in at.0..(at.0 + span) {
                 if self.occupied(x, y) {
                     return Err(Refusal::Occupied);
                 }
-                let (top, mat) = host.volume_top(x, y).ok_or(Refusal::NoGround)?;
-                lowest = lowest.min(top);
-                highest = highest.max(top);
-                firm &= bears(mat);
             }
         }
-        if highest - lowest > MAX_GRADE {
-            return Err(Refusal::TooSteep);
-        }
-
-        // Clearance is checked against the graded pad, not the ground as
-        // it is: the builders are about to fill the low corners up to
-        // `highest`, so what matters is what is above THAT.
-        let pad_z = highest;
-        for y in at.1..(at.1 + span) {
-            for x in at.0..(at.0 + span) {
-                for z in (pad_z + 1)..=(pad_z + BUILD_CLEARANCE) {
-                    if host.volume_material(x, y, z).is_some() {
-                        return Err(Refusal::Obstructed);
-                    }
-                }
-            }
-        }
+        let (pad_z, firm) = grade(host, at, span)?;
 
         if bp.adjacent && !self.connected(who, at, span) {
             return Err(Refusal::Unconnected);
@@ -517,6 +499,53 @@ impl Yards {
     }
 }
 
+/// The terrain's verdict on a footprint: the level its pad would be
+/// graded to, and whether the ground under it will bear a building.
+///
+/// Split out of [`Yards::survey`] because the placement ghost has to ask
+/// the same question from the local layer, where the structure table is
+/// not visible. A preview judging a site by its own copy of these rules
+/// would drift from the answer eventually — and disagreeing with your
+/// own preview is worse than not having one.
+///
+/// Takes a [`WorldRead`], not a [`Host`]: this reads the ground, it does
+/// not touch it.
+///
+/// # Errors
+/// [`Refusal::NoGround`] over a hole, [`Refusal::TooSteep`] past
+/// [`MAX_GRADE`] of relief, [`Refusal::Obstructed`] if anything is
+/// standing in the clearance above the pad.
+pub fn grade(host: &dyn WorldRead, at: (i64, i64), span: i64) -> Result<(i64, bool), Refusal> {
+    let mut lowest = i64::MAX;
+    let mut highest = i64::MIN;
+    let mut firm = true;
+    for y in at.1..(at.1 + span) {
+        for x in at.0..(at.0 + span) {
+            let (top, mat) = host.volume_top(x, y).ok_or(Refusal::NoGround)?;
+            lowest = lowest.min(top);
+            highest = highest.max(top);
+            firm &= bears(mat);
+        }
+    }
+    if highest - lowest > MAX_GRADE {
+        return Err(Refusal::TooSteep);
+    }
+    // Clearance is checked against the GRADED pad, not the ground as it
+    // is: the builders are about to fill the low corners up to `highest`,
+    // so what matters is what stands above that.
+    let pad_z = highest;
+    for y in at.1..(at.1 + span) {
+        for x in at.0..(at.0 + span) {
+            for z in (pad_z + 1)..=(pad_z + BUILD_CLEARANCE) {
+                if host.volume_material(x, y, z).is_some() {
+                    return Err(Refusal::Obstructed);
+                }
+            }
+        }
+    }
+    Ok((pad_z, firm))
+}
+
 /// Whether a material will hold a building up (§6a, §6c).
 #[must_use]
 pub fn bears(mat: MaterialId) -> bool {
@@ -532,7 +561,7 @@ pub fn bears(mat: MaterialId) -> bool {
 pub const EXPOSURE_STANDOFF: i64 = 8;
 
 /// Where the pad sits relative to the ground at standoff distance (§7).
-fn exposure(host: &dyn Host, at: (i64, i64), span: i64, pad_z: i64) -> Exposure {
+fn exposure(host: &dyn WorldRead, at: (i64, i64), span: i64, pad_z: i64) -> Exposure {
     let (lo, hi) = (
         (at.0 - EXPOSURE_STANDOFF, at.1 - EXPOSURE_STANDOFF),
         (

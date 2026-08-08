@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use monada_runtime::{
     shared_physics, shared_world, Host, MapRules, MaterialId, NativeBackend, NullBridge,
-    ScriptBackend, SharedBridge, SharedPhysics, VolumeLimits,
+    ScriptBackend, SharedBridge, SharedPhysics, VolumeLimits, WorldRead,
 };
 
 use monada_desert_rules::terraform::{Terraform, Work, CELLS_PER_TICK};

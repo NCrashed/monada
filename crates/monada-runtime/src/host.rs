@@ -56,6 +56,58 @@ pub trait WorldRead {
     /// what a map may walk on does not depend on whether this peer draws.
     fn terrain(&self) -> Option<&SharedTerrain>;
 
+    /// The volume terrain + physics state, when the map has any.
+    ///
+    /// A **read** available to both layers, for the same reason the
+    /// column queries below are: the cursor has to resolve against the
+    /// same ground the simulation walks on, or a placement preview shows
+    /// the player one thing and the sim does another. The verbs that
+    /// *change* it stay on [`Host`].
+    fn volume(&self) -> Option<&SharedPhysics> {
+        None
+    }
+
+    /// Whether the volume store holds a solid cell — the deterministic
+    /// terrain read on a volume map, where the column `voxel_solid`
+    /// answers an empty world by design.
+    fn volume_solid(&self, x: i64, y: i64, z: i64) -> bool {
+        self.volume().is_some_and(|p| {
+            p.lock()
+                .expect("physics mutex")
+                .terrain
+                .get(x, y, z)
+                .is_some()
+        })
+    }
+
+    /// What a cell is *made of*, or `None` for air.
+    ///
+    /// The solidity read answers "is there ground"; this answers "whose
+    /// ground" — which is the question the transmutative verbs are built
+    /// on (§6c): a Binder sinters an enemy's packed fill and leaves raw
+    /// sand alone, and a Dweller's spoil has to be the material that came
+    /// out of the hole.
+    fn volume_material(&self, x: i64, y: i64, z: i64) -> Option<MaterialId> {
+        self.volume()
+            .and_then(|p| p.lock().expect("physics mutex").terrain.get(x, y, z))
+    }
+
+    /// The topmost solid cell of a column and its material.
+    ///
+    /// One call for what the rules would otherwise ask sixty-four times
+    /// scanning down from the sky — and the store answers it by walking
+    /// its own chunks, so the cost is the column's height rather than the
+    /// world's.
+    fn volume_top(&self, x: i64, y: i64) -> Option<(i64, MaterialId)> {
+        self.volume().and_then(|p| {
+            p.lock()
+                .expect("physics mutex")
+                .terrain
+                .column_top(x, y)
+                .map(|(z, mat)| (z, MaterialId(mat)))
+        })
+    }
+
     // --- collision queries -----------------------------------------------
     //
     // Deterministic reads over the terrain the map painted: a pure
@@ -214,6 +266,40 @@ pub trait WorldRead {
         }
     }
 
+    // --- overlay geometry -------------------------------------------------
+    //
+    // A grid of the map's own, painted and repainted freely, for things
+    // that are *shown* rather than simulated: a placement ghost, a range
+    // ring, a rally marker. Real geometry rather than HUD pixels, because
+    // an RTS's "where will this go" has to sit on the ground in three
+    // dimensions — a coordinate readout is not an answer.
+    //
+    // Cubic cells (`grid_spawn_cubic`) so an overlay lines up with a
+    // volume map's isotropic ground. Nothing here touches hashed state;
+    // on a headless peer it is all no-ops.
+
+    /// Make an overlay grid whose cells are cubes, returning its id.
+    fn grid_overlay(&self) -> i64 {
+        self.bridge()
+            .map_or(-1, |b| b.lock().expect("bridge mutex").grid_spawn_cubic(0, 0, 0))
+    }
+
+    /// Paint a box into an overlay grid.
+    fn overlay_fill(&self, grid: i64, lo: (i64, i64, i64), hi: (i64, i64, i64), color: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .voxel_fill_in(grid, lo.0, lo.1, lo.2, hi.0, hi.1, hi.2, color);
+        }
+    }
+
+    /// Rub one cell out of an overlay grid.
+    fn overlay_clear(&self, grid: i64, x: i64, y: i64, z: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").voxel_clear_in(grid, x, y, z);
+        }
+    }
+
     /// Draw a clickable button from three textures (idle, hover,
     /// pressed); its `bit` comes back through
     /// [`ui_clicks`](LocalHost::ui_clicks).
@@ -316,11 +402,6 @@ pub trait Host: WorldRead {
     // `None` when the map declared no volume terrain, which is what makes
     // calling these on a column map a quiet no-op rather than a panic.
 
-    /// The volume terrain + physics state, when the map has any.
-    fn volume(&self) -> Option<&SharedPhysics> {
-        None
-    }
-
     /// Fill a solid box in the volume store with `material`, and paint it
     /// on screen.
     fn volume_fill(
@@ -359,47 +440,6 @@ pub trait Host: WorldRead {
         if let Some(b) = self.bridge() {
             b.lock().expect("bridge mutex").voxel_clear(x, y, z);
         }
-    }
-
-    /// Whether the volume store holds a solid cell — the deterministic
-    /// terrain read on a volume map, where the column `voxel_solid`
-    /// answers an empty world by design.
-    fn volume_solid(&self, x: i64, y: i64, z: i64) -> bool {
-        self.volume().is_some_and(|p| {
-            p.lock()
-                .expect("physics mutex")
-                .terrain
-                .get(x, y, z)
-                .is_some()
-        })
-    }
-
-    /// What a cell is *made of*, or `None` for air.
-    ///
-    /// The solidity read above answers "is there ground"; this answers
-    /// "whose ground" — which is the question the transmutative verbs are
-    /// built on (§6c): a Binder sinters an enemy's packed fill and leaves
-    /// raw sand alone, and a Dweller's spoil has to be the material that
-    /// came out of the hole.
-    fn volume_material(&self, x: i64, y: i64, z: i64) -> Option<MaterialId> {
-        self.volume()
-            .and_then(|p| p.lock().expect("physics mutex").terrain.get(x, y, z))
-    }
-
-    /// The topmost solid cell of a column and its material.
-    ///
-    /// One call for what the rules would otherwise ask sixty-four times
-    /// scanning down from the sky — and the store answers it by walking
-    /// its own chunks, so the cost is the column's height rather than the
-    /// world's.
-    fn volume_top(&self, x: i64, y: i64) -> Option<(i64, MaterialId)> {
-        self.volume().and_then(|p| {
-            p.lock()
-                .expect("physics mutex")
-                .terrain
-                .column_top(x, y)
-                .map(|(z, mat)| (z, MaterialId(mat)))
-        })
     }
 
     // --- granular terrain -------------------------------------------------
@@ -745,13 +785,13 @@ impl WorldRead for RuntimeHost {
     fn terrain(&self) -> Option<&SharedTerrain> {
         Some(&self.terrain)
     }
-}
 
-impl Host for RuntimeHost {
     fn volume(&self) -> Option<&SharedPhysics> {
         self.volume.as_ref()
     }
+}
 
+impl Host for RuntimeHost {
     fn nav(&self) -> Option<&SharedNav> {
         self.nav.as_ref()
     }

@@ -12,12 +12,12 @@ use std::sync::{Arc, Mutex};
 
 use monada_runtime::{
     shared_physics, shared_world, Host, MapRules, NativeBackend, NullBridge, ScriptBackend,
-    SharedBridge,
+    SharedBridge, WorldRead,
 };
 use monada_sim::EntityId;
 
 use monada_desert_rules::build::{
-    bears, blueprint, Exposure, Refusal, Yards, ADJACENCY, MAX_GRADE,
+    bears, blueprint, grade, Exposure, Refusal, Yards, ADJACENCY, MAX_GRADE,
 };
 use monada_desert_rules::economy::Economy;
 use monada_desert_rules::{material, Structure, SAND_REPOSE};
@@ -257,6 +257,47 @@ fn a_pad_is_graded_flat_and_the_navigation_hears_about_it() {
             let (top, mat) = host.volume_top(x, y).expect("pad column");
             assert_eq!(top, GROUND + RELIEF, "({x}, {y}) is not level");
             assert!(bears(mat), "({x}, {y}) is not bearing material");
+        }
+    }
+}
+
+#[test]
+fn the_placement_ghost_cannot_disagree_with_the_answer() {
+    // The preview is drawn by the LOCAL layer, which cannot see the
+    // structure table — so it judges the terrain with `grade`, the same
+    // function `survey` uses for the terrain half. Two copies of these
+    // rules would drift, and a preview that disagrees with the answer is
+    // worse than no preview: the player learns to distrust it.
+    let backend = ground();
+    let host = backend.host();
+    let mut yards = Yards::new();
+    let site = yards.survey(host, 0, Structure::Yard, PLATEAU).expect("pad");
+    yards.raise(host, 0, Structure::Yard, site, EntityId(1));
+
+    for y in (4..SIZE - 10).step_by(7) {
+        for x in (4..SIZE - 10).step_by(9) {
+            let terrain = grade(host, (x, y), 8);
+            match yards.survey(host, 0, Structure::Refinery, (x, y)) {
+                Ok(site) => {
+                    // Where the sim accepts, the ghost must agree about
+                    // the pad it drew and the ground under it.
+                    assert_eq!(
+                        terrain,
+                        Ok((site.pad_z, site.firm)),
+                        "({x}, {y}): the ghost drew a different pad"
+                    );
+                }
+                Err(Refusal::Occupied | Refusal::Unconnected) => {
+                    // The sim knows things the ghost cannot; the ghost is
+                    // allowed to show a pad the sim then refuses, and it
+                    // says why.
+                }
+                Err(why) => assert_eq!(
+                    terrain.map(|_| ()),
+                    Err(why),
+                    "({x}, {y}): the sim refused for a terrain reason the ghost missed"
+                ),
+            }
         }
     }
 }

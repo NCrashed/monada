@@ -18,7 +18,7 @@ use monada_desert_rules::gen::{BEDROCK_Z, SKY_Z};
 use monada_desert_rules::{material, DesertRules, INFANTRY, MAP_CELLS, VEHICLE};
 use monada_runtime::{
     shared_physics, shared_world, Host, NativeBackend, NullBridge, ScriptBackend, SharedBridge,
-    VolumeLimits,
+    VolumeLimits, WorldRead,
 };
 
 fn limits() -> VolumeLimits {

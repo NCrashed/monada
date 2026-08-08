@@ -59,6 +59,30 @@ pub mod verb {
     pub const DEPLOY: u32 = 3;
     /// Mend the structure named by `target`.
     pub const REPAIR: u32 = 4;
+    /// Send `target` to `arg` — the right-click order.
+    pub const MOVE: u32 = 5;
+}
+
+/// The fields the simulation publishes for the HUD to read.
+///
+/// A local layer cannot see simulation state and must not model it: a
+/// sidebar that kept its own credit total would be a second, disagreeing
+/// account of the money. So the numbers ride an entity, which both
+/// layers read through the same `entity_field`, and the HUD becomes a
+/// view of the world rather than a parallel copy of it.
+pub mod dash {
+    /// Marks the entity that carries the rest. Scanned for by value
+    /// rather than by archetype, because looking an archetype up is the
+    /// simulation's business.
+    pub const MARK: &str = "hud";
+    pub const CREDITS: &str = "credits";
+    pub const CAPACITY: &str = "capacity";
+    pub const MADE: &str = "made";
+    pub const USED: &str = "used";
+    /// The catalogue index waiting to be placed, or `-1`.
+    pub const READY: &str = "ready";
+    /// Percent complete of whatever is on the line, or `-1`.
+    pub const PROGRESS: &str = "progress";
 }
 
 /// The catalogue index a command carries, back to a kind.
@@ -205,6 +229,17 @@ pub struct DesertRules {
     fleet: Fleet,
     /// Which corner the D-1 patrol vehicle is currently crossing to.
     patrol_goal: Option<(i64, i64)>,
+    /// Where each player-ordered mover is headed, if anywhere.
+    orders: BTreeMap<EntityId, (i64, i64)>,
+    /// The entity whose fields carry this player's numbers to the HUD.
+    ///
+    /// **A local layer cannot read simulation state**, and must not: a
+    /// sidebar that computed its own credit total would be a second,
+    /// disagreeing account of the money. So the simulation *publishes* —
+    /// onto entity fields, which both layers read through the same
+    /// `entity_field` — and the HUD is a view of the world rather than a
+    /// parallel model of it.
+    dash: Option<EntityId>,
     /// The last tick's terraform charge and harvest, for the HUD to show
     /// and a test to assert on. Derived, not state: recomputed each tick.
     spent: Spent,
@@ -236,6 +271,8 @@ impl DesertRules {
             mcvs: BTreeMap::new(),
             fleet: Fleet::new(),
             patrol_goal: None,
+            orders: BTreeMap::new(),
+            dash: None,
             spent: Spent::default(),
             harvested: Yield::default(),
             vehicle_kind: None,
@@ -385,6 +422,23 @@ impl MapRules for DesertRules {
         host.entity_set_field(vehicle, "heading", Fixed::ZERO);
         host.entity_set_position(vehicle, Self::seat(host, sx, sy));
 
+        // The dashboard: an entity that carries this player's numbers to
+        // the HUD. No model, so it never draws; parked under the base so
+        // nothing that scans by position trips over it at the origin.
+        let board = host.archetype(&[
+            dash::MARK,
+            dash::CREDITS,
+            dash::CAPACITY,
+            dash::MADE,
+            dash::USED,
+            dash::READY,
+            dash::PROGRESS,
+        ]);
+        let board = host.entity_create(board);
+        host.entity_set_field(board, dash::MARK, Fixed::from_int(1));
+        host.entity_set_position(board, Self::seat(host, sx, sy));
+        self.dash = Some(board);
+
         self.found_base(host, 0, (sx + 6, sy + 6));
 
         host.set_light(
@@ -418,6 +472,14 @@ impl MapRules for DesertRules {
             verb::REPAIR => {
                 self.yards.repair(&mut self.economy, command.target, REPAIR_RATE);
             }
+            verb::MOVE => {
+                // A player order overrides whatever the unit was doing,
+                // which for a harvester means it stops working until it
+                // arrives — the classic behaviour, and the reason a
+                // right-click has to clear the retained route too.
+                self.orders.insert(command.target, at);
+                self.router.forget(command.target);
+            }
             _ => {}
         }
     }
@@ -448,6 +510,7 @@ impl MapRules for DesertRules {
             VEHICLE,
         );
         self.economy.end_tick();
+        self.march(host);
         self.report(host);
 
         let Some(kind) = self.vehicle_kind else {
@@ -477,18 +540,20 @@ impl MapRules for DesertRules {
             &self.economy,
             &self.yards,
             &self.mcvs,
+            &self.orders,
             &self.fleet,
         ))
         .unwrap_or_default()
     }
 
     fn restore(&mut self, bytes: &[u8]) {
-        if let Ok((router, terraform, economy, yards, mcvs, fleet)) = postcard::from_bytes(bytes) {
+        if let Ok((router, terraform, economy, yards, mcvs, orders, fleet)) = postcard::from_bytes(bytes) {
             self.router = router;
             self.terraform = terraform;
             self.economy = economy;
             self.yards = yards;
             self.mcvs = mcvs;
+            self.orders = orders;
             self.fleet = fleet;
         }
     }
@@ -636,6 +701,21 @@ impl DesertRules {
         e
     }
 
+    /// Walk everything a player has ordered somewhere, and forget the
+    /// order once it arrives or proves it cannot.
+    fn march(&mut self, host: &dyn Host) {
+        let going: Vec<(EntityId, (i64, i64))> =
+            self.orders.iter().map(|(&e, &to)| (e, to)).collect();
+        for (unit, to) in going {
+            let step = self
+                .router
+                .step(host, unit, to, VEHICLE, Fixed::from_ratio(1, 6));
+            if step != mover::Step::Moving {
+                self.orders.remove(&unit);
+            }
+        }
+    }
+
     /// The HUD line.
     ///
     /// **The build line's state comes from here, not from the sidebar.**
@@ -667,10 +747,32 @@ impl DesertRules {
         } else {
             "1 wind trap   2 refinery   3 silo".to_string()
         };
+        let (credits, capacity, made, used) = (p.credits, p.capacity, p.made, p.used);
         host.status(&format!(
-            "{} credits / {} — power {}/{} — {line}",
-            p.credits, p.capacity, p.made, p.used
+            "{credits} credits / {capacity} — power {made}/{used} — {line}"
         ));
+
+        // The same numbers onto the dashboard entity, for the sidebar.
+        let Some(dash) = self.dash else {
+            return;
+        };
+        let put = |name: &str, v: u32| {
+            host.entity_set_field(dash, name, Fixed::from_int(i32::try_from(v).unwrap_or(0)));
+        };
+        put(dash::CREDITS, credits);
+        put(dash::CAPACITY, capacity);
+        put(dash::MADE, made);
+        put(dash::USED, used);
+        let ready = queue
+            .and_then(Queue::ready)
+            .and_then(|k| build::CATALOGUE.iter().position(|b| b.kind == k))
+            .map_or(-1, |i| i32::try_from(i).unwrap_or(-1));
+        host.entity_set_field(dash, dash::READY, Fixed::from_int(ready));
+        let progress = queue.and_then(Queue::building).map_or(-1, |(kind, done)| {
+            let total = build::blueprint(kind).map_or(1, |b| b.ticks.max(1));
+            i32::try_from(done * 100 / total).unwrap_or(0)
+        });
+        host.entity_set_field(dash, dash::PROGRESS, Fixed::from_int(progress));
     }
 
     /// D-1's patrol, now on the shared router: cross the map, corner to
@@ -729,7 +831,7 @@ pub struct DesertLocal {
     picked: Option<usize>,
     /// Edge detection for the click and key actions, so a held button is
     /// one order rather than thirty a second.
-    held: [bool; 6],
+    held: [bool; 7],
     /// Where the camera is looking, in sim cells.
     ///
     /// **The camera has to be the player's, not the simulation's.** It
@@ -741,7 +843,27 @@ pub struct DesertLocal {
     look: Option<(Fixed, Fixed)>,
     /// The entity the view is riding, if the player asked for one.
     following: Option<EntityId>,
+    /// The dashboard entity, once found (see [`dash`]).
+    board: Option<EntityId>,
+    /// The overlay grid the placement ghost is painted into, and the
+    /// footprint painted last frame so it can be rubbed out.
+    ghost: Option<i64>,
+    ghost_at: Option<((i64, i64), i64, i64)>,
 }
+
+/// One edge-detection slot per action, so a held key is one order and
+/// two actions never share a latch.
+const SLOT_SELECT: usize = 0;
+const SLOT_ORDER: usize = 1;
+const SLOT_DEPLOY: usize = 2;
+const SLOT_REPAIR: usize = 3;
+const SLOT_BUILD: usize = 4;
+
+/// The placement ghost.s colours: a pad that will be taken, a pad on
+/// ground that will not bear it, and a site the terrain refuses.
+const GHOST_GOOD: i64 = 0x8060_d878;
+const GHOST_POOR: i64 = 0x80d8_c060;
+const GHOST_REFUSED: i64 = 0x80d8_5850;
 
 /// Cells per second the camera pans at, and radians per second it turns.
 const PAN_SPEED: i64 = 40;
@@ -759,9 +881,12 @@ impl Default for DesertLocal {
             dist: Fixed::from_int(700),
             clip: (gen::BEDROCK_Z, gen::SKY_Z),
             picked: None,
-            held: [false; 6],
+            held: [false; 7],
             look: None,
             following: None,
+            board: None,
+            ghost: None,
+            ghost_at: None,
         }
     }
 }
@@ -790,10 +915,12 @@ impl LocalRules for DesertLocal {
         // The build list: a structure is chosen with a number key, then
         // placed with a ground click. Icons and panels are D-11 — what
         // this owes today is a flow a player can actually use.
-        for (slot, (index, id)) in [(1_usize, "build1"), (2, "build2"), (3, "build3")]
-            .into_iter()
-            .enumerate()
-        {
+        //
+        // Every action gets its own edge-detection slot. They shared one
+        // for a moment and the symptom was a select that only worked on
+        // alternate clicks, which is the sort of thing that reads as "the
+        // mouse is broken".
+        for (slot, index, id) in [(SLOT_BUILD, 1_usize, "build1"), (SLOT_BUILD + 1, 2, "build2"), (SLOT_BUILD + 2, 3, "build3")] {
             if self.pressed(host, slot, id) {
                 self.picked = Some(index);
                 host.submit_command(
@@ -808,7 +935,7 @@ impl LocalRules for DesertLocal {
             }
         }
 
-        if self.pressed(host, 0, "select") {
+        if self.pressed(host, SLOT_SELECT, "select") {
             // A click on a unit selects it; a click on bare ground places
             // whatever is waiting. Both, in that order, because clicking
             // your own refinery to place a silo on top of it is not what
@@ -821,17 +948,27 @@ impl LocalRules for DesertLocal {
                 self.picked = None;
             }
         }
-        if self.pressed(host, 4, "deploy") {
+        if self.pressed(host, SLOT_ORDER, "order") {
+            // Right-click: send whatever is selected. The MCV in
+            // particular is useless without this — you cannot choose
+            // where to found a base if you cannot drive there.
+            if let (Some(e), Some(point)) = (host.highlighted(), host.pick_ground()) {
+                host.submit_command(verb::MOVE, e, point);
+            }
+        }
+        if self.pressed(host, SLOT_DEPLOY, "deploy") {
             if let Some(e) = host.highlighted() {
                 host.submit_command(verb::DEPLOY, e, FixedVec3::ZERO);
             }
         }
-        if self.pressed(host, 5, "repair") {
+        if self.pressed(host, SLOT_REPAIR, "repair") {
             if let Some(e) = host.highlighted() {
                 host.submit_command(verb::REPAIR, e, FixedVec3::ZERO);
             }
         }
 
+        self.find_board(host);
+        self.place_ghost(host);
         self.sidebar(host);
     }
 }
@@ -875,8 +1012,11 @@ impl DesertLocal {
             here.1 = here.1.clamp(lo, hi);
         }
         if turn != 0 {
+            // Subtracted, not added: the map is mirrored in x on the way
+            // to the screen, so a yaw that turns the world one way turns
+            // the *picture* the other. E has to swing the view right.
             let spin = TURN_SPEED.0 * i32::try_from(turn).unwrap_or(0);
-            self.yaw += Fixed::from_ratio(spin, TURN_SPEED.1) * dt;
+            self.yaw -= Fixed::from_ratio(spin, TURN_SPEED.1) * dt;
         }
         if zoom != 0 {
             let rate = Fixed::from_int(600) * dt;
@@ -905,20 +1045,139 @@ impl DesertLocal {
         if w == 0 {
             return; // headless, or a host that draws no HUD
         }
+        let board = self.board;
+        let read = |name: &str| board.map_or(0, |e| host.entity_field(e, name).floor_to_int());
+
         host.ui_clear();
-        let x = w - 210;
-        host.ui_text(x, 12, "BUILD", 18);
+        let x = w - 220;
+        // The money first, because it is the number a player looks at
+        // most and the one that decides whether the rest is even worth
+        // reading. Published by the simulation, not computed here.
+        host.ui_text(
+            x,
+            12,
+            &format!("{} / {}", read(dash::CREDITS), read(dash::CAPACITY)),
+            20,
+        );
+        host.ui_text(
+            x,
+            36,
+            &format!("power {} / {}", read(dash::MADE), read(dash::USED)),
+            14,
+        );
+
+        host.ui_text(x, 64, "BUILD", 16);
+        let purse = read(dash::CREDITS);
         for (i, bp) in build::CATALOGUE.iter().enumerate().skip(1) {
-            let y = 34 + i64::try_from(i - 1).unwrap_or(0) * 20;
+            let y = 84 + i64::try_from(i - 1).unwrap_or(0) * 20;
             let mark = if self.picked == Some(i) { ">" } else { " " };
-            host.ui_text(x, y, &format!("{mark}{i}  {}  {}", name_of(bp.kind), bp.cost), 14);
+            let afford = if i64::from(purse) >= i64::from(bp.cost) {
+                ""
+            } else {
+                "  (too dear)"
+            };
+            host.ui_text(
+                x,
+                y,
+                &format!("{mark}{i}  {}  {}{afford}", name_of(bp.kind), bp.cost),
+                14,
+            );
         }
-        // What the build line is doing goes to the status line, which the
-        // SIMULATION writes: it owns the queue, and a HUD that guessed at
-        // its progress from the local side would be a second source of
-        // truth about how far along a refinery is.
-        host.ui_text(x, 132, "WASD pan  QE turn  ZX zoom", 12);
-        host.ui_text(x, 148, "G deploy  R repair", 12);
+
+        let progress = read(dash::PROGRESS);
+        let ready = read(dash::READY);
+        let line = if ready >= 0 {
+            let kind = kind_of(ready).map_or("something", name_of);
+            format!("{kind} READY — click the ground")
+        } else if progress >= 0 {
+            format!("building… {progress}%")
+        } else {
+            String::new()
+        };
+        host.ui_text(x, 150, &line, 14);
+        host.ui_text(x, 176, "WASD pan   QE turn   ZX zoom", 12);
+        host.ui_text(x, 192, "LMB select/place   RMB move", 12);
+        host.ui_text(x, 208, "G deploy   R repair", 12);
+    }
+
+    /// Find the dashboard entity, and remember it.
+    ///
+    /// By its marker field rather than by its archetype: looking an
+    /// archetype up is a simulation-side operation, and the local layer
+    /// has no business doing one. Re-scanned only when the remembered
+    /// entity has gone.
+    fn find_board(&mut self, host: &dyn LocalHost) {
+        let alive = self
+            .board
+            .is_some_and(|e| host.entity_field(e, dash::MARK).floor_to_int() == 1);
+        if alive {
+            return;
+        }
+        self.board = host
+            .entities()
+            .into_iter()
+            .find(|&e| host.entity_field(e, dash::MARK).floor_to_int() == 1);
+    }
+
+    /// Show where the finished structure would go, on the ground.
+    ///
+    /// A coordinate readout is not an answer to "where am I putting
+    /// this": an RTS placement has to sit in the world, at the height the
+    /// pad will be graded to, in a colour that says whether it will be
+    /// accepted. It is painted into an overlay grid of the local layer's
+    /// own — real geometry, on any map, touching nothing hashed.
+    ///
+    /// The terrain half of the verdict comes from the same
+    /// [`build::grade`] the simulation's `survey` uses, so the ghost and
+    /// the answer cannot drift apart. The rest — adjacency, overlap — is
+    /// the simulation's to know, and it says so when it refuses.
+    fn place_ghost(&mut self, host: &dyn LocalHost) {
+        let grid = *self.ghost.get_or_insert_with(|| host.grid_overlay());
+        if grid < 0 {
+            return;
+        }
+        if let Some((at, span, z)) = self.ghost_at.take() {
+            for y in at.1..(at.1 + span) {
+                for x in at.0..(at.0 + span) {
+                    host.overlay_clear(grid, x, y, z);
+                }
+            }
+        }
+
+        let ready = self
+            .board
+            .map(|e| host.entity_field(e, dash::READY).floor_to_int());
+        let Some(kind) = ready.filter(|&r| r >= 0).and_then(kind_of) else {
+            return;
+        };
+        let Some(bp) = build::blueprint(kind) else {
+            return;
+        };
+        let Some(point) = host.pick_ground() else {
+            return;
+        };
+        // The cursor names the middle of the footprint, which is where a
+        // player thinks they are pointing.
+        let at = (
+            i64::from(point.x.floor_to_int()) - bp.span / 2,
+            i64::from(point.y.floor_to_int()) - bp.span / 2,
+        );
+        let (z, color) = match build::grade(host, at, bp.span) {
+            Ok((pad_z, firm)) if firm => (pad_z, GHOST_GOOD),
+            Ok((pad_z, _)) => (pad_z, GHOST_POOR),
+            Err(_) => (
+                host.volume_top(at.0, at.1).map_or(0, |(z, _)| z),
+                GHOST_REFUSED,
+            ),
+        };
+        let z = z + 1;
+        host.overlay_fill(
+            grid,
+            (at.0, at.1, z),
+            (at.0 + bp.span - 1, at.1 + bp.span - 1, z),
+            color,
+        );
+        self.ghost_at = Some((at, bp.span, z));
     }
 }
 

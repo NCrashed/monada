@@ -22,7 +22,7 @@ use monada_desert_rules::terraform::{Terraform, Work, CELLS_PER_TICK};
 use monada_desert_rules::{material, DesertRules, MAP_CELLS, VEHICLE};
 use monada_runtime::{
     shared_physics, shared_world, Host, NativeBackend, NullBridge, ScriptBackend, SharedBridge,
-    VolumeLimits,
+    VolumeLimits, WorldRead,
 };
 
 /// One 30 Hz tick.

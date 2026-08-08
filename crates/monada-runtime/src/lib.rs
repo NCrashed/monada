@@ -135,8 +135,19 @@ pub use volume::VolumeStore;
 /// (docs/plans/desert-game.md §7, D-5) the same way a Rhai map already
 /// could. Additive and presentation-only: they are no-ops without a
 /// bridge, so a headless peer runs the identical rules and draws
-/// nothing.
-pub const HOST_API_VERSION: u32 = 19;
+/// nothing; 20 = what playing D-5 asked for. The volume READS —
+/// `volume` / `volume_solid` / `volume_material` / `volume_top` — moved
+/// from `Host` down to `WorldRead`, so the local layer can resolve the
+/// cursor against the same ground the simulation walks on; a placement
+/// preview that judged the terrain by its own copy of the rules would
+/// eventually disagree with the answer. The verbs that CHANGE the store
+/// stayed on `Host`, so the determinism wall is where it was. Beside
+/// them, `grid_overlay` / `overlay_fill` / `overlay_clear`: a grid of
+/// the map's own for things that are shown rather than simulated — a
+/// build ghost, a range ring, a rally marker — real geometry rather
+/// than HUD pixels, because "where will this go" is a question about
+/// the ground. Additive: the reads gained a caller, not a meaning.
+pub const HOST_API_VERSION: u32 = 20;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use monada_runtime::{
     shared_physics, shared_world, Host, MapRules, NativeBackend, NullBridge, ScriptBackend,
-    SharedBridge,
+    SharedBridge, WorldRead,
 };
 use monada_sim::EntityId;
 
