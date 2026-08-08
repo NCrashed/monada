@@ -129,6 +129,14 @@ impl RhaiDriver {
     pub fn grids(&self) -> &SharedGrids {
         self.backend.grids()
     }
+
+    /// The column terrain store the map paints — for the host to hand to
+    /// the local layer ([`LocalBackend::set_terrain`](crate::LocalBackend::set_terrain))
+    /// so a cursor reads the same ground the simulation walks on.
+    #[must_use]
+    pub fn terrain(&self) -> &crate::SharedTerrain {
+        self.backend.terrain()
+    }
 }
 
 impl SimDriver for RhaiDriver {

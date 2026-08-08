@@ -16,18 +16,17 @@
 //! explicit [`SNAPSHOT_VERSION`], so a blob from another build is refused
 //! rather than misread.
 //!
-//! **What is not in here yet.** The column [`VoxelStore`](crate::VoxelStore)
-//! is owned by the render bridge rather than by this crate (the
-//! bridge-owned-determinism-state smell `docs/plans/rts-demo.md` flagged),
-//! so a *column* map's in-play terrain edits — a felled tree, a razed
-//! footprint — are not captured. Volume maps, which is what the desert
-//! game is (decision L5), keep their terrain in the hashed
-//! [`VolumeStore`](crate::VolumeStore) and are unaffected once the driver
-//! folds it in. Moving that store into the runtime is the next step and a
-//! format bump.
+//! Terrain **is** in here: the column [`VoxelStore`](crate::VoxelStore)
+//! now belongs to the runtime rather than to the render bridge, so a
+//! felled tree or a razed footprint survives a save the same way a unit's
+//! position does. What a *volume* map carves lives in the hashed
+//! [`VolumeStore`](crate::VolumeStore) beside the physics sim, and folds
+//! in when the driver does — the desert game's case (decision L5).
 
 use monada_sim::World;
 use serde::{Deserialize, Serialize};
+
+use crate::VoxelStore;
 
 /// The snapshot format's version. Bumped whenever the blob's shape or
 /// meaning changes; a mismatch is refused loudly.
@@ -38,16 +37,23 @@ pub const SNAPSHOT_VERSION: u16 = 1;
 pub(crate) struct Blob {
     pub(crate) version: u16,
     pub(crate) world: World,
+    /// The column terrain the map has painted and edited so far.
+    pub(crate) terrain: VoxelStore,
     /// [`MapRules::snapshot`](crate::MapRules::snapshot) — the map's own
     /// hashed state, opaque to the engine.
     pub(crate) rules: Vec<u8>,
 }
 
 /// Encode a snapshot.
-pub(crate) fn encode(world: &World, rules: Vec<u8>) -> Result<Vec<u8>, String> {
+pub(crate) fn encode(
+    world: &World,
+    terrain: &VoxelStore,
+    rules: Vec<u8>,
+) -> Result<Vec<u8>, String> {
     let blob = Blob {
         version: SNAPSHOT_VERSION,
         world: world.clone(),
+        terrain: terrain.clone(),
         rules,
     };
     postcard::to_stdvec(&blob).map_err(|e| format!("encoding a snapshot failed: {e}"))

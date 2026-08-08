@@ -4159,21 +4159,13 @@ impl HostBridge for MapRender {
         self.sky_uploaded = false;
     }
 
-    fn voxel_solid(&self, x: i64, y: i64, z: i64) -> bool {
-        self.terrain.solid(x, y, z)
-    }
-
-    fn ground_height(&self, x: i64, y: i64) -> i64 {
-        self.terrain.ground_height(x, y)
-    }
-
-    fn nav_block(&mut self, x: i64, y: i64, on: bool) {
-        self.terrain.nav_block(x, y, on);
-    }
-
-    fn nav_path(&self, x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64) -> Vec<FixedVec3> {
-        self.terrain.nav_path(x0, y0, x1, y1, max_step)
-    }
+    // Collision and navigation are no longer the bridge's to answer: the
+    // runtime owns the terrain store the map paints, so a headless peer and
+    // a drawing one agree on what is walkable by construction rather than
+    // by two bridges implementing the same store
+    // (docs/plans/desert-game.md §3a). `self.terrain` survives as this
+    // renderer's private height index — what a selection ring or a drag
+    // rectangle needs to hug the ground — and is fed by the same paints.
 }
 
 #[cfg(test)]

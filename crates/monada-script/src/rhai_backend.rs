@@ -19,7 +19,8 @@ use rhai::{Array, Dynamic, Engine, ImmutableString, Scope, AST};
 use crate::grids::{register_grid_api, shared_grids};
 use crate::physics::register_physics_api;
 use crate::{
-    ScriptBackend, ScriptError, SharedBridge, SharedGrids, SharedPhysics, SharedWorld, UiEvent,
+    shared_terrain, ScriptBackend, ScriptError, SharedBridge, SharedGrids, SharedPhysics,
+    SharedTerrain, SharedWorld, UiEvent,
 };
 
 /// The buffer `ui_emit_event` pushes into and [`drain_ui_events`] empties.
@@ -77,6 +78,11 @@ pub struct RhaiBackend {
     /// one — and handed to the host via [`grids`](RhaiBackend::grids) so the
     /// local layer can read it too.
     grids: SharedGrids,
+    /// The column terrain store the paint verbs write and the collision
+    /// queries read. Owned HERE, not by the bridge, so a headless peer and
+    /// a drawing one answer "can I walk there?" identically
+    /// (docs/plans/desert-game.md §3a).
+    terrain: SharedTerrain,
 }
 
 impl RhaiBackend {
@@ -98,6 +104,7 @@ impl RhaiBackend {
         // headless backend still spawns grids and answers `grid_world`.
         let grids = shared_grids();
         register_grid_api(&mut engine, &grids, &world, None);
+        let terrain = shared_terrain();
         RhaiBackend {
             engine,
             ast: None,
@@ -110,6 +117,7 @@ impl RhaiBackend {
             events,
             bridge: None,
             grids,
+            terrain,
         }
     }
 
@@ -119,6 +127,15 @@ impl RhaiBackend {
     #[must_use]
     pub fn grids(&self) -> &SharedGrids {
         &self.grids
+    }
+
+    /// The column terrain store this backend paints and queries, for the
+    /// host to hand to the local layer
+    /// ([`LocalBackend::set_terrain`](crate::LocalBackend::set_terrain))
+    /// so both layers read one ground.
+    #[must_use]
+    pub fn terrain(&self) -> &SharedTerrain {
+        &self.terrain
     }
 
     /// Set the tick duration for a fixed-rate map. The value is passed to the
@@ -137,6 +154,10 @@ impl RhaiBackend {
     /// construction is fine.
     pub fn set_bridge(&mut self, bridge: &SharedBridge) {
         register_bridge_api(&mut self.engine, bridge);
+        // Terrain AFTER the render bridge: the paint verbs here write the
+        // runtime store and then draw, so they must shadow any the bridge
+        // registration left behind.
+        register_terrain_api(&mut self.engine, bridge, &self.terrain.clone());
         // AFTER the bridge API, whose own `grid_spawn` / `grid_orient` /
         // `grid_pivot` / `entity_set_grid` would otherwise shadow these: the
         // frame table is the authority, the renderer its mirror.
@@ -432,6 +453,106 @@ pub(crate) fn register_world_read_api(engine: &mut Engine, world: &SharedWorld) 
     });
 }
 
+/// Register the world-painting verbs and the collision queries over the
+/// **runtime's** terrain store (docs/plans/desert-game.md §3a).
+///
+/// This is the seam that used to run through the bridge, and the reason
+/// it moved: what a map may walk on is simulation state, so a headless
+/// peer has to answer it identically to a drawing one. It used to be
+/// answered by whichever `HostBridge` happened to be installed — the
+/// host's `MapRender` when rendering, a store-keeping `TerrainBridge`
+/// when not — which
+/// is two implementations of one deterministic fact, on the wrong side of
+/// the wall.
+///
+/// Now each paint writes the store first and then hands the same call to
+/// the bridge to draw. Colour is presentation; solidity is not.
+///
+/// Ordering: register **after** [`register_bridge_api`], and before
+/// [`register_physics_api`](crate::physics::register_physics_api), whose
+/// volume-map overloads deliberately shadow the paint verbs here (a
+/// volume map's terrain lives in the hashed `VolumeStore` instead).
+pub(crate) fn register_terrain_api(
+    engine: &mut Engine,
+    bridge: &SharedBridge,
+    terrain: &SharedTerrain,
+) {
+    let (t, b) = (terrain.clone(), bridge.clone());
+    engine.register_fn(
+        "voxel_fill",
+        move |x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64| {
+            t.lock()
+                .expect("terrain mutex")
+                .fill(x0, y0, z0, x1, y1, z1);
+            b.lock()
+                .expect("bridge mutex")
+                .voxel_fill(x0, y0, z0, x1, y1, z1, color);
+        },
+    );
+
+    let (t, b) = (terrain.clone(), bridge.clone());
+    engine.register_fn("voxel_set", move |x: i64, y: i64, z: i64, color: i64| {
+        t.lock().expect("terrain mutex").set(x, y, z);
+        b.lock().expect("bridge mutex").voxel_set(x, y, z, color);
+    });
+
+    let (t, b) = (terrain.clone(), bridge.clone());
+    engine.register_fn("voxel_clear", move |x: i64, y: i64, z: i64| {
+        t.lock().expect("terrain mutex").clear_above(x, y, z);
+        b.lock().expect("bridge mutex").voxel_clear(x, y, z);
+    });
+
+    // A tile paint is a voxel paint with a texture: the store must see it
+    // too, or a tiled floor would be walkable on screen and thin air to
+    // the simulation.
+    let (t, b) = (terrain.clone(), bridge.clone());
+    engine.register_fn(
+        "tile_fill",
+        move |x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, tile: i64| {
+            t.lock()
+                .expect("terrain mutex")
+                .fill(x0, y0, z0, x1, y1, z1);
+            b.lock()
+                .expect("bridge mutex")
+                .tile_fill(x0, y0, z0, x1, y1, z1, tile);
+        },
+    );
+
+    // Collision queries (sim coords). Deterministic: the store is a pure
+    // function of the map's own paint calls, so every peer answers
+    // identically — safe to feed hashed `tick()` decisions.
+    let t = terrain.clone();
+    engine.register_fn("voxel_solid", move |x: i64, y: i64, z: i64| -> bool {
+        t.lock().expect("terrain mutex").solid(x, y, z)
+    });
+
+    let t = terrain.clone();
+    engine.register_fn("ground_height", move |x: i64, y: i64| -> i64 {
+        t.lock().expect("terrain mutex").ground_height(x, y)
+    });
+
+    // Deterministic navigation (docs/plans/rts-demo.md §1a): a budgeted
+    // integer A* over the same store the collision queries read, plus an
+    // explicit blocker overlay. Same determinism contract as above.
+    let t = terrain.clone();
+    engine.register_fn("nav_block", move |x: i64, y: i64, on: bool| {
+        t.lock().expect("terrain mutex").nav_block(x, y, on);
+    });
+
+    let t = terrain.clone();
+    engine.register_fn(
+        "nav_path",
+        move |x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64| -> Array {
+            t.lock()
+                .expect("terrain mutex")
+                .nav_path(x0, y0, x1, y1, max_step)
+                .into_iter()
+                .map(Dynamic::from)
+                .collect()
+        },
+    );
+}
+
 /// Register the host's render / input / command API (DESIGN.md §3.3),
 /// each call forwarding to the shared [`HostBridge`](crate::HostBridge).
 /// Kept separate from the sim host API because the *implementation* lives
@@ -551,16 +672,6 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     });
 
     let b = bridge.clone();
-    engine.register_fn(
-        "voxel_fill",
-        move |x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64| {
-            b.lock()
-                .expect("bridge mutex")
-                .voxel_fill(x0, y0, z0, x1, y1, z1, color);
-        },
-    );
-
-    let b = bridge.clone();
     engine.register_fn("grid_spawn", move |wx: i64, wy: i64, wz: i64| -> i64 {
         b.lock().expect("bridge mutex").grid_spawn(wx, wy, wz)
     });
@@ -597,11 +708,6 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     let b = bridge.clone();
     engine.register_fn("grid_pivot", move |grid: i64, point: FixedVec3| {
         b.lock().expect("bridge mutex").grid_pivot(grid, point);
-    });
-
-    let b = bridge.clone();
-    engine.register_fn("voxel_set", move |x: i64, y: i64, z: i64, color: i64| {
-        b.lock().expect("bridge mutex").voxel_set(x, y, z, color);
     });
 
     let b = bridge.clone();
@@ -760,60 +866,12 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").set_sky(path.as_str());
     });
 
-    // Terrain collision queries (sim coords). Deterministic: the store is a
-    // pure function of the script's own paint calls, so every peer answers
-    // identically — safe to feed hashed `tick()` decisions.
-    let b = bridge.clone();
-    engine.register_fn("voxel_clear", move |x: i64, y: i64, z: i64| {
-        b.lock().expect("bridge mutex").voxel_clear(x, y, z);
-    });
-
-    let b = bridge.clone();
-    engine.register_fn("voxel_solid", move |x: i64, y: i64, z: i64| -> bool {
-        b.lock().expect("bridge mutex").voxel_solid(x, y, z)
-    });
-
-    let b = bridge.clone();
-    engine.register_fn("ground_height", move |x: i64, y: i64| -> i64 {
-        b.lock().expect("bridge mutex").ground_height(x, y)
-    });
-
-    // Deterministic navigation (docs/plans/rts-demo.md §1a): a budgeted
-    // integer A* over the same store the collision queries read, plus an
-    // explicit blocker overlay. Same determinism contract as above.
-    let b = bridge.clone();
-    engine.register_fn("nav_block", move |x: i64, y: i64, on: bool| {
-        b.lock().expect("bridge mutex").nav_block(x, y, on);
-    });
-
-    let b = bridge.clone();
-    engine.register_fn(
-        "nav_path",
-        move |x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64| -> Array {
-            b.lock()
-                .expect("bridge mutex")
-                .nav_path(x0, y0, x1, y1, max_step)
-                .into_iter()
-                .map(Dynamic::from)
-                .collect()
-        },
-    );
-
-    // Per-cell PNG tiles: `tile(path)` loads, `tile_fill` paints a cell region.
+    // Per-cell PNG tiles: `tile(path)` loads; `tile_fill` paints and is
+    // registered with the terrain verbs, because what it paints is solid.
     let b = bridge.clone();
     engine.register_fn("tile", move |path: ImmutableString| -> i64 {
         b.lock().expect("bridge mutex").tile(path.as_str())
     });
-
-    let b = bridge.clone();
-    engine.register_fn(
-        "tile_fill",
-        move |x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, tile: i64| {
-            b.lock()
-                .expect("bridge mutex")
-                .tile_fill(x0, y0, z0, x1, y1, z1, tile);
-        },
-    );
 
     // Autotiled terrain: register transition sheets, paint per-cell types,
     // then blit the blended flat floor.

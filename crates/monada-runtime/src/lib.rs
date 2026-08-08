@@ -141,6 +141,20 @@ pub fn check_host_api(required: u32) -> Result<(), String> {
 /// lock never contends — the `Mutex` is just what `Send + Sync` demands.
 pub type SharedWorld = Arc<Mutex<World>>;
 
+/// The shared column terrain store: the highest solid sim-z per column
+/// plus the navigation blocker overlay. Owned by the RUNTIME, not by the
+/// render bridge — what a map may walk on is simulation state, and a
+/// headless peer must answer it identically to a drawing one
+/// (docs/plans/desert-game.md §3a; the smell docs/plans/rts-demo.md
+/// flagged as "bridge-owned determinism state").
+pub type SharedTerrain = Arc<Mutex<VoxelStore>>;
+
+/// Convenience: a fresh shared terrain store.
+#[must_use]
+pub fn shared_terrain() -> SharedTerrain {
+    Arc::new(Mutex::new(VoxelStore::new()))
+}
+
 /// Convenience: a fresh shared world seeded for its RNG.
 #[must_use]
 pub fn shared_world(seed: u64) -> SharedWorld {
@@ -723,50 +737,6 @@ pub trait HostBridge: Send {
     /// Stop the background track started by [`play_music`](Self::play_music).
     fn stop_music(&mut self) {}
 
-    /// Query whether a voxel is solid, in sim coordinates — the terrain
-    /// collision primitive a real-time map needs (the script paints the
-    /// world with [`voxel_fill`](Self::voxel_fill) / [`voxel_set`](Self::voxel_set),
-    /// then asks this to keep movers out of it).
-    ///
-    /// **Determinism:** the backing store is a pure function of the
-    /// deterministic script's paint calls, so every peer answers identically
-    /// — results may feed hashed `tick()` decisions safely. The default
-    /// (empty world) lets bridges that paint nothing — and headless callers
-    /// that don't need terrain — skip it.
-    fn voxel_solid(&self, _x: i64, _y: i64, _z: i64) -> bool {
-        false
-    }
-
-    /// The highest solid sim-`z` in column `(x, y)`, or `0` for an unpainted
-    /// column — the "stand on the ground" primitive (assumes columns are
-    /// filled from the floor up). Same determinism contract as
-    /// [`voxel_solid`](Self::voxel_solid).
-    fn ground_height(&self, _x: i64, _y: i64) -> i64 {
-        0
-    }
-
-    /// Mark / clear cell `(x, y)` as explicitly impassable for navigation
-    /// (a building footprint, a prop) regardless of its height — the
-    /// overlay [`nav_path`](Self::nav_path) ANDs with the heightfield walk
-    /// rule. Same determinism contract as [`voxel_fill`](Self::voxel_fill):
-    /// fed only by command-driven script calls, so every peer holds the
-    /// same set. The default ignores it.
-    fn nav_block(&mut self, _x: i64, _y: i64, _on: bool) {}
-
-    /// A deterministic path from cell `(x0, y0)` to `(x1, y1)`: budgeted
-    /// integer A* (`monada-nav`) under the shared walk rule — a step
-    /// between neighbouring cells passes when |Δ[`ground_height`](Self::ground_height)|
-    /// ≤ `max_step` and the target isn't [`nav_block`](Self::nav_block)ed;
-    /// diagonals may not cut corners. Waypoints are cell coordinates with
-    /// `z` = ground height; empty when already there. An unreachable goal
-    /// yields the best-effort path toward the closest reachable cell —
-    /// never an error. Same determinism contract as
-    /// [`voxel_solid`](Self::voxel_solid), so results may steer hashed
-    /// `tick()` movement. The default (no terrain) finds nothing.
-    fn nav_path(&self, _x0: i64, _y0: i64, _x1: i64, _y1: i64, _max_step: i64) -> Vec<FixedVec3> {
-        Vec::new()
-    }
-
     /// Load a per-cell tile texture from an `assets/` PNG, resampled to the
     /// host's cell resolution. Returns a tile id for [`tile_fill`](Self::tile_fill),
     /// or `-1` if the asset is missing. Render-side only; the default ignores it.
@@ -884,7 +854,7 @@ pub trait HostBridge: Send {
 /// coordinates it paints. Models terrain as per-column heights — fine for
 /// arenas (floor + raised platforms + walls), which fill from the floor up;
 /// it does not represent overhangs or holes.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VoxelStore {
     tops: BTreeMap<(i64, i64), i64>,
     /// Explicit nav blockers (building footprints, props) — an overlay the
@@ -1041,75 +1011,6 @@ impl HostBridge for NullBridge {
     }
     fn set_light(&mut self, _dir: FixedVec3, _intensity: Fixed) {}
     fn set_sky(&mut self, _asset_path: &str) {}
-}
-
-/// A headless [`HostBridge`] that maintains a real [`VoxelStore`] — the
-/// terrain a real-time map collides against — while no-opping all render /
-/// input calls. The determinism-relevant counterpart to [`NullBridge`]:
-/// used by headless tests and the oracle for maps whose `tick()` queries
-/// [`voxel_solid`](HostBridge::voxel_solid) / [`ground_height`](HostBridge::ground_height),
-/// so the collision the goldens hash matches the map's painted terrain.
-#[derive(Default)]
-pub struct TerrainBridge {
-    terrain: VoxelStore,
-}
-
-impl TerrainBridge {
-    #[must_use]
-    pub fn new() -> TerrainBridge {
-        TerrainBridge::default()
-    }
-}
-
-impl HostBridge for TerrainBridge {
-    fn model_box(&mut self, _w: i64, _h: i64, _d: i64, _color: i64) -> i64 {
-        0
-    }
-    fn model_kv6(&mut self, _asset_path: &str, _turns: i64) -> i64 {
-        0
-    }
-    fn entity_set_model(&mut self, _entity: i64, _model: i64) {}
-    #[allow(clippy::too_many_arguments)]
-    fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, _c: i64) {
-        self.terrain.fill(x0, y0, z0, x1, y1, z1);
-    }
-    fn voxel_set(&mut self, x: i64, y: i64, z: i64, _color: i64) {
-        self.terrain.set(x, y, z);
-    }
-    fn voxel_clear(&mut self, x: i64, y: i64, z: i64) {
-        self.terrain.clear_above(x, y, z);
-    }
-    fn highlight(&mut self, _entity: i64) {}
-    fn highlight_clear(&mut self) {}
-    fn highlighted(&self) -> i64 {
-        -1
-    }
-    fn status(&mut self, _text: &str) {}
-    fn camera_focus(&mut self, _point: FixedVec3) {}
-    fn camera_angle(&mut self, _yaw: Fixed, _pitch: Fixed) {}
-    fn submit_command(&mut self, _verb: i64, _target: i64, _arg: FixedVec3) {}
-    fn local_player(&self) -> Option<i64> {
-        None
-    }
-    fn set_light(&mut self, _dir: FixedVec3, _intensity: Fixed) {}
-    fn set_sky(&mut self, _asset_path: &str) {}
-    fn voxel_solid(&self, x: i64, y: i64, z: i64) -> bool {
-        self.terrain.solid(x, y, z)
-    }
-    fn ground_height(&self, x: i64, y: i64) -> i64 {
-        self.terrain.ground_height(x, y)
-    }
-    fn nav_block(&mut self, x: i64, y: i64, on: bool) {
-        self.terrain.nav_block(x, y, on);
-    }
-    fn nav_path(&self, x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64) -> Vec<FixedVec3> {
-        self.terrain.nav_path(x0, y0, x1, y1, max_step)
-    }
-    // Tiles are render-only, but `tile_fill` still feeds collision like
-    // `voxel_fill`, so headless terrain matches the textured live map.
-    fn tile_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, _tile: i64) {
-        self.terrain.fill(x0, y0, z0, x1, y1, z1);
-    }
 }
 
 /// A UI/HUD-side event a script pushes via `ui_emit_event` (DESIGN.md

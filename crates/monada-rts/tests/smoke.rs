@@ -1,5 +1,5 @@
 //! R-B canary for the RTS demo: load the rules from the packed `map/`
-//! archive under a [`TerrainBridge`] (render calls are no-ops; the terrain
+//! archive under a [`NullBridge`] (render calls are no-ops; the terrain
 //! paints fill a real collision store, which now also serves `nav_path`),
 //! then drive the order path and assert the walk rule end to end: workers
 //! start on their plateaus, a MOVE across the map descends BY THE RAMP
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use monada_fixed::{Fixed, FixedVec3};
 use monada_script::{
-    shared_world, RhaiBackend, ScriptBackend, SharedBridge, SharedWorld, TerrainBridge,
+    shared_world, RhaiBackend, ScriptBackend, SharedBridge, SharedWorld, NullBridge,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
@@ -46,10 +46,10 @@ fn script() -> String {
 fn fresh() -> (SharedWorld, RhaiBackend) {
     let world = shared_world(SEED);
     let mut backend = RhaiBackend::new(world.clone());
-    // TerrainBridge: `init`'s heightfield paints fill a real collision
+    // NullBridge: `init`'s heightfield paints fill a real collision
     // store shared by `ground_height` AND `nav_path`; actor / camera /
     // tint calls are no-ops headlessly.
-    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     backend.set_bridge(&bridge);
     backend.load(&script()).expect("compile main.rhai");
     backend.on_init().expect("init runs");
@@ -485,7 +485,7 @@ fn a_group_arrives_as_a_crowd_not_a_stack() {
 #[test]
 fn deterministic_march() {
     // Same seed + same orders → bit-identical positions (the lockstep
-    // contract; TerrainBridge + nav are deterministic, render is no-op).
+    // contract; NullBridge + nav are deterministic, render is no-op).
     let run = || {
         let (world, mut b) = fresh();
         let us = units(&world);

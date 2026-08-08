@@ -21,7 +21,7 @@
 use monada_fixed::{Fixed, FixedVec3};
 use monada_sim::{ArchetypeId, EntityId};
 
-use crate::{SharedBridge, SharedWorld};
+use crate::{SharedBridge, SharedTerrain, SharedWorld};
 
 /// What **both** layers may do: read the world, and draw.
 ///
@@ -46,6 +46,40 @@ pub trait WorldRead {
     /// verbs are no-ops by design — rules must therefore treat drawing as
     /// optional and never let a bridge's absence change hashed state.
     fn bridge(&self) -> Option<&SharedBridge>;
+
+    /// The column terrain store — the **runtime's**, not the bridge's, so
+    /// what a map may walk on does not depend on whether this peer draws.
+    fn terrain(&self) -> Option<&SharedTerrain>;
+
+    // --- collision queries -----------------------------------------------
+    //
+    // Deterministic reads over the terrain the map painted: a pure
+    // function of its own paint calls, so every peer answers identically
+    // and a `tick()` may act on them. Available to both layers — the
+    // simulation gates movement on them, the local layer aims the cursor
+    // with them.
+
+    /// Whether a cell is solid.
+    fn voxel_solid(&self, x: i64, y: i64, z: i64) -> bool {
+        self.terrain()
+            .is_some_and(|t| t.lock().expect("terrain mutex").solid(x, y, z))
+    }
+
+    /// The highest solid `z` in a column, or `0`.
+    fn ground_height(&self, x: i64, y: i64) -> i64 {
+        self.terrain()
+            .map_or(0, |t| t.lock().expect("terrain mutex").ground_height(x, y))
+    }
+
+    /// A deterministic A\* path as cell-centre waypoints; `[]` when
+    /// unreachable (docs/plans/rts-demo.md §1a).
+    fn nav_path(&self, from: (i64, i64), to: (i64, i64), max_step: i64) -> Vec<FixedVec3> {
+        self.terrain().map_or_else(Vec::new, |t| {
+            t.lock()
+                .expect("terrain mutex")
+                .nav_path(from.0, from.1, to.0, to.1, max_step)
+        })
+    }
 
     // --- presentation ----------------------------------------------------
     //
@@ -76,16 +110,6 @@ pub trait WorldRead {
             b.lock()
                 .expect("bridge mutex")
                 .entity_set_model(entity_arg(entity), model);
-        }
-    }
-
-    /// Paint a solid box of voxels (sim cells). Colour is
-    /// `0xBB_RR_GG_BB` — the high byte is brightness, not alpha.
-    fn voxel_fill(&self, lo: (i64, i64, i64), hi: (i64, i64, i64), color: i64) {
-        if let Some(b) = self.bridge() {
-            b.lock()
-                .expect("bridge mutex")
-                .voxel_fill(lo.0, lo.1, lo.2, hi.0, hi.1, hi.2, color);
         }
     }
 
@@ -150,6 +174,58 @@ pub trait Host: WorldRead {
     /// type, compiled rules do not, and the conversion belongs at the
     /// language boundary rather than in the world.
     fn rng_below(&self, n: u64) -> u64;
+
+    // --- world painting ---------------------------------------------------
+    //
+    // Colour is presentation, but SOLIDITY is not: what these paint is
+    // what the collision queries above answer, so they belong to the
+    // simulation layer and run headless. Each writes the runtime's store
+    // first and then hands the same call to the bridge to draw — one
+    // place, so the two can never drift apart.
+
+    /// Fill a solid box of voxels (sim cells). Colour is
+    /// `0xBB_RR_GG_BB` — the high byte is brightness, not alpha.
+    fn voxel_fill(&self, lo: (i64, i64, i64), hi: (i64, i64, i64), color: i64) {
+        if let Some(t) = self.terrain() {
+            t.lock()
+                .expect("terrain mutex")
+                .fill(lo.0, lo.1, lo.2, hi.0, hi.1, hi.2);
+        }
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .voxel_fill(lo.0, lo.1, lo.2, hi.0, hi.1, hi.2, color);
+        }
+    }
+
+    /// Set one voxel.
+    fn voxel_set(&self, x: i64, y: i64, z: i64, color: i64) {
+        if let Some(t) = self.terrain() {
+            t.lock().expect("terrain mutex").set(x, y, z);
+        }
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").voxel_set(x, y, z, color);
+        }
+    }
+
+    /// Cut a column down: everything at and above `z` becomes air.
+    fn voxel_clear(&self, x: i64, y: i64, z: i64) {
+        if let Some(t) = self.terrain() {
+            t.lock().expect("terrain mutex").clear_above(x, y, z);
+        }
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").voxel_clear(x, y, z);
+        }
+    }
+
+    /// Mark or clear a cell as impassable for navigation (building
+    /// footprints, props) — an overlay the pathfinder ANDs with the
+    /// heightfield walk rule.
+    fn nav_block(&self, x: i64, y: i64, on: bool) {
+        if let Some(t) = self.terrain() {
+            t.lock().expect("terrain mutex").nav_block(x, y, on);
+        }
+    }
 }
 
 /// The **local** layer's surface: everything in [`WorldRead`] plus input,
@@ -215,16 +291,36 @@ fn entity_opt(id: i64) -> Option<EntityId> {
 pub struct RuntimeHost {
     world: SharedWorld,
     bridge: Option<SharedBridge>,
+    terrain: SharedTerrain,
 }
 
 impl RuntimeHost {
-    /// A host over `world`, with no render bridge (headless).
+    /// A host over `world`, with no render bridge (headless) and a fresh
+    /// terrain store.
     #[must_use]
     pub fn new(world: SharedWorld) -> RuntimeHost {
         RuntimeHost {
             world,
             bridge: None,
+            terrain: crate::shared_terrain(),
         }
+    }
+
+    /// A host sharing an existing terrain store — how the local layer
+    /// gets the same ground the simulation walks on.
+    #[must_use]
+    pub fn with_terrain(world: SharedWorld, terrain: &SharedTerrain) -> RuntimeHost {
+        RuntimeHost {
+            world,
+            bridge: None,
+            terrain: terrain.clone(),
+        }
+    }
+
+    /// The terrain store this host reads and paints.
+    #[must_use]
+    pub fn terrain_store(&self) -> &SharedTerrain {
+        &self.terrain
     }
 
     /// Attach the render / input bridge. Call before `init`, matching
@@ -271,6 +367,10 @@ impl WorldRead for RuntimeHost {
 
     fn bridge(&self) -> Option<&SharedBridge> {
         self.bridge.as_ref()
+    }
+
+    fn terrain(&self) -> Option<&SharedTerrain> {
+        Some(&self.terrain)
     }
 }
 

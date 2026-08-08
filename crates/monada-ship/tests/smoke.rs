@@ -1,5 +1,5 @@
 //! S-B canary for the ship demo: load the rules from the packed `map/`
-//! archive under a [`TerrainBridge`] (render calls — actor, anim, camera, sky —
+//! archive under a [`NullBridge`] (render calls — actor, anim, camera, sky —
 //! are no-ops), then drive the real-time input + tick path and assert the crew
 //! member spawns, walks, is contained by the hull, crosses decks at the stair,
 //! and — the point of S-B — collides DECK-RELATIVELY. (Wall collision is a
@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use monada_fixed::{Fixed, FixedVec3};
 use monada_script::{
-    shared_world, RhaiBackend, ScriptBackend, SharedBridge, SharedWorld, TerrainBridge,
+    shared_world, RhaiBackend, ScriptBackend, SharedBridge, SharedWorld, NullBridge,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
@@ -42,9 +42,9 @@ fn script() -> String {
 fn fresh() -> (SharedWorld, RhaiBackend) {
     let world = shared_world(SEED);
     let mut backend = RhaiBackend::new(world.clone());
-    // TerrainBridge: `init`'s voxel paints fill a real collision store; the
+    // NullBridge: `init`'s voxel paints fill a real collision store; the
     // actor / anim / camera / sky calls are no-ops headlessly.
-    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     backend.set_bridge(&bridge);
     backend.load(&script()).expect("compile main.rhai");
     backend.on_init().expect("init runs");
@@ -194,7 +194,7 @@ fn upper_deck_ignores_the_lower_wall() {
 #[test]
 fn deterministic_walk() {
     // Same seed + same inputs → identical crew pose (the lockstep contract;
-    // TerrainBridge is deterministic and render calls are no-ops).
+    // NullBridge is deterministic and render calls are no-ops).
     let run = || {
         let (world, mut b) = fresh();
         step(&mut b, &input(0, 0));

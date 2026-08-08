@@ -1,5 +1,5 @@
 //! The action-RPG demo map's gameplay as a headless canary: load the rules from the
-//! packed `map/` archive under a [`TerrainBridge`] (so `voxel_fill` paints
+//! packed `map/` archive under a [`NullBridge`] (so `voxel_fill` paints
 //! collidable terrain and `voxel_solid`/`ground_height` answer, while render
 //! calls — actors, anim, camera — are no-ops), then drive the real-time
 //! input + tick path and assert world state. The seed of the M-E oracle
@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use monada_fixed::{Fixed, FixedVec3};
 use monada_script::{
-    shared_world, RhaiBackend, ScriptBackend, SharedBridge, SharedWorld, TerrainBridge,
+    shared_world, RhaiBackend, ScriptBackend, SharedBridge, SharedWorld, NullBridge,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
@@ -37,9 +37,9 @@ fn script() -> String {
 fn fresh() -> (SharedWorld, RhaiBackend) {
     let world = shared_world(SEED);
     let mut backend = RhaiBackend::new(world.clone());
-    // TerrainBridge: `init`'s voxel paints fill a real collision store; the
+    // NullBridge: `init`'s voxel paints fill a real collision store; the
     // actor / anim / camera calls are no-ops headlessly.
-    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     backend.set_bridge(&bridge);
     backend.load(&script()).expect("compile main.rhai");
     backend.on_init().expect("init runs");

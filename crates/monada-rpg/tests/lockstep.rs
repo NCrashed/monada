@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use monada_fixed::{Fixed, FixedVec3};
 use monada_net::{LockstepSession, LoopbackTransport, MatchInfo, SessionConfig, SimDriver};
-use monada_script::{shared_world, RhaiDriver, SharedBridge, TerrainBridge};
+use monada_script::{shared_world, RhaiDriver, SharedBridge, NullBridge};
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
 const SEED: u64 = 0x4D4F_4E41_4441_5F30;
@@ -31,7 +31,7 @@ fn rpg_map() -> monada_format::Map {
 fn session(player: PlayerId, transport: LoopbackTransport, map: &monada_format::Map) -> Session {
     // Each peer gets its own terrain store (its own `MapRender` would, live);
     // both inits paint identically, so collision queries agree.
-    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     let script = map.entry_script().expect("entry script");
     let mut driver =
         RhaiDriver::with_bridge(shared_world(SEED), script, &bridge).expect("compile rpg map");
@@ -134,7 +134,7 @@ fn replay_reproduces_the_co_op_session() {
 
     // A fresh driver replaying A's recorded input stream must reach the same
     // state (the verified replay path checks map hash + engine version).
-    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     let mut fresh =
         RhaiDriver::with_bridge(shared_world(SEED), map.entry_script().unwrap(), &bridge)
             .expect("compile rpg map");

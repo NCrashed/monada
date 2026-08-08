@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use monada_fixed::{Fixed, FixedVec3};
 use monada_net::SimDriver;
-use monada_script::{shared_world, RhaiDriver, SharedBridge, TerrainBridge};
+use monada_script::{shared_world, RhaiDriver, SharedBridge, NullBridge};
 use monada_sim::{Command, EntityId, PlayerId};
 
 const SEED: u64 = 0x4D4F_4E41_4441_5F30;
@@ -63,7 +63,7 @@ const REALTIME_SCRIPT: &str = r#"
 "#;
 
 fn driver() -> RhaiDriver {
-    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     RhaiDriver::with_bridge(shared_world(SEED), REALTIME_SCRIPT, &bridge).expect("compile realtime")
 }
 

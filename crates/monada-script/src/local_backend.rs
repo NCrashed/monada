@@ -48,8 +48,10 @@ use monada_fixed::{Fixed, FixedVec3};
 use rhai::{Dynamic, Engine, ImmutableString, Scope, AST};
 
 use crate::grids::register_grid_read_api;
-use crate::rhai_backend::{register_bridge_api, register_number_types, register_world_read_api};
-use crate::{ScriptError, SharedBridge, SharedGrids, SharedWorld};
+use crate::rhai_backend::{
+    register_bridge_api, register_number_types, register_terrain_api, register_world_read_api,
+};
+use crate::{ScriptError, SharedBridge, SharedGrids, SharedTerrain, SharedWorld};
 
 /// The map's local script layer: input → gesture/UI logic → submitted
 /// commands. See the module docs for the API surface and entry points.
@@ -102,6 +104,20 @@ impl LocalBackend {
     /// same as [`RhaiBackend::set_bridge`](crate::RhaiBackend::set_bridge).
     pub fn set_grids(&mut self, grids: &SharedGrids) {
         register_grid_read_api(&mut self.engine, grids);
+    }
+
+    /// Give the local layer the simulation's terrain store, so
+    /// `voxel_solid` / `ground_height` / `nav_path` answer over the ground
+    /// the map actually painted. Registering after construction is fine
+    /// (Rhai resolves at call time), the same as
+    /// [`set_grids`](Self::set_grids).
+    ///
+    /// A host that forgets leaves those verbs unregistered, so a map that
+    /// calls one fails loudly rather than quietly reading empty ground —
+    /// the failure mode worth having, since the alternative is a cursor
+    /// that lands somewhere the world is not.
+    pub fn set_terrain(&mut self, bridge: &SharedBridge, terrain: &SharedTerrain) {
+        register_terrain_api(&mut self.engine, bridge, terrain);
     }
 
     /// Compile `source` (the map's entry script, or its dedicated

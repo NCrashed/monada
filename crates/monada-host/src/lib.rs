@@ -929,6 +929,9 @@ impl App {
         // a hull's coordinates.
         let mut local_layer = LocalBackend::new(&world, &bridge);
         local_layer.set_grids(backend.grids());
+        // …and the same ground: collision now lives in the runtime store,
+        // so the local layer has to be handed the simulation own copy.
+        local_layer.set_terrain(&bridge, backend.terrain());
         local_layer
             .load(&local_script)
             .expect("compile local script");
@@ -1000,6 +1003,7 @@ impl App {
         // frames — the driver mutates.
         let mut local_layer = LocalBackend::new(driver.world(), &bridge);
         local_layer.set_grids(driver.grids());
+        local_layer.set_terrain(&bridge, driver.terrain());
         local_layer
             .load(&local_script)
             .expect("compile local script");

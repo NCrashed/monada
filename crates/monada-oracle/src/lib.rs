@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use monada_format::{pack_dir, Map, SimHz};
 use monada_script::{
     run_script, shared_physics, shared_world, LocalBackend, NullBridge, RhaiBackend, RhaiDriver,
-    ScriptBackend, SharedBridge, SharedWorld, TerrainBridge, COMMAND_DEMO_SCRIPT,
+    ScriptBackend, SharedBridge, SharedWorld, COMMAND_DEMO_SCRIPT,
     WALK_CIRCLE_SCRIPT,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId, World};
@@ -308,7 +308,7 @@ pub fn chess_checkpoints() -> Vec<Checkpoint> {
 }
 
 /// The action-RPG demo map, embedded for the golden (read straight from the
-/// map's script file). Runs headless under a [`TerrainBridge`], so its
+/// map's script file). Runs headless under a [`NullBridge`], so its
 /// `voxel_fill` terrain answers collision while the actor / sky calls no-op.
 const RPG_SCRIPT: &str = include_str!("../../monada-rpg/map/scripts/main.rhai");
 /// Hash the demo run at these tick counts (`rpg@0` = post-init, with
@@ -340,7 +340,7 @@ fn rpg_input(t: usize) -> Command {
 }
 
 /// The action-RPG golden: the real-time demo map driven through its own
-/// script under a headless [`TerrainBridge`], one input command per tick,
+/// script under a headless [`NullBridge`], one input command per tick,
 /// hashed at fixed tick counts. Gates cross-platform determinism of the
 /// real-time tick + per-tick input + voxel-query + wave-RNG path.
 ///
@@ -348,7 +348,7 @@ fn rpg_input(t: usize) -> Command {
 /// Panics on a script compile/run failure (a bug, not a data condition).
 #[must_use]
 pub fn rpg_checkpoints() -> Vec<Checkpoint> {
-    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     let mut driver =
         RhaiDriver::with_bridge(shared_world(SEED), RPG_SCRIPT, &bridge).expect("compile rpg");
 
@@ -374,7 +374,7 @@ pub fn rpg_checkpoints() -> Vec<Checkpoint> {
 
 /// The spaceship crew-sim demo map, embedded for the golden (read straight
 /// from the map's script file). Like the RPG it runs headless under a
-/// [`TerrainBridge`]; its render-side calls (camera, deck clip, fog of war,
+/// [`NullBridge`]; its render-side calls (camera, deck clip, fog of war,
 /// HUD, actor anim) no-op, leaving only the hashed sim: crew movement, the
 /// deck-relative collision, and the stairwell deck-flip.
 const SHIP_SCRIPT: &str = include_str!("../../monada-ship/map/scripts/main.rhai");
@@ -423,7 +423,7 @@ fn ship_input(t: usize) -> Command {
 }
 
 /// The ship golden: the crew-sim demo driven through its own script under a
-/// headless [`TerrainBridge`], one input command per tick, hashed at fixed
+/// headless [`NullBridge`], one input command per tick, hashed at fixed
 /// tick counts. Gates cross-platform determinism of the two-deck movement,
 /// deck-relative collision, and the stairwell deck-flip — the ship's sim half
 /// (its visibility/camera work is render-side and unhashed by design).
@@ -432,7 +432,7 @@ fn ship_input(t: usize) -> Command {
 /// Panics on a script compile/run failure (a bug, not a data condition).
 #[must_use]
 pub fn ship_checkpoints() -> Vec<Checkpoint> {
-    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     let mut driver =
         RhaiDriver::with_bridge(shared_world(SEED), SHIP_SCRIPT, &bridge).expect("compile ship");
 
@@ -457,7 +457,7 @@ pub fn ship_checkpoints() -> Vec<Checkpoint> {
 }
 
 /// The RTS demo map, embedded for the golden (read straight from the
-/// map's script file). Runs headless under a [`TerrainBridge`]: the
+/// map's script file). Runs headless under a [`NullBridge`]: the
 /// heightfield paints fill the shared collision store `nav_path` also
 /// reads, while render/selection calls no-op — leaving the hashed sim:
 /// nav-routed movement over cliffs/ramps, the worker harvest economy,
@@ -498,7 +498,7 @@ fn rts_cmd(verb: u32, unit: i64, x: i64, y: i64, z: i64) -> Command {
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 pub fn rts_checkpoints() -> Vec<Checkpoint> {
-    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     let mut driver =
         RhaiDriver::with_bridge(shared_world(SEED), RTS_SCRIPT, &bridge).expect("compile rts");
 
@@ -1002,7 +1002,7 @@ pub fn parse_goldens(text: &str) -> Result<Vec<(String, u64)>, String> {
 /// executes rots into a lie (docs/plans/mapmakers-book.md §0). It packs
 /// the directory into a `.monada` archive, reads it back (which validates
 /// the manifest), compiles *both* script layers, and drives `ticks`
-/// simulation steps under a headless [`TerrainBridge`] — the same path
+/// simulation steps under a headless [`NullBridge`] — the same path
 /// the real oracle scenarios use. Returns the final [`World::state_hash`];
 /// any pack / load / compile / run failure surfaces as `Err`.
 ///
@@ -1018,7 +1018,7 @@ pub fn run_example_map(dir: &Path, ticks: u64) -> Result<u64, String> {
     let script = map
         .entry_script()
         .ok_or("manifest `entry` names no packed script")?;
-    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     let mut driver = RhaiDriver::with_bridge(shared_world(SEED), script, &bridge)
         .map_err(|e| format!("sim script: {e:?}"))?;
     if let SimHz::Fixed(hz) = map.manifest.sim_hz {

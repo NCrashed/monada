@@ -34,9 +34,9 @@ pub use rhai_backend::RhaiBackend;
 // single-dependency entry point for hosts and tests (and so this crate's
 // own modules keep referring to `crate::HostBridge` and friends).
 pub use monada_runtime::{
-    check_host_api, shared_world, HostBridge, MaterialId, NullBridge, ScriptBackend, ScriptError,
-    SharedBridge, SharedWorld, TerrainBridge, UiEvent, VolumeStore, VoxelStore, HOST_API_OLDEST,
-    HOST_API_VERSION,
+    check_host_api, shared_terrain, shared_world, HostBridge, MaterialId, NullBridge,
+    ScriptBackend, ScriptError, SharedBridge, SharedTerrain, SharedWorld, UiEvent, VolumeStore,
+    VoxelStore, HOST_API_OLDEST, HOST_API_VERSION,
 };
 
 /// The M2 walk-in-a-circle scenario, as a script (DESIGN.md §7) — the

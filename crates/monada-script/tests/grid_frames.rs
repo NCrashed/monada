@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex};
 use monada_fixed::Fixed;
 use monada_script::{
     shared_world, LocalBackend, NullBridge, RhaiBackend, ScriptBackend, SharedBridge, SharedWorld,
-    TerrainBridge,
 };
 use monada_sim::{ArchetypeId, EntityId};
 
@@ -28,7 +27,7 @@ const EPS: f64 = 1e-6;
 fn headless(script: &str) -> (SharedWorld, RhaiBackend) {
     let world = shared_world(SEED);
     let mut backend = RhaiBackend::new(world.clone());
-    let bridge: SharedBridge = Arc::new(Mutex::new(TerrainBridge::new()));
+    let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     backend.set_bridge(&bridge);
     backend.load(script).expect("compile");
     backend.on_init().expect("init");

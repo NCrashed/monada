@@ -112,6 +112,13 @@ impl NativeBackend {
         self.tick_dt = Fixed::from_ratio(1, i32::try_from(hz.max(1)).unwrap_or(i32::MAX));
     }
 
+    /// The host handle these rules run against — for a host that wants to
+    /// read the world or the terrain the way the map does.
+    #[must_use]
+    pub fn host(&self) -> &RuntimeHost {
+        &self.host
+    }
+
     /// The rules value, for tests and for the host's own inspection.
     #[must_use]
     pub fn rules(&self) -> &dyn MapRules {
@@ -130,7 +137,9 @@ impl NativeBackend {
     /// mid-tick has nothing worth saving.
     pub fn snapshot(&self) -> Result<Vec<u8>, ScriptError> {
         let world = self.world.lock().expect("world mutex");
-        crate::snapshot::encode(&world, self.rules.snapshot()).map_err(ScriptError::Snapshot)
+        let terrain = self.host.terrain_store().lock().expect("terrain mutex");
+        crate::snapshot::encode(&world, &terrain, self.rules.snapshot())
+            .map_err(ScriptError::Snapshot)
     }
 
     /// Replace the live state with a snapshot's.
@@ -150,6 +159,7 @@ impl NativeBackend {
     pub fn restore(&mut self, bytes: &[u8]) -> Result<(), ScriptError> {
         let blob = crate::snapshot::decode(bytes).map_err(ScriptError::Snapshot)?;
         *self.world.lock().expect("world mutex") = blob.world;
+        *self.host.terrain_store().lock().expect("terrain mutex") = blob.terrain;
         self.rules.restore(&blob.rules);
         Ok(())
     }

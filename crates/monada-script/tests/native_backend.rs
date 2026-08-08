@@ -12,7 +12,7 @@
 //! either direction.
 
 use monada_fixed::{trig, Fixed, FixedVec3};
-use monada_runtime::{shared_world, Host, MapRules, NativeBackend};
+use monada_runtime::{shared_world, Host, MapRules, NativeBackend, WorldRead};
 use monada_script::{RhaiBackend, ScriptBackend, WALK_CIRCLE_SCRIPT};
 use monada_sim::{ArchetypeId, Command, PlayerId};
 
@@ -298,6 +298,58 @@ fn rules_state_survives_a_round_trip() {
         resumed.rules().snapshot(),
         10_u32.to_le_bytes().to_vec(),
         "the rules' own counter should resume at 9, not restart at 0"
+    );
+}
+
+/// Terrain edited in play must survive a save — the felled tree, the
+/// razed footprint, the crater. This is what moving the column store out
+/// of the render bridge bought: the state a map may walk on is the
+/// runtime's, so it is in the snapshot like anything else
+/// (docs/plans/desert-game.md §3a).
+#[test]
+fn terrain_survives_a_round_trip() {
+    /// Paints a plateau at `init`, then cuts one column down on tick 1 —
+    /// the shape of every destructible in the repo.
+    #[derive(Default)]
+    struct Digger {
+        ticks: u32,
+    }
+    impl MapRules for Digger {
+        fn init(&mut self, host: &dyn Host) {
+            host.voxel_fill((0, 0, 0), (7, 7, 4), 0x8080_8080);
+        }
+        fn tick(&mut self, host: &dyn Host, _dt: Fixed) {
+            self.ticks += 1;
+            if self.ticks == 1 {
+                host.voxel_clear(3, 3, 2);
+            }
+        }
+    }
+
+    let world = shared_world(1);
+    let mut backend = NativeBackend::new(world, Box::new(Digger::default()));
+    backend.on_init().expect("init");
+    backend.on_tick().expect("tick");
+    let save = backend.snapshot().expect("snapshot");
+
+    // A fresh backend that has NOT run the tick: `init` repaints the
+    // plateau, so only the snapshot can know the column was cut.
+    let world = shared_world(1);
+    let mut resumed = NativeBackend::new(world, Box::new(Digger::default()));
+    resumed.on_init().expect("init");
+    let host = resumed.host();
+    assert_eq!(host.ground_height(3, 3), 4, "init paints the full plateau");
+    resumed.restore(&save).expect("restore");
+    let host = resumed.host();
+    assert_eq!(
+        host.ground_height(3, 3),
+        1,
+        "the cut column should come back cut"
+    );
+    assert_eq!(
+        host.ground_height(4, 4),
+        4,
+        "…and its neighbours uncut"
     );
 }
 
