@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use monada_fixed::{Fixed, FixedVec3};
 use monada_sim::{Command, PlayerId, World};
 
+mod granular;
 mod host;
 mod nav;
 mod native;
@@ -32,6 +33,7 @@ mod volume;
 
 pub use host::{Host, LocalHost, RuntimeHost, WorldRead};
 pub use native::{LocalLayer, LocalRules, MapRules, NativeBackend, NativeLocalBackend};
+pub use granular::{Granular, Repose};
 pub use nav::{shared_nav, NavCache, SharedNav};
 pub use physics::{shared_physics, DrillToolDef, PhysicsSim, SharedPhysics};
 // The navigation vocabulary a map speaks, re-exported so a rules crate

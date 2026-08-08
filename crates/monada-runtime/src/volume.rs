@@ -518,3 +518,30 @@ mod incremental_hash_tests {
         assert_ne!(store.state_hash(), VolumeStore::new().state_hash());
     }
 }
+
+impl VolumeStore {
+    /// The topmost solid cell of a column and its material, or `None` for
+    /// a column of pure air.
+    ///
+    /// Walks the store's own chunks from the highest down rather than
+    /// scanning a fixed sky: the store is unbounded in z, so "start at
+    /// the top" has to mean the top of what exists. The settling
+    /// automaton asks this of five columns per candidate slide, which is
+    /// why it is a range walk and not a loop over `get`.
+    #[must_use]
+    pub fn column_top(&self, x: i64, y: i64) -> Option<(i64, u16)> {
+        let (cx, cy) = (x.div_euclid(CHUNK_EDGE), y.div_euclid(CHUNK_EDGE));
+        let lo = (cx, cy, i64::MIN);
+        let hi = (cx, cy, i64::MAX);
+        for (&(_, _, cz), chunk) in self.chunks.range(lo..=hi).rev() {
+            for local_z in (0..CHUNK_EDGE).rev() {
+                let z = cz * CHUNK_EDGE + local_z;
+                let cell = chunk.cells[cell_index(x, y, z)];
+                if cell != EMPTY {
+                    return Some((z, cell));
+                }
+            }
+        }
+        None
+    }
+}
