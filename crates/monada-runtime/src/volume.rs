@@ -10,9 +10,9 @@
 //! [`notify_terrain_edit`](monada_physics::PhysicsWorld::notify_terrain_edit),
 //! and its digest folds into the driver's combined `state_hash`.
 //!
-//! Hashing: each chunk caches an FNV of its cells, refreshed on edit,
-//! so the store's digest folds chunk hashes — an unedited world hashes
-//! in O(chunks), not O(voxels). A chunk whose last solid voxel is
+//! Hashing: each chunk carries an XOR of per-cell digests, updated
+//! INCREMENTALLY by every write, so the store hashes in O(chunks) and a
+//! single write costs O(1) instead of a fold over the chunk's 8 KB. A chunk whose last solid voxel is
 //! cleared is dropped from the map entirely, so "filled then emptied"
 //! and "never touched" are the same canonical form (and the same hash).
 
@@ -58,16 +58,60 @@ impl Chunk {
         chunk
     }
 
-    /// Refresh the cached cell digest (a canonical little-endian walk).
+    /// Recompute the digest from scratch — the fold every write used to
+    /// pay for, kept for construction and for the test that proves the
+    /// incremental form agrees with it.
     fn rehash(&mut self) {
-        let mut h = StateHasher::new();
-        for cell in self.cells.iter() {
-            for b in cell.to_le_bytes() {
-                h.write_u8(b);
+        self.hash = 0;
+        for (i, &cell) in self.cells.iter().enumerate() {
+            if cell != EMPTY {
+                self.hash ^= cell_hash(i, cell);
             }
         }
-        self.hash = h.finish();
     }
+
+    /// Write one cell and carry the digest with it, in O(1).
+    ///
+    /// The digest used to be an FNV fold over all 8 KB, recomputed per
+    /// write. Invisible to the digger, which drills one bounded sweep a
+    /// tick; ruinous for a game whose three factions reshape terrain
+    /// continuously — the spike measured 7.01 µs for a cell written alone
+    /// against 0.07 µs in a batch, and every microsecond of that gap was
+    /// re-hashing cells that had not changed
+    /// (docs/plans/desert-game.md §13a).
+    ///
+    /// XOR makes it incremental: remove the old term, add the new. It is
+    /// order-independent, which is exactly right for a canonical form —
+    /// the digest depends on the cells, not on the sequence of writes that
+    /// produced them — and the index is mixed in, so two cells cannot
+    /// cancel by holding the same material.
+    fn write(&mut self, index: usize, value: u16) -> bool {
+        let old = self.cells[index];
+        if old == value {
+            return false;
+        }
+        if old != EMPTY {
+            self.hash ^= cell_hash(index, old);
+            self.filled -= 1;
+        }
+        if value != EMPTY {
+            self.hash ^= cell_hash(index, value);
+            self.filled += 1;
+        }
+        self.cells[index] = value;
+        true
+    }
+}
+
+/// A cell's contribution to its chunk's digest: splitmix64 over the
+/// `(index, material)` pair. Integer throughout, so two machines cannot
+/// disagree about it.
+fn cell_hash(index: usize, value: u16) -> u64 {
+    let mut z = ((index as u64) << 16) | u64::from(value);
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// `Box<[u16; 4096]>` ↔ serde, via a length-checked `Vec` (serde derives
@@ -169,15 +213,7 @@ impl VolumeStore {
             .chunks
             .entry(chunk_key(x, y, z))
             .or_insert_with(Chunk::empty);
-        let cell = &mut chunk.cells[cell_index(x, y, z)];
-        if *cell == mat.0 {
-            return; // no-op write: the cached hash stays valid
-        }
-        if *cell == EMPTY {
-            chunk.filled += 1;
-        }
-        *cell = mat.0;
-        chunk.rehash();
+        chunk.write(cell_index(x, y, z), mat.0);
     }
 
     /// Clear one voxel back to air. Dropping a chunk's last solid voxel
@@ -187,16 +223,42 @@ impl VolumeStore {
         let Some(chunk) = self.chunks.get_mut(&key) else {
             return;
         };
-        let cell = &mut chunk.cells[cell_index(x, y, z)];
-        if *cell == EMPTY {
-            return;
-        }
-        *cell = EMPTY;
-        chunk.filled -= 1;
+        chunk.write(cell_index(x, y, z), EMPTY);
         if chunk.filled == 0 {
             self.chunks.remove(&key);
-        } else {
-            chunk.rehash();
+        }
+    }
+
+    /// Clear an inclusive box back to air — the batched inverse of
+    /// [`fill`](VolumeStore::fill).
+    ///
+    /// `voxel_clear` punches one cell, which is the tunnel primitive; a
+    /// bore, a trench and a crater are boxes, and asking for them one
+    /// cell at a time was the shape the spike caught costing a hundred
+    /// times what it should (§13a).
+    pub fn carve(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64) {
+        let (xa, xb) = (x0.min(x1), x0.max(x1));
+        let (ya, yb) = (y0.min(y1), y0.max(y1));
+        let (za, zb) = (z0.min(z1), z0.max(z1));
+        let mut touched: BTreeSet<(i64, i64, i64)> = BTreeSet::new();
+        for z in za..=zb {
+            for y in ya..=yb {
+                for x in xa..=xb {
+                    let key = chunk_key(x, y, z);
+                    if let Some(chunk) = self.chunks.get_mut(&key) {
+                        chunk.write(cell_index(x, y, z), EMPTY);
+                        touched.insert(key);
+                    }
+                }
+            }
+        }
+        // A chunk emptied by the carve leaves the store, so "nothing was
+        // ever painted here" and "everything here was removed" stay the
+        // same canonical form — and the same digest.
+        for key in touched {
+            if self.chunks.get(&key).is_some_and(|c| c.filled == 0) {
+                self.chunks.remove(&key);
+            }
         }
     }
 
@@ -215,28 +277,16 @@ impl VolumeStore {
         let (xa, xb) = (x0.min(x1), x0.max(x1));
         let (ya, yb) = (y0.min(y1), y0.max(y1));
         let (za, zb) = (z0.min(z1), z0.max(z1));
-        let mut dirty: BTreeSet<(i64, i64, i64)> = BTreeSet::new();
         for z in za..=zb {
             for y in ya..=yb {
                 for x in xa..=xb {
-                    let key = chunk_key(x, y, z);
-                    let chunk = self.chunks.entry(key).or_insert_with(Chunk::empty);
-                    let cell = &mut chunk.cells[cell_index(x, y, z)];
-                    if *cell != mat.0 {
-                        if *cell == EMPTY {
-                            chunk.filled += 1;
-                        }
-                        *cell = mat.0;
-                        dirty.insert(key);
-                    }
+                    let chunk = self
+                        .chunks
+                        .entry(chunk_key(x, y, z))
+                        .or_insert_with(Chunk::empty);
+                    chunk.write(cell_index(x, y, z), mat.0);
                 }
             }
-        }
-        for key in dirty {
-            self.chunks
-                .get_mut(&key)
-                .expect("dirty chunk exists")
-                .rehash();
         }
     }
 
@@ -402,5 +452,69 @@ mod tests {
         let back: VolumeStore = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(store, back);
         assert_eq!(store.state_hash(), back.state_hash());
+    }
+}
+
+#[cfg(test)]
+mod incremental_hash_tests {
+    use super::{cell_hash, Chunk, MaterialId, VolumeStore, EMPTY};
+
+    /// The digest a write carries must equal the one a full recompute
+    /// would produce. This is the whole safety of making it incremental:
+    /// if the two ever part, peers agree on their cells and disagree on
+    /// their hash, which is a desync with no cause visible in the world.
+    #[test]
+    fn carrying_the_hash_agrees_with_recomputing_it() {
+        let mut chunk = Chunk::empty();
+        let writes = [(0usize, 7u16), (4095, 3), (2000, 1), (0, 9), (4095, EMPTY)];
+        for (i, v) in writes {
+            chunk.write(i, v);
+            let carried = chunk.hash;
+            chunk.rehash();
+            assert_eq!(
+                carried, chunk.hash,
+                "after writing {v} at {i} the carried digest drifted"
+            );
+        }
+    }
+
+    /// Order must not matter: the digest describes the cells, not the
+    /// sequence that produced them. A peer that paints a berm before a
+    /// trench must agree with one that paints them the other way round.
+    #[test]
+    fn the_digest_is_order_independent() {
+        let mut a = VolumeStore::new();
+        a.fill(0, 0, 0, 3, 3, 3, MaterialId(1));
+        a.carve(1, 1, 1, 2, 2, 2);
+
+        let mut b = VolumeStore::new();
+        b.fill(0, 0, 0, 3, 3, 0, MaterialId(1));
+        b.fill(0, 0, 1, 3, 3, 3, MaterialId(1));
+        b.carve(2, 2, 2, 1, 1, 1); // reversed corners, same box
+        assert_eq!(a.state_hash(), b.state_hash());
+    }
+
+    /// Emptied is indistinguishable from never painted — the canonical
+    /// form the module has always promised, now upheld by `carve` too.
+    #[test]
+    fn a_carved_out_chunk_leaves_no_trace() {
+        let mut store = VolumeStore::new();
+        let empty = store.state_hash();
+        store.fill(40, 40, 40, 45, 45, 45, MaterialId(2));
+        assert_ne!(store.state_hash(), empty);
+        store.carve(40, 40, 40, 45, 45, 45);
+        assert_eq!(store.state_hash(), empty, "a carved box must vanish");
+        assert!(store.is_empty());
+    }
+
+    /// Two cells holding the same material must not cancel each other in
+    /// an XOR — the one way this scheme could go quietly wrong.
+    #[test]
+    fn identical_materials_at_different_cells_do_not_cancel() {
+        assert_ne!(cell_hash(0, 5), cell_hash(1, 5));
+        let mut store = VolumeStore::new();
+        store.set(0, 0, 0, MaterialId(5));
+        store.set(1, 0, 0, MaterialId(5));
+        assert_ne!(store.state_hash(), VolumeStore::new().state_hash());
     }
 }
