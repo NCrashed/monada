@@ -127,6 +127,32 @@ pub trait WorldRead {
         }
     }
 
+    /// Set the camera's distance from its focus.
+    fn camera_dist(&self, dist: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").camera_dist(dist);
+        }
+    }
+
+    /// Show only the sim-z band `lo..=hi`, cutting the ceiling above it
+    /// away — the depth slider a map with tunnels is viewed through
+    /// (docs/plans/desert-game.md §4f).
+    fn deck_clip(&self, lo: i64, hi: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").deck_clip(lo, hi);
+        }
+    }
+
+    /// Set an entity's facing yaw (radians). On a KV6 model this turns
+    /// the geometry; on a billboard actor it picks the facing sprite.
+    fn entity_set_facing(&self, entity: EntityId, yaw: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .entity_set_facing(entity_arg(entity), yaw);
+        }
+    }
+
     /// Declare the directional "sun".
     fn set_light(&self, dir: FixedVec3, intensity: Fixed) {
         if let Some(b) = self.bridge() {

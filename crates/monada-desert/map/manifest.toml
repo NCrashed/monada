@@ -1,0 +1,28 @@
+# The desert game (docs/plans/desert-game.md) — a volumetric Dune II-class
+# RTS. Manifest schema: monada_format::Manifest.
+name = "the desert"
+engine_version = "0.0.1"
+
+# Script-API version the RULES require. They are compiled Rust rather than
+# a script (decision L1), but they reach the engine through the same host
+# surface, so the same compatibility gate applies: a host outside this
+# range refuses the map instead of desyncing.
+host_api = 17
+
+# Skirmish is 2..4 (D-9); D-1 is one player watching one vehicle.
+players = 1
+
+# Real-time at 30 Hz (§4a). A volume map must declare a fixed rate — the
+# physics dt IS the tick.
+sim_hz = "30hz"
+
+# `terrain = "volume"`: the ground is a chunked 3D store, so tunnels,
+# overhangs and undercuts are first-class rather than unrepresentable
+# (decision L5). This is what the Dwellers' whole game is made of.
+terrain = "volume"
+
+# The rules are LINKED, not compiled from the archive. `entry` is unread
+# for a native map; the archive is here for its assets, its manifest and
+# its bindings.
+script_runtime = "native"
+entry = "compiled-in"

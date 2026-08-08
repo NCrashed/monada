@@ -1682,6 +1682,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "monada-desert"
+version = "0.0.1"
+dependencies = [
+ "monada-desert-rules",
+ "monada-format",
+ "monada-host",
+ "monada-script",
+]
+
+[[package]]
 name = "monada-desert-rules"
 version = "0.0.1"
 dependencies = [

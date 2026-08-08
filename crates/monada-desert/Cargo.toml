@@ -1,0 +1,33 @@
+[package]
+name = "monada-desert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "The desert game: a launcher that bundles the map archive and hands its compiled rules to the host."
+publish = false
+
+[[bin]]
+name = "monada-desert"
+path = "src/main.rs"
+
+[dependencies]
+# The host event loop + its shared map CLI, the archive loader, and the
+# rules themselves — which are linked rather than compiled from the
+# archive's `entry` (decision L1 of docs/plans/desert-game.md).
+monada-host = { path = "../monada-host" }
+monada-format = { workspace = true }
+monada-desert-rules = { workspace = true }
+
+[dev-dependencies]
+# The archive test reads the bundle back and checks the host-API gate.
+monada-script = { workspace = true }
+
+[build-dependencies]
+# build.rs packs `map/` into a deterministic `desert.monada` in OUT_DIR.
+monada-format = { workspace = true }
+
+[lints]
+workspace = true

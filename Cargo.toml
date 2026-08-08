@@ -18,6 +18,7 @@ members = [
     "crates/monada-rpg",
     "crates/monada-rts",
     "crates/monada-ship",
+    "crates/monada-desert",
     "crates/monada-desert-rules",
     "crates/monada-digger",
 ]

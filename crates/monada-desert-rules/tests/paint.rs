@@ -121,3 +121,67 @@ fn spice_is_painted_as_spice() {
         "spice must be distinguishable from the sand it lies on"
     );
 }
+
+/// D-1's moving part: a vehicle that drives over the dunes and stays on
+/// them. Cheap to get wrong in a way no still frame shows — a seat
+/// computed from the generator instead of the store looks right until the
+/// first crater, and a seat off by one has the hull hovering or buried.
+#[test]
+fn the_vehicle_drives_and_stays_on_the_surface() {
+    use monada_runtime::WorldRead as _;
+
+    let mut backend = painted();
+    let start = {
+        let host = backend.host();
+        let vehicle = host.entities()[0];
+        host.entity_position(vehicle)
+    };
+
+    for _ in 0..200 {
+        backend.on_tick().expect("tick");
+    }
+
+    let host = backend.host();
+    let vehicle = host.entities()[0];
+    let now = host.entity_position(vehicle);
+    assert_ne!(
+        (start.x, start.y),
+        (now.x, now.y),
+        "200 ticks and the vehicle has not moved"
+    );
+
+    // Seated: the cell under it is solid, the cell it occupies is not.
+    let (x, y, z) = (
+        i64::from(now.x.floor_to_int()),
+        i64::from(now.y.floor_to_int()),
+        i64::from(now.z.floor_to_int()),
+    );
+    assert!(
+        host.volume_solid(x, y, z - 1),
+        "the vehicle at ({x}, {y}, {z}) is hovering — nothing solid beneath it"
+    );
+    assert!(
+        !host.volume_solid(x, y, z),
+        "the vehicle at ({x}, {y}, {z}) is buried in the dune"
+    );
+}
+
+/// The patrol must stay on the map: driving off the edge is the one way a
+/// heading-only mover can leave the world entirely.
+#[test]
+fn the_vehicle_stays_inside_the_map() {
+    let mut backend = painted();
+    for _ in 0..2000 {
+        backend.on_tick().expect("tick");
+    }
+    let host = backend.host();
+    let pos = host.entity_position(host.entities()[0]);
+    let (x, y) = (
+        i64::from(pos.x.floor_to_int()),
+        i64::from(pos.y.floor_to_int()),
+    );
+    assert!(
+        (0..MAP_CELLS).contains(&x) && (0..MAP_CELLS).contains(&y),
+        "the vehicle drove off the map to ({x}, {y})"
+    );
+}
