@@ -20,8 +20,9 @@
 #![allow(clippy::many_single_char_names, clippy::similar_names)]
 
 use monada_fixed::{trig, Fixed, FixedVec3};
-use monada_runtime::{Host, LocalHost, LocalRules, MapRules};
-use monada_sim::ArchetypeId;
+use monada_runtime::{Host, LocalHost, LocalRules, MapRules, MoverProfile, VolumeLimits};
+use monada_sim::{ArchetypeId, EntityId};
+use std::collections::BTreeMap;
 
 pub mod gen;
 
@@ -56,9 +57,28 @@ pub mod material {
     pub const GLASS: MaterialId = MaterialId(4);
 }
 
+/// Armour: three cells of clearance, climbs two, no tunnels — the
+/// profile that makes the ridge a wall (§4b) and Dweller bores a private
+/// road (§6b).
+pub const VEHICLE: MoverProfile = MoverProfile {
+    height: 3,
+    max_step: VEHICLE_MAX_STEP,
+    tunnels: false,
+};
+
+/// Infantry: short, climbs four, and may use a bore.
+pub const INFANTRY: MoverProfile = MoverProfile {
+    height: 2,
+    max_step: INFANTRY_MAX_STEP,
+    tunnels: true,
+};
+
 /// The desert game.
 pub struct DesertRules {
     desert: Desert,
+    /// Retained paths, per vehicle — the state a Rhai map could not hold
+    /// (§3c). Hashed like everything else reachable from the rules.
+    paths: BTreeMap<EntityId, Vec<(i64, i64, i64)>>,
     /// The archetype `init` registered for vehicles — a handle, re-derived
     /// identically on every peer, not hashed state.
     vehicle_kind: Option<ArchetypeId>,
@@ -75,6 +95,7 @@ impl DesertRules {
     pub fn new(params: DesertParams) -> DesertRules {
         DesertRules {
             desert: Desert::new(params),
+            paths: BTreeMap::new(),
             vehicle_kind: None,
         }
     }
@@ -159,27 +180,116 @@ impl MapRules for DesertRules {
             return;
         };
         for vehicle in host.entities_of(kind) {
-            let pos = host.entity_position(vehicle);
-            let heading = host.entity_field(vehicle, "heading");
-            let step = Fixed::from_ratio(1, 8); // cells per tick
-            let (nx, ny) = (
-                pos.x + trig::cos(heading) * step,
-                pos.y + trig::sin(heading) * step,
-            );
-            // Turn rather than drive off the map. A quarter turn keeps the
-            // patrol inside the sand without any pathfinding, which is
-            // D-2's job.
-            let margin = Fixed::from_int(8);
-            let limit = Fixed::from_int(i32::try_from(MAP_CELLS).unwrap_or(i32::MAX)) - margin;
-            if nx < margin || ny < margin || nx > limit || ny > limit {
-                host.entity_set_field(vehicle, "heading", heading + trig::FRAC_PI_2);
-                continue;
-            }
-            let (cx, cy) = (nx.floor_to_int(), ny.floor_to_int());
-            let seat = Self::seat(host, i64::from(cx), i64::from(cy));
-            host.entity_set_position(vehicle, FixedVec3::new(nx, ny, seat.z));
-            host.entity_set_facing(vehicle, heading);
+            self.drive(host, vehicle);
         }
+    }
+}
+
+impl DesertRules {
+    /// The whole map, as the search's bounds.
+    fn nav_limits() -> VolumeLimits {
+        VolumeLimits {
+            bounds: (0, 0, MAP_CELLS - 1, MAP_CELLS - 1),
+            z_range: (gen::BEDROCK_Z, gen::SKY_Z),
+            // Generous: 65k columns is a big graph, and a vehicle that
+            // gives up early looks broken. Tightening this is a D-9
+            // profiling question, not a guess to make now (§4c).
+            budget: 40_000,
+        }
+    }
+
+    /// Advance one vehicle along its retained path, planning a new one
+    /// when it has arrived or has none.
+    ///
+    /// **The path lives in the rules, not in entity fields.** A Rhai map
+    /// could not hold one — script functions are pure, so the RTS demo
+    /// kept a destination plus one waypoint and re-planned every cell.
+    /// Typed state is exactly what decision L1 bought: plan once, walk
+    /// the list, re-plan when the world changes under it (§3c).
+    fn drive(&mut self, host: &dyn Host, vehicle: EntityId) {
+        let pos = host.entity_position(vehicle);
+        let (cx, cy) = (
+            i64::from(pos.x.floor_to_int()),
+            i64::from(pos.y.floor_to_int()),
+        );
+
+        if self.paths.get(&vehicle).map_or(true, Vec::is_empty) {
+            let goal = self.next_goal(host, vehicle, (cx, cy));
+            let from_z = Self::ground_under(host, cx, cy);
+            let to_z = Self::ground_under(host, goal.0, goal.1);
+            let path = host.nav_path3(
+                (cx, cy, from_z),
+                (goal.0, goal.1, to_z),
+                VEHICLE,
+                &Self::nav_limits(),
+            );
+            self.paths.insert(vehicle, path);
+        }
+
+        let Some(waypoints) = self.paths.get_mut(&vehicle) else {
+            return;
+        };
+        let Some(&(wx, wy, wz)) = waypoints.first() else {
+            return; // nowhere to go: the goal was unreachable from here
+        };
+
+        // Steer toward the waypoint's centre; pop it on arrival.
+        let target = FixedVec3::new(
+            Fixed::from_int(i32::try_from(wx).unwrap_or(0)),
+            Fixed::from_int(i32::try_from(wy).unwrap_or(0)),
+            Fixed::from_int(i32::try_from(wz + 1).unwrap_or(0)),
+        );
+        let (dx, dy) = (target.x - pos.x, target.y - pos.y);
+        let step = Fixed::from_ratio(1, 8); // cells per tick
+        let arrived = absf(dx) <= step && absf(dy) <= step;
+        if arrived {
+            waypoints.remove(0);
+            host.entity_set_position(vehicle, target);
+            return;
+        }
+        let heading = trig::atan2(dy, dx);
+        let nx = pos.x + trig::cos(heading) * step;
+        let ny = pos.y + trig::sin(heading) * step;
+        let seat = Self::seat(
+            host,
+            i64::from(nx.floor_to_int()),
+            i64::from(ny.floor_to_int()),
+        );
+        host.entity_set_position(vehicle, FixedVec3::new(nx, ny, seat.z));
+        host.entity_set_facing(vehicle, heading);
+    }
+
+    /// Where this vehicle heads next: the far corner it is not near, so
+    /// D-1's patrol becomes a real crossing of the map — over the ridge
+    /// for infantry, around it for armour, which is the whole point of
+    /// having a pathfinder at all.
+    fn next_goal(&self, host: &dyn Host, vehicle: EntityId, at: (i64, i64)) -> (i64, i64) {
+        let _ = (host, vehicle);
+        let (a, b) = (self.desert.start_location(0), self.desert.start_location(1));
+        let da = (at.0 - a.0).abs() + (at.1 - a.1).abs();
+        let db = (at.0 - b.0).abs() + (at.1 - b.1).abs();
+        if da < db {
+            b
+        } else {
+            a
+        }
+    }
+
+    /// The ground height under a cell, from the store.
+    fn ground_under(host: &dyn Host, x: i64, y: i64) -> i64 {
+        let mut z = gen::SKY_Z;
+        while z > gen::BEDROCK_Z && !host.volume_solid(x, y, z) {
+            z -= 1;
+        }
+        z
+    }
+}
+
+fn absf(v: Fixed) -> Fixed {
+    if v < Fixed::ZERO {
+        -v
+    } else {
+        v
     }
 }
 

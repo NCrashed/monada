@@ -24,6 +24,7 @@ use monada_fixed::{Fixed, FixedVec3};
 use monada_sim::{Command, PlayerId, World};
 
 mod host;
+mod nav;
 mod native;
 mod physics;
 mod snapshot;
@@ -31,7 +32,11 @@ mod volume;
 
 pub use host::{Host, LocalHost, RuntimeHost, WorldRead};
 pub use native::{LocalLayer, LocalRules, MapRules, NativeBackend, NativeLocalBackend};
+pub use nav::{shared_nav, NavCache, SharedNav};
 pub use physics::{shared_physics, DrillToolDef, PhysicsSim, SharedPhysics};
+// The navigation vocabulary a map speaks, re-exported so a rules crate
+// needs no direct monada-nav edge.
+pub use monada_nav::{MoverProfile, Stand, VolumeLimits};
 pub use snapshot::SNAPSHOT_VERSION;
 // Re-exported because it is part of VolumeStore's own API surface
 // (`set`/`fill`/`get` speak MaterialId) — consumers of the store should

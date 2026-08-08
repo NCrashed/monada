@@ -185,3 +185,111 @@ fn the_vehicle_stays_inside_the_map() {
         "the vehicle drove off the map to ({x}, {y})"
     );
 }
+
+/// The route must be walkable by the mover that asked for it.
+///
+/// "It moved" is not the property — a path that steps up a four-cell
+/// mountain face is a path armour cannot drive, and the unit would stall
+/// against it forever while the plan insists everything is fine. So the
+/// assertion is on the plan itself: consecutive waypoints are adjacent
+/// cells whose ground heights are within the vehicle's climb.
+#[test]
+fn a_planned_route_is_walkable_by_its_profile() {
+    use monada_desert_rules::{can_step, VEHICLE, VEHICLE_MAX_STEP};
+    use monada_runtime::VolumeLimits;
+
+    let backend = painted();
+    let host = backend.host();
+    let desert = DesertRules::new(DesertParams::default());
+    let (ax, ay) = desert.desert().start_location(0);
+    let (bx, by) = desert.desert().start_location(1);
+    let ground = |x: i64, y: i64| {
+        let mut z = monada_desert_rules::gen::SKY_Z;
+        while z > BEDROCK_Z && !host.volume_solid(x, y, z) {
+            z -= 1;
+        }
+        z
+    };
+
+    let limits = VolumeLimits {
+        bounds: (0, 0, MAP_CELLS - 1, MAP_CELLS - 1),
+        z_range: (BEDROCK_Z, monada_desert_rules::gen::SKY_Z),
+        budget: 40_000,
+    };
+    let path = host.nav_path3(
+        (ax, ay, ground(ax, ay)),
+        (bx, by, ground(bx, by)),
+        VEHICLE,
+        &limits,
+    );
+    assert!(
+        path.len() > 50,
+        "a corner-to-corner crossing should be a long route, got {}",
+        path.len()
+    );
+
+    let mut prev = (ax, ay, ground(ax, ay));
+    for &(x, y, z) in &path {
+        let (dx, dy) = ((x - prev.0).abs(), (y - prev.1).abs());
+        assert!(
+            dx <= 1 && dy <= 1 && (dx + dy) > 0,
+            "waypoints must be adjacent: {prev:?} → {:?}",
+            (x, y, z)
+        );
+        assert!(
+            can_step(prev.2, z, VEHICLE_MAX_STEP),
+            "step {prev:?} → {:?} climbs {} — armour cannot",
+            (x, y, z),
+            (z - prev.2).abs()
+        );
+        prev = (x, y, z);
+    }
+    assert_eq!(path.last(), Some(&(bx, by, ground(bx, by))));
+}
+
+/// Terraforming must be seen by the very next plan. The cache is the
+/// engine's, and a paint invalidates it — so a wall raised across a route
+/// changes the route without the rules asking for anything.
+#[test]
+fn a_wall_raised_after_planning_changes_the_next_route() {
+    use monada_desert_rules::VEHICLE;
+    use monada_runtime::{Host as _, VolumeLimits};
+
+    let backend = painted();
+    let host = backend.host();
+    let limits = VolumeLimits {
+        bounds: (0, 0, MAP_CELLS - 1, MAP_CELLS - 1),
+        z_range: (BEDROCK_Z, monada_desert_rules::gen::SKY_Z),
+        budget: 40_000,
+    };
+    let ground = |x: i64, y: i64| {
+        let mut z = monada_desert_rules::gen::SKY_Z;
+        while z > BEDROCK_Z && !host.volume_solid(x, y, z) {
+            z -= 1;
+        }
+        z
+    };
+    // A short hop across open sand near the first start location.
+    let (sx, sy) = DesertRules::new(DesertParams::default())
+        .desert()
+        .start_location(0);
+    let (from, to) = ((sx, sy, ground(sx, sy)), (sx + 6, sy, ground(sx + 6, sy)));
+    let before = host.nav_path3(from, to, VEHICLE, &limits);
+    assert_eq!(before.len(), 6, "six clear steps east: {before:?}");
+
+    // Raise a wall across the way, taller than armour can climb.
+    for y in (sy - 4)..=(sy + 4) {
+        host.volume_fill(
+            (sx + 3, y, BEDROCK_Z),
+            (sx + 3, y, ground(sx + 3, y) + 9),
+            material::ROCK,
+            0x8078_6c60,
+        );
+    }
+
+    let after = host.nav_path3(from, to, VEHICLE, &limits);
+    assert!(
+        after.len() > before.len(),
+        "the wall was not seen: {before:?} then {after:?}"
+    );
+}

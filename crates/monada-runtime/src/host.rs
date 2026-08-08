@@ -21,7 +21,9 @@
 use monada_fixed::{Fixed, FixedVec3};
 use monada_sim::{ArchetypeId, EntityId};
 
-use crate::{MaterialId, SharedBridge, SharedPhysics, SharedTerrain, SharedWorld};
+use monada_nav::{MoverProfile, VolumeLimits};
+
+use crate::{MaterialId, SharedBridge, SharedNav, SharedPhysics, SharedTerrain, SharedWorld};
 
 /// What **both** layers may do: read the world, and draw.
 ///
@@ -288,6 +290,7 @@ pub trait Host: WorldRead {
             // terrain that is no longer there.
             sim.world.notify_terrain_edit(lo, hi);
         }
+        self.invalidate_nav((lo.0, lo.1), (hi.0, hi.1));
         if let Some(b) = self.bridge() {
             b.lock()
                 .expect("bridge mutex")
@@ -303,6 +306,7 @@ pub trait Host: WorldRead {
             sim.terrain.clear(x, y, z);
             sim.world.notify_terrain_edit((x, y, z), (x, y, z));
         }
+        self.invalidate_nav((x, y), (x, y));
         if let Some(b) = self.bridge() {
             b.lock().expect("bridge mutex").voxel_clear(x, y, z);
         }
@@ -319,6 +323,74 @@ pub trait Host: WorldRead {
                 .get(x, y, z)
                 .is_some()
         })
+    }
+
+    // --- navigation -------------------------------------------------------
+
+    /// The stand-graph caches, one per mover profile
+    /// (docs/plans/desert-game.md §4c). `None` on a map with no volume
+    /// terrain to navigate.
+    fn nav(&self) -> Option<&SharedNav> {
+        None
+    }
+
+    /// Drop the navigation stands of every column in the box.
+    ///
+    /// Called by the paint verbs themselves, which is the point: whoever
+    /// changes the ground invalidates what was derived from it. Left to
+    /// the map, every terraforming verb would be a place to forget, and a
+    /// stale stand is not a visible bug — it is a unit walking
+    /// confidently through a wall raised two seconds ago.
+    fn invalidate_nav(&self, lo: (i64, i64), hi: (i64, i64)) {
+        if let Some(nav) = self.nav() {
+            nav.lock().expect("nav mutex").invalidate(lo, hi);
+        }
+    }
+
+    /// A deterministic path through the volume world for a mover of this
+    /// profile: waypoints after `from`, up to and including the goal, or
+    /// the closest reachable stand when the goal is not.
+    ///
+    /// The cache behind it is the engine's, not the map's, and that is
+    /// deliberate: the runtime owns the terrain, so it owns what is
+    /// derived from it, and a paint can invalidate the affected columns
+    /// without the rules having to remember to.
+    fn nav_path3(
+        &self,
+        from: (i64, i64, i64),
+        to: (i64, i64, i64),
+        profile: MoverProfile,
+        limits: &VolumeLimits,
+    ) -> Vec<(i64, i64, i64)> {
+        let (Some(nav), Some(phys)) = (self.nav(), self.volume()) else {
+            return Vec::new();
+        };
+        let sim = phys.lock().expect("physics mutex");
+        nav.lock()
+            .expect("nav mutex")
+            .for_profile(profile)
+            .path(&sim.terrain, from, to, limits)
+    }
+
+    /// The stand a mover of this profile would occupy at `(x, y)` nearest
+    /// ground height `z` — how a world position enters the graph.
+    fn nav_stand(
+        &self,
+        x: i64,
+        y: i64,
+        z: i64,
+        profile: MoverProfile,
+        z_range: (i64, i64),
+    ) -> Option<i64> {
+        let (Some(nav), Some(phys)) = (self.nav(), self.volume()) else {
+            return None;
+        };
+        let sim = phys.lock().expect("physics mutex");
+        nav.lock()
+            .expect("nav mutex")
+            .for_profile(profile)
+            .stand_at(&sim.terrain, x, y, z, z_range)
+            .map(|s| s.z)
     }
 }
 
@@ -387,6 +459,9 @@ pub struct RuntimeHost {
     bridge: Option<SharedBridge>,
     terrain: SharedTerrain,
     volume: Option<SharedPhysics>,
+    /// The stand graphs derived from the volume terrain. Created with the
+    /// volume, because the two are one fact seen twice.
+    nav: Option<SharedNav>,
 }
 
 impl RuntimeHost {
@@ -399,6 +474,7 @@ impl RuntimeHost {
             bridge: None,
             terrain: crate::shared_terrain(),
             volume: None,
+            nav: None,
         }
     }
 
@@ -411,6 +487,7 @@ impl RuntimeHost {
             bridge: None,
             terrain: terrain.clone(),
             volume: None,
+            nav: None,
         }
     }
 
@@ -430,6 +507,19 @@ impl RuntimeHost {
     /// map runs on. Call before `init`, like the bridge.
     pub fn set_volume(&mut self, phys: &SharedPhysics) {
         self.volume = Some(phys.clone());
+        self.nav.get_or_insert_with(crate::shared_nav);
+    }
+
+    /// Share an existing set of stand graphs — how the local layer plans
+    /// over the same ground, and the same cache, the simulation does.
+    pub fn set_nav(&mut self, nav: &SharedNav) {
+        self.nav = Some(nav.clone());
+    }
+
+    /// The stand graphs this host plans with.
+    #[must_use]
+    pub fn nav_cache(&self) -> Option<&SharedNav> {
+        self.nav.as_ref()
     }
 
     /// The shared world this host mutates.
@@ -480,6 +570,10 @@ impl WorldRead for RuntimeHost {
 impl Host for RuntimeHost {
     fn volume(&self) -> Option<&SharedPhysics> {
         self.volume.as_ref()
+    }
+
+    fn nav(&self) -> Option<&SharedNav> {
+        self.nav.as_ref()
     }
 
     fn archetype(&self, fields: &[&str]) -> ArchetypeId {
