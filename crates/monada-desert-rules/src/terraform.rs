@@ -271,9 +271,15 @@ impl Terraform {
 
     /// One tick: let the ground settle, then spend what is left on the
     /// orders, oldest first.
-    pub fn run(&mut self, host: &dyn Host) -> Spent {
+    ///
+    /// `allowance` is what the *player* may spend — [`CELLS_PER_TICK`]
+    /// scaled by the power their generators are actually delivering
+    /// (`Player::allowance`). The engine's own ceiling still applies on
+    /// top of it: a brownout slows the engineers, and nothing, brownout
+    /// or not, gets to spend more of a tick than §4e allows.
+    pub fn run(&mut self, host: &dyn Host, allowance: u32) -> Spent {
         let settled = host.settle(SETTLE_SHARE);
-        let allowance = CELLS_PER_TICK - settled.min(CELLS_PER_TICK);
+        let allowance = CELLS_PER_TICK.saturating_sub(settled).min(allowance);
         let mut edited = 0;
 
         // Snapshot the ids: a job finishing removes itself, and iterating

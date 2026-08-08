@@ -687,7 +687,15 @@ golden in `monada-hashes.txt`.
   automaton inert and an inert automaton hashes as nothing.
 - **D-4 — economy.** MCV deploy, refinery, harvester loop, surface crust
   depletion, deep veins via drill, silos, power. *Gate:* a scripted schedule
-  mines an exact credit total at an exact tick.
+  mines an exact credit total at an exact tick. **Met** (§13a): 145 credits
+  at tick 2000 from a 29-cell patch, and the same number every run. The
+  slice cost the engine nothing at all — **the spice is terrain**, so
+  harvesting is `volume_clear` on the top cell of a column and depletion,
+  deep veins and shell-scattered ore all fall out of that one rule.
+  Deferred to D-5/D-6 with the units that need them: MCV deploy (the base
+  is scripted at `init` for now) and the drill (a vein is exposed by
+  *excavation*, which D-3 already built, rather than by a special
+  vehicle).
 - **D-5 — base building.** Sidebar (panels, model icons, hover, clipped
   list), 3D placement rules, buried and elevated structures, repair.
   *Gate:* a headless build order produces an exact base on both a plateau
@@ -933,6 +941,47 @@ are the same shape of mistake.
 Both were found by measuring the thing the plan said to measure, and
 neither would have shown up in a test: the wrong one was merely slow, and
 the slow one was merely patient.
+
+**The economy, measured after building it** —
+`cargo run --release -p monada-desert-rules --example economy_perf`,
+against the real generated desert, working the nearest field with real
+routes and real re-targeting.
+
+| Harvesters | Mean/tick | Worst tick | Of a 33.3 ms tick |
+|---|---|---|---|
+| 1 | 0.001 ms | 0.3 ms | ~0 % |
+| 8 | 0.005 ms | 1.0 ms | ~0 % |
+| 24 | 0.013 ms | 1.9 ms | ~0 % |
+
+The steady state is free, and the reason is worth stating because it was
+not free at first: **every cost here was a loop, not a computation.**
+Three of them, all found by measuring rather than by testing, and each
+one an order of magnitude:
+
+- **The patrol vehicle recomputed its goal every tick.** "The far corner
+  I am not near" flips at the midpoint of the map, so the vehicle turned
+  around there — and a changed goal invalidates the retained route, so it
+  re-planned a full-map path *every tick for the rest of the match*.
+  3.5 ms a tick, ten percent of the budget, for one demo vehicle changing
+  its mind. A patrol has an order, not a preference.
+- **An idle harvester re-swept every spice field on the map, thirty times
+  a second.** A failed search is the expensive one, and on a mission whose
+  fields are exhausted *every* harvester is doing it at once. One second
+  of cooldown after a failure.
+- **A harvester re-targeting after each cut planned a full-map route to
+  the cell next to it.** Look under your nose first: a three-cell square
+  before the field sweep.
+
+Two gameplay bugs fell out of the same measurements, and both are the
+kind that only terrain-as-economy can produce. Spice was painted down the
+whole column rather than as a crust, so one cell of field was worth
+thirty cells of ore — and a harvester working it cut a thirty-deep shaft
+*under itself* and stranded, still loaded, forever. The crust fixed the
+value; the second half needed a rule of its own, and it is a good one: a
+harvester may not take a cell if the hole it leaves would be deeper than
+it can drive out of. To work a thick vein you must open the pit wide, not
+just deep — which is precisely the Dweller's verb, and precisely why
+their economy scales differently (§7).
 
 **Settling is a terrain edit that no map made.** The automaton writes to the
 store directly — it is the only thing in the engine that reshapes the ground

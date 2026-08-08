@@ -77,7 +77,7 @@ fn main() {
     let mut work = Terraform::new();
     work.order((8, 8), (57, 67), Work::Raise { level: 44 });
     let t = Instant::now();
-    let spent = work.run(host);
+    let spent = work.run(host, CELLS_PER_TICK);
     line(
         &format!("a {}-cell Raise tick, cold", spent.total()),
         ms(t),
@@ -105,7 +105,7 @@ fn main() {
     let mut work = Terraform::new();
     work.order((120, 8), (169, 67), Work::Raise { level: 44 });
     let t = Instant::now();
-    let spent = work.run(host);
+    let spent = work.run(host, CELLS_PER_TICK);
     line(
         &format!("a {}-cell Raise tick, warm nav", spent.total()),
         ms(t),
@@ -116,7 +116,7 @@ fn main() {
     let mut work = Terraform::new();
     work.order((60, 100), (99, 139), Work::Dig { level: 20, spoil: (200, 200) });
     let t = Instant::now();
-    let spent = work.run(host);
+    let spent = work.run(host, CELLS_PER_TICK);
     line(&format!("a {}-cell Dig tick", spent.total()), ms(t));
 
     // A shell, and then the tick that pays for it. The blast is not
@@ -127,7 +127,7 @@ fn main() {
 
     let mut idle = Terraform::new();
     let t = Instant::now();
-    let spent = idle.run(host);
+    let spent = idle.run(host, CELLS_PER_TICK);
     line(
         &format!("the settle tick after it ({} cells)", spent.settled),
         ms(t),
@@ -135,7 +135,7 @@ fn main() {
 
     let mut ticks = 1;
     let t = Instant::now();
-    while idle.run(host).settled > 0 {
+    while idle.run(host, CELLS_PER_TICK).settled > 0 {
         ticks += 1;
         assert!(ticks < 10_000, "the crater never came to rest");
     }
@@ -149,7 +149,7 @@ fn main() {
     // most matches have nothing falling anywhere. It has to be free.
     let t = Instant::now();
     for _ in 0..100 {
-        idle.run(host);
+        idle.run(host, CELLS_PER_TICK);
     }
     line("100 quiet ticks", ms(t));
 

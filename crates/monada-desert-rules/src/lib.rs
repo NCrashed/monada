@@ -19,18 +19,27 @@
 // Terse coordinate names are the domain's own (`x`, `y`, `z`, `lo`, `hi`).
 #![allow(clippy::many_single_char_names, clippy::similar_names)]
 
-use monada_fixed::{trig, Fixed, FixedVec3};
+use monada_fixed::{Fixed, FixedVec3};
 use monada_runtime::{
-    Host, LocalHost, LocalRules, MapRules, MoverProfile, Repose, VolumeLimits,
+    Host, LocalHost, LocalRules, MapRules, MoverProfile, Repose,
 };
 use monada_sim::{ArchetypeId, EntityId};
 use std::collections::BTreeMap;
 
+pub mod economy;
 pub mod gen;
+pub mod harvest;
+pub mod mover;
 pub mod terraform;
 
+pub use economy::{Building, Economy, Player, PlayerNo, Structure};
 pub use gen::{Desert, DesertParams, Surface};
+pub use harvest::{Fleet, Yield};
+pub use mover::Router;
 pub use terraform::{JobId, Spent, Terraform, Work};
+
+/// What a player starts a skirmish with. Dune II's number.
+pub const STARTING_CREDITS: u32 = 1_000;
 
 /// Sand's angle of repose, as the steepest drop it will hold: one cell
 /// (§4d). Spice behaves the same — it is dust. Everything else on the
@@ -120,17 +129,32 @@ pub const INFANTRY: MoverProfile = MoverProfile {
 /// The desert game.
 pub struct DesertRules {
     desert: Desert,
-    /// Retained paths, per vehicle — the state a Rhai map could not hold
+    /// Where the generator put spice, surface and buried — the discs the
+    /// harvesters search. Derived from the parameter block, so every peer
+    /// computes the same list; cached because it is the same every tick.
+    sites: Vec<harvest::Site>,
+    /// Retained routes, per mover — the state a Rhai map could not hold
     /// (§3c). Hashed like everything else reachable from the rules.
-    paths: BTreeMap<EntityId, Vec<(i64, i64, i64)>>,
+    router: Router,
     /// Terraform orders in flight and the allowance they share (§4e).
     terraform: Terraform,
-    /// The last tick's terraform charge, for the HUD to show and a test
-    /// to assert on. Derived, not state: it is recomputed every tick.
+    /// Credits, storage and power, per player (§7).
+    economy: Economy,
+    /// Every structure standing, and whose it is.
+    buildings: BTreeMap<EntityId, Building>,
+    /// Every harvester in service.
+    fleet: Fleet,
+    /// Which corner the D-1 patrol vehicle is currently crossing to.
+    patrol_goal: Option<(i64, i64)>,
+    /// The last tick's terraform charge and harvest, for the HUD to show
+    /// and a test to assert on. Derived, not state: recomputed each tick.
     spent: Spent,
-    /// The archetype `init` registered for vehicles — a handle, re-derived
+    harvested: Yield,
+    /// Archetypes and model ids `init` registered — handles, re-derived
     /// identically on every peer, not hashed state.
     vehicle_kind: Option<ArchetypeId>,
+    unit_kind: Option<ArchetypeId>,
+    building_kind: Option<ArchetypeId>,
 }
 
 impl Default for DesertRules {
@@ -142,12 +166,21 @@ impl Default for DesertRules {
 impl DesertRules {
     #[must_use]
     pub fn new(params: DesertParams) -> DesertRules {
+        let desert = Desert::new(params);
         DesertRules {
-            desert: Desert::new(params),
-            paths: BTreeMap::new(),
+            sites: desert.spice_sites(),
+            desert,
+            router: Router::new(),
             terraform: Terraform::new(),
+            economy: Economy::new(),
+            buildings: BTreeMap::new(),
+            fleet: Fleet::new(),
+            patrol_goal: None,
             spent: Spent::default(),
+            harvested: Yield::default(),
             vehicle_kind: None,
+            unit_kind: None,
+            building_kind: None,
         }
     }
 
@@ -156,10 +189,28 @@ impl DesertRules {
         &mut self.terraform
     }
 
+    /// The economy, for the HUD and for tests.
+    #[must_use]
+    pub fn economy(&self) -> &Economy {
+        &self.economy
+    }
+
+    /// The harvester fleet, for the HUD and for tests.
+    #[must_use]
+    pub fn fleet(&self) -> &Fleet {
+        &self.fleet
+    }
+
     /// What the last tick's terraforming cost.
     #[must_use]
     pub fn spent(&self) -> Spent {
         self.spent
+    }
+
+    /// What the last tick's harvesting brought in.
+    #[must_use]
+    pub fn harvested(&self) -> Yield {
+        self.harvested
     }
 
     /// Where a vehicle standing on cell `(x, y)` sits: the first solid
@@ -192,17 +243,55 @@ impl DesertRules {
         for y in 0..MAP_CELLS {
             for x in 0..MAP_CELLS {
                 let (height, surface) = self.desert.column(x, y);
-                let material = match surface {
-                    Surface::Sand | Surface::Dune => material::SAND,
+                let base = match surface {
+                    Surface::Sand | Surface::Dune | Surface::Spice => material::SAND,
                     Surface::Rock | Surface::Mountain => material::ROCK,
-                    Surface::Spice => material::SPICE,
                 };
-                host.volume_fill(
-                    (x, y, gen::BEDROCK_Z),
-                    (x, y, height),
-                    material,
-                    surface.color(),
-                );
+                // Spice is a CRUST over sand, not a column of spice down
+                // to bedrock (§7). Painted the other way, one cell of
+                // field was worth thirty cells of ore — and, worse, a
+                // harvester working it cut a thirty-deep shaft under
+                // itself and stranded, because how deep the seam runs is
+                // also how deep the hole is.
+                let crust = if surface == Surface::Spice {
+                    gen::SPICE_CRUST
+                } else {
+                    0
+                };
+                let vein = self.desert.vein_at(x, y);
+                if crust == 0 && vein.is_none() {
+                    host.volume_fill(
+                        (x, y, gen::BEDROCK_Z),
+                        (x, y, height),
+                        base,
+                        surface.color(),
+                    );
+                    continue;
+                }
+                // A layered column is painted in its runs, not as one box
+                // overpainted. The store would take the overpaint — a
+                // later write wins — but the render grid would not: a
+                // paint over an existing solid does not recolour it, so
+                // the seam would be ore you can harvest and sand you can
+                // see. Only the columns that have a seam pay for this.
+                let seam = |z: i64| {
+                    z > height - crust || vein.is_some_and(|(lo, hi)| z >= lo && z <= hi)
+                };
+                let mut lo = gen::BEDROCK_Z;
+                let mut ore = seam(gen::BEDROCK_Z);
+                for z in (gen::BEDROCK_Z + 1)..=(height + 1) {
+                    if z <= height && seam(z) == ore {
+                        continue;
+                    }
+                    let (mat, color) = if ore {
+                        (material::SPICE, Surface::Spice.color())
+                    } else {
+                        (base, surface.color())
+                    };
+                    host.volume_fill((x, y, lo), (x, y, z - 1), mat, color);
+                    lo = z;
+                    ore = z <= height && seam(z);
+                }
             }
         }
     }
@@ -226,7 +315,7 @@ impl MapRules for DesertRules {
 
         // One vehicle, so D-1 has something that moves over the dunes and
         // proves the seat-on-terrain maths. Orders and pathfinding are
-        // D-2; this one drives a fixed heading and turns at the edges.
+        // D-2; this one crosses the map corner to corner forever.
         let kind = host.archetype(&["heading"]);
         self.vehicle_kind = Some(kind);
         let model = host.model_box(24, 16, 10, Surface::Rock.color());
@@ -235,6 +324,8 @@ impl MapRules for DesertRules {
         host.entity_set_model(vehicle, model);
         host.entity_set_field(vehicle, "heading", Fixed::ZERO);
         host.entity_set_position(vehicle, Self::seat(host, sx, sy));
+
+        self.found_base(host, 0, (sx + 6, sy + 6));
 
         host.set_light(
             FixedVec3::new(
@@ -251,47 +342,67 @@ impl MapRules for DesertRules {
     }
 
     fn tick(&mut self, host: &dyn Host, _dt: Fixed) {
-        // The ground first: settling and the terraform orders both change
+        // Power before work, because power is what work costs (§4e): the
+        // buildings standing at the top of the tick decide how fast the
+        // engineers dig during it.
+        self.economy.begin_tick();
+        self.economy.count(self.buildings.values());
+        let allowance = self.economy.player(0).allowance();
+
+        // Then the ground: settling and the terraform orders both change
         // what the movers below are about to walk on, and a unit that
         // steps onto a cell the same tick it collapses should fall, not
         // hover. Doing it in the other order would hide that by one tick.
-        self.spent = self.terraform.run(host);
-        if self.spent.total() > 0 {
-            host.status(&format!(
-                "terraforming — {} cells cut and filled, {} settling, {} orders in flight",
-                self.spent.edited,
-                self.spent.settled,
-                self.terraform.pending()
-            ));
-        } else if self.terraform.pending() == 0 {
-            host.status("the desert — D-3");
-        }
+        self.spent = self.terraform.run(host, allowance);
+
+        self.harvested = self.fleet.run(
+            host,
+            &mut self.economy,
+            &mut self.router,
+            &self.sites,
+            VEHICLE,
+        );
+        self.economy.end_tick();
+        self.report(host);
 
         let Some(kind) = self.vehicle_kind else {
             return;
         };
         for vehicle in host.entities_of(kind) {
-            self.drive(host, vehicle);
+            self.patrol(host, vehicle);
         }
     }
 
-    /// The rules' own hashed state (§3c): the retained paths and the
-    /// terraform queue. Both are things a Rhai map could not have held,
-    /// and both are things two peers must agree on to the cell — a path
-    /// decides where a unit will be next second, a job decides what the
-    /// ground will be.
+    /// The rules' own hashed state (§3c): retained routes, the terraform
+    /// queue, the economy, the buildings and the fleet. Every one of them
+    /// is something a Rhai map could not have held, and every one is
+    /// something two peers must agree on to the cell — a route decides
+    /// where a unit will be next second, a job decides what the ground
+    /// will be, a credit decides what gets built.
     ///
     /// The generator is not in here: it is a pure function of the
     /// parameter block every peer already has, so serializing it would
-    /// only be a slower way of agreeing on what is already agreed.
+    /// only be a slower way of agreeing on what is already agreed. Nor
+    /// are the archetype and model handles, which are re-derived by
+    /// `init` identically everywhere.
     fn snapshot(&self) -> Vec<u8> {
-        postcard::to_stdvec(&(&self.paths, &self.terraform)).unwrap_or_default()
+        postcard::to_stdvec(&(
+            &self.router,
+            &self.terraform,
+            &self.economy,
+            &self.buildings,
+            &self.fleet,
+        ))
+        .unwrap_or_default()
     }
 
     fn restore(&mut self, bytes: &[u8]) {
-        if let Ok((paths, terraform)) = postcard::from_bytes(bytes) {
-            self.paths = paths;
+        if let Ok((router, terraform, economy, buildings, fleet)) = postcard::from_bytes(bytes) {
+            self.router = router;
             self.terraform = terraform;
+            self.economy = economy;
+            self.buildings = buildings;
+            self.fleet = fleet;
         }
     }
 }
@@ -327,92 +438,103 @@ impl DesertRules {
         Terraform::crater(host, (sx, sy + 22), 8);
     }
 
-    /// The whole map, as the search's bounds.
-    fn nav_limits() -> VolumeLimits {
-        VolumeLimits {
-            bounds: (0, 0, MAP_CELLS - 1, MAP_CELLS - 1),
-            z_range: (gen::BEDROCK_Z, gen::SKY_Z),
-            // Generous: 65k columns is a big graph, and a vehicle that
-            // gives up early looks broken. Tightening this is a D-9
-            // profiling question, not a guess to make now (§4c).
-            budget: 40_000,
-        }
-    }
-
-    /// Advance one vehicle along its retained path, planning a new one
-    /// when it has arrived or has none.
+    /// Found a player's starting base: a refinery, a silo to overflow
+    /// into, a wind trap to pay for the digging, and one harvester.
     ///
-    /// **The path lives in the rules, not in entity fields.** A Rhai map
-    /// could not hold one — script functions are pure, so the RTS demo
-    /// kept a destination plus one waypoint and re-planned every cell.
-    /// Typed state is exactly what decision L1 bought: plan once, walk
-    /// the list, re-plan when the world changes under it (§3c).
-    fn drive(&mut self, host: &dyn Host, vehicle: EntityId) {
-        let pos = host.entity_position(vehicle);
-        let (cx, cy) = (
-            i64::from(pos.x.floor_to_int()),
-            i64::from(pos.y.floor_to_int()),
-        );
+    /// The gate for this slice is "a scripted schedule mines an exact
+    /// credit total at an exact tick" — this is the schedule, and D-5
+    /// replaces it with an MCV the player deploys where they like.
+    fn found_base(&mut self, host: &dyn Host, owner: PlayerNo, at: (i64, i64)) {
+        let buildings = *self
+            .building_kind
+            .get_or_insert_with(|| host.archetype(&["owner", "kind"]));
+        let units = *self
+            .unit_kind
+            .get_or_insert_with(|| host.archetype(&["owner", "load"]));
 
-        if self.paths.get(&vehicle).map_or(true, Vec::is_empty) {
-            let goal = self.next_goal(host, vehicle, (cx, cy));
-            let from_z = Self::ground_under(host, cx, cy);
-            let to_z = Self::ground_under(host, goal.0, goal.1);
-            let path = host.nav_path3(
-                (cx, cy, from_z),
-                (goal.0, goal.1, to_z),
-                VEHICLE,
-                &Self::nav_limits(),
-            );
-            self.paths.insert(vehicle, path);
+        self.economy.found(owner, STARTING_CREDITS);
+
+        let refinery = (at.0, at.1);
+        for (kind, cell, model) in [
+            (
+                Structure::Refinery,
+                refinery,
+                host.model_box(40, 40, 20, 0x80a8_a098),
+            ),
+            (
+                Structure::Silo,
+                (at.0 + 5, at.1),
+                host.model_box(24, 24, 14, 0x8090_8078),
+            ),
+            (
+                Structure::WindTrap,
+                (at.0, at.1 + 5),
+                host.model_box(24, 24, 26, 0x8060_8ca0),
+            ),
+        ] {
+            let e = host.entity_create(buildings);
+            host.entity_set_model(e, model);
+            host.entity_set_field(e, "owner", Fixed::from_int(i32::from(owner)));
+            host.entity_set_position(e, Self::seat(host, cell.0, cell.1));
+            self.buildings.insert(e, Building { owner, kind });
         }
 
-        let Some(waypoints) = self.paths.get_mut(&vehicle) else {
-            return;
-        };
-        let Some(&(wx, wy, wz)) = waypoints.first() else {
-            return; // nowhere to go: the goal was unreachable from here
-        };
-
-        // Steer toward the waypoint's centre; pop it on arrival.
-        let target = FixedVec3::new(
-            Fixed::from_int(i32::try_from(wx).unwrap_or(0)),
-            Fixed::from_int(i32::try_from(wy).unwrap_or(0)),
-            Fixed::from_int(i32::try_from(wz + 1).unwrap_or(0)),
-        );
-        let (dx, dy) = (target.x - pos.x, target.y - pos.y);
-        let step = Fixed::from_ratio(1, 8); // cells per tick
-        let arrived = absf(dx) <= step && absf(dy) <= step;
-        if arrived {
-            waypoints.remove(0);
-            host.entity_set_position(vehicle, target);
-            return;
-        }
-        let heading = trig::atan2(dy, dx);
-        let nx = pos.x + trig::cos(heading) * step;
-        let ny = pos.y + trig::sin(heading) * step;
-        let seat = Self::seat(
-            host,
-            i64::from(nx.floor_to_int()),
-            i64::from(ny.floor_to_int()),
-        );
-        host.entity_set_position(vehicle, FixedVec3::new(nx, ny, seat.z));
-        host.entity_set_facing(vehicle, heading);
+        let model = host.model_box(28, 20, 12, 0x80c8_9840);
+        let harvester = host.entity_create(units);
+        host.entity_set_model(harvester, model);
+        host.entity_set_field(harvester, "owner", Fixed::from_int(i32::from(owner)));
+        host.entity_set_position(harvester, Self::seat(host, at.0 + 3, at.1 + 3));
+        self.fleet.enlist(harvester, owner, refinery);
     }
 
-    /// Where this vehicle heads next: the far corner it is not near, so
-    /// D-1's patrol becomes a real crossing of the map — over the ridge
-    /// for infantry, around it for armour, which is the whole point of
-    /// having a pathfinder at all.
-    fn next_goal(&self, host: &dyn Host, vehicle: EntityId, at: (i64, i64)) -> (i64, i64) {
-        let _ = (host, vehicle);
-        let (a, b) = (self.desert.start_location(0), self.desert.start_location(1));
-        let da = (at.0 - a.0).abs() + (at.1 - a.1).abs();
-        let db = (at.0 - b.0).abs() + (at.1 - b.1).abs();
-        if da < db {
-            b
+    /// The HUD line: whichever of the two loops is doing something.
+    fn report(&self, host: &dyn Host) {
+        let Some(p) = self.economy.get(0) else {
+            return;
+        };
+        if self.spent.total() > 0 {
+            host.status(&format!(
+                "terraforming — {} cells cut and filled, {} settling, {} orders, {}% power",
+                self.spent.edited,
+                self.spent.settled,
+                self.terraform.pending(),
+                p.satisfaction()
+            ));
         } else {
-            a
+            host.status(&format!(
+                "{} credits of {} — {} power made, {} drawn{}",
+                p.credits,
+                p.capacity,
+                p.made,
+                p.used,
+                if p.spilled > 0 {
+                    format!(" — {} spilled, build a silo", p.spilled)
+                } else {
+                    String::new()
+                }
+            ));
+        }
+    }
+
+    /// D-1's patrol, now on the shared router: cross the map, corner to
+    /// corner, forever — over the ridge for infantry, around it for
+    /// armour, which is the whole point of having a pathfinder at all.
+    fn patrol(&mut self, host: &dyn Host, vehicle: EntityId) {
+        // **The goal is remembered, not recomputed.** Deriving it from
+        // "the far corner I am not near" reads fine and is a trap: the
+        // comparison flips at the midpoint of the map, so the vehicle
+        // turns around there — and, because a changed goal invalidates
+        // the retained route, re-plans a full-map path every single tick
+        // for the rest of the match. Measured at 3.5 ms a tick, which is
+        // ten percent of the budget spent on one demo vehicle changing
+        // its mind. A patrol has an order, not a preference.
+        let (a, b) = (self.desert.start_location(0), self.desert.start_location(1));
+        let goal = *self.patrol_goal.get_or_insert(b);
+        let step = self
+            .router
+            .step(host, vehicle, goal, VEHICLE, Fixed::from_ratio(1, 8));
+        if step != mover::Step::Moving {
+            self.patrol_goal = Some(if goal == b { a } else { b });
         }
     }
 
@@ -425,14 +547,6 @@ impl DesertRules {
     /// the floor rather than at `SKY_Z`.
     fn ground_under(host: &dyn Host, x: i64, y: i64) -> i64 {
         host.volume_top(x, y).map_or(gen::BEDROCK_Z, |(z, _)| z)
-    }
-}
-
-fn absf(v: Fixed) -> Fixed {
-    if v < Fixed::ZERO {
-        -v
-    } else {
-        v
     }
 }
 

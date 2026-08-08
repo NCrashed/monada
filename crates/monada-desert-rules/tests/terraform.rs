@@ -62,7 +62,7 @@ fn plate(mat: MaterialId) -> (NativeBackend, SharedPhysics) {
 fn run_out(work: &mut Terraform, host: &dyn Host) -> u32 {
     let mut ticks = 0;
     loop {
-        let spent = work.run(host);
+        let spent = work.run(host, CELLS_PER_TICK);
         assert!(
             spent.total() <= CELLS_PER_TICK,
             "tick {ticks} spent {} of {CELLS_PER_TICK}",
@@ -283,7 +283,7 @@ fn vitrifying_twice_is_free_the_second_time() {
     run_out(&mut work, host);
 
     work.order((8, 8), (11, 11), Work::Vitrify { depth: 2 });
-    let spent = work.run(host);
+    let spent = work.run(host, CELLS_PER_TICK);
     assert_eq!(spent.edited, 0, "re-glassing glass cost {} cells", spent.edited);
     assert_eq!(work.pending(), 0);
 }
@@ -344,7 +344,7 @@ fn no_tick_spends_more_than_the_allowance() {
     let mut work = Terraform::new();
     // Far more work than one tick can hold: the whole plate, ten cells up.
     work.order((0, 0), (SIZE - 1, SIZE - 1), Work::Raise { level: TOP + 10 });
-    let first = work.run(host);
+    let first = work.run(host, CELLS_PER_TICK);
     assert!(first.total() <= CELLS_PER_TICK);
     assert!(work.pending() > 0, "the order finished in one tick");
 
@@ -366,7 +366,7 @@ fn settling_gets_its_share_of_a_busy_tick() {
     Terraform::crater(host, (12, 12), 6);
     let mut work = Terraform::new();
     work.order((0, 0), (SIZE - 1, SIZE - 1), Work::Raise { level: TOP + 10 });
-    let spent = work.run(host);
+    let spent = work.run(host, CELLS_PER_TICK);
     assert!(spent.settled > 0, "the crater did not settle");
     assert!(spent.edited > 0, "the order got no allowance");
     assert!(spent.total() <= CELLS_PER_TICK);

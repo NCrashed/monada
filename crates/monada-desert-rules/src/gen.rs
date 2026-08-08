@@ -67,6 +67,10 @@ pub struct DesertParams {
     pub ridge_half_width: i64,
     /// How many spice fields to scatter.
     pub spice_fields: i64,
+    /// How many DEEP veins to bury (§7). Fewer and richer than the
+    /// surface fields, and worth nothing to a faction that cannot get
+    /// the overburden off them.
+    pub spice_veins: i64,
     /// Lay out a demonstration of the three terraform verbs beside the
     /// starting position (§4e). On for a run you can look at; off for a
     /// test that wants the ground the generator promised and nothing
@@ -82,6 +86,7 @@ impl Default for DesertParams {
             rock_percent: 35,
             ridge_half_width: 14,
             spice_fields: 6,
+            spice_veins: 3,
             proving_ground: true,
         }
     }
@@ -98,6 +103,21 @@ pub const SKY_Z: i64 = 64;
 /// of "mountains wall out armour and admit infantry" — no cliff markup,
 /// no separate obstacle layer, just the heightmap and the walk rule.
 pub const MOUNTAIN_STEP: i64 = 3;
+
+/// How thick the harvestable surface crust is (§7).
+///
+/// Two, and the ceiling on it is a vehicle's climb
+/// ([`VEHICLE_MAX_STEP`](crate::VEHICLE_MAX_STEP)): the crust is also the
+/// depth of the hole that working it leaves behind, and a harvester that
+/// cuts a pit steeper than it can drive out of is a harvester lost to
+/// its own economy.
+pub const SPICE_CRUST: i64 = 2;
+
+/// How far under the surface a deep vein lies, and how thick it gets at
+/// its centre. Deeper than a crater reaches and deeper than a wheel
+/// rut: getting at one is a decision, not an accident.
+pub const VEIN_DEPTH: i64 = 6;
+pub const VEIN_MAX_THICKNESS: i64 = 4;
 
 /// How many candidate centres a spice field tries before giving up on
 /// finding sand. Small: the map is mostly sand, so a handful of tries
@@ -269,6 +289,76 @@ impl Desert {
             }
         }
         None
+    }
+
+    /// The buried spice in a column: the inclusive `z` range of a deep
+    /// vein, or `None` (docs/plans/desert-game.md §7).
+    ///
+    /// **The reason the three factions' economies scale differently, and
+    /// it costs the engine nothing.** Surface crust is harvested the
+    /// classical way; a vein sits [`VEIN_DEPTH`] cells below the surface,
+    /// so it is worth exactly as much as your ability to remove what is
+    /// on top of it — a Dweller trench, a Binder's collapsed glass, a
+    /// crater from a shell that missed. Nothing in the harvesting rule
+    /// knows about veins at all: it takes the top cell of a column when
+    /// that cell is spice, and digging is what makes that true.
+    ///
+    /// Lens-shaped rather than a slab, so the edge of a vein pays worse
+    /// than its middle and there is a reason to dig in the right place.
+    #[must_use]
+    pub fn vein_at(&self, x: i64, y: i64) -> Option<(i64, i64)> {
+        for i in 0..self.params.spice_veins {
+            let (cx, cy, radius) = self.vein_field(i);
+            let (dx, dy) = (x - cx, y - cy);
+            let d2 = dx * dx + dy * dy;
+            if d2 > radius * radius {
+                continue;
+            }
+            let thickness = 1 + (radius * radius - d2) * VEIN_MAX_THICKNESS / (radius * radius);
+            let top = self.column(x, y).0 - VEIN_DEPTH;
+            let lo = (top - thickness + 1).max(BEDROCK_Z + 1);
+            if lo > top {
+                continue; // the surface here is too shallow to bury one
+            }
+            return Some((lo, top));
+        }
+        None
+    }
+
+    /// Every disc the generator put spice in — surface fields first,
+    /// then deep veins.
+    ///
+    /// This is the harvesters' search space (§7). Scanning the *known*
+    /// discs rather than sweeping the map is the difference between a
+    /// thousand column reads on a re-target and sixty-five thousand, and
+    /// it is exhaustive by construction: no cell of spice exists on the
+    /// map that is not inside one of these.
+    #[must_use]
+    pub fn spice_sites(&self) -> Vec<(i64, i64, i64)> {
+        let mut sites = Vec::new();
+        for i in 0..self.params.spice_fields {
+            if let Some(field) = self.spice_field(i) {
+                sites.push(field);
+            }
+        }
+        for i in 0..self.params.spice_veins {
+            sites.push(self.vein_field(i));
+        }
+        sites
+    }
+
+    /// The `i`-th deep vein's centre and radius. Unlike a surface field
+    /// this needs no resampling: a vein under a rock shelf is a perfectly
+    /// good vein, and arguably the most interesting one.
+    fn vein_field(&self, i: i64) -> (i64, i64, i64) {
+        let margin = 24;
+        let span = u32::try_from(MAP_CELLS - 2 * margin).expect("the map is 256 cells wide");
+        let h = hash2(i, -1, self.params.seed ^ 0x0DEE_9000);
+        (
+            i64::from(h % span) + margin,
+            i64::from((h >> 11) % span) + margin,
+            12 + i64::from((h >> 23) % 8),
+        )
     }
 
     /// The shelf-or-dune classification alone — the recursion guard for
