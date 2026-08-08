@@ -923,6 +923,14 @@ struct Puff {
 
 /// Puff lifetime, seconds.
 const PUFF_TTL: f64 = 0.45;
+/// The most dust that may be in the air at once.
+///
+/// The feature was written for a drill, which carves a handful of cells
+/// a tick. A terraforming game carves *thousands* — one radius-12 crater
+/// is 3356 — and a puff is a 7³ sprite instance, so an unbudgeted blast
+/// puts three thousand of them in the sprite set for half a second.
+/// Decoration gets a ceiling; a drill never reaches it.
+const MAX_PUFFS: usize = 96;
 /// Puff rise rate, world voxels per second (upward = −z).
 const PUFF_RISE: f64 = 24.0;
 
@@ -2855,9 +2863,18 @@ impl MapRender {
             }
             self.sky_uploaded = true;
         }
-        // Debris puffs ride the static instance list — append before the
-        // upload below.
-        self.sync_puffs(dt);
+        // Debris puffs ride the static instance list, which is only safe
+        // while that list is genuinely rebuilt every frame. On a
+        // dynamic-layer map it is uploaded ONCE — see below — so a puff
+        // appended here would be baked into that single upload and hang
+        // in the air for the rest of the match, and every puff after it
+        // would be invisible. A crater's worth of them frozen over the
+        // hole is a permanent, expensive dust cloud.
+        //
+        // So: age them either way, and only draw them where drawing them
+        // works. Dust on a dynamic-layer map wants the dynamic path,
+        // which is the FX bridge of D-6 rather than a patch here.
+        self.frame_puffs(dt);
         // Upload the static sprite set *before* driving the actors:
         // `set_sprites` resets the dynamic layer (clips + actors +
         // characters), so a map with animated models uploads its static set
@@ -2955,6 +2972,35 @@ impl MapRender {
     /// path can't carry them on actor maps). Tear-down + re-add per frame:
     /// selection counts are tiny and `remove_sprite_instance` is an O(1)
     /// swap, so reconciliation would be complexity for nothing.
+    /// One frame.s worth of debris: age it, and draw it only where
+    /// drawing it works.
+    ///
+    /// A separate method rather than an `if` inside the render path so a
+    /// headless test can hold it to the rule — the render path itself
+    /// needs a window, and this is precisely the decision that was wrong.
+    fn frame_puffs(&mut self, dt: f64) {
+        if self.dynamic_layer() {
+            self.age_puffs(dt);
+        } else {
+            self.sync_puffs(dt);
+        }
+    }
+
+    /// Age the debris puffs and drop the dead ones, without drawing any.
+    ///
+    /// The half of [`sync_puffs`](Self::sync_puffs) that has to happen on
+    /// every map: a puff nobody draws must still expire, or a map that
+    /// carves and never draws dust accumulates it forever.
+    fn age_puffs(&mut self, dt: f64) {
+        if self.puffs.is_empty() {
+            return;
+        }
+        for p in &mut self.puffs {
+            p.age += dt;
+        }
+        self.puffs.retain(|p| p.age < PUFF_TTL);
+    }
+
     /// Age, cull and draw the debris puffs: each is a static-set sprite
     /// instance (see `puff_models` on why not the dynamic layer), rising
     /// from its cell for [`PUFF_TTL`] seconds. Runs before the sprite-set
@@ -2963,13 +3009,7 @@ impl MapRender {
     /// immediate-mode contract the rest of the sprite path already lives
     /// by.
     fn sync_puffs(&mut self, dt: f64) {
-        if self.puffs.is_empty() {
-            return;
-        }
-        for p in &mut self.puffs {
-            p.age += dt;
-        }
-        self.puffs.retain(|p| p.age < PUFF_TTL);
+        self.age_puffs(dt);
         for i in 0..self.puffs.len() {
             let (color, pos, age) = {
                 let p = &self.puffs[i];
@@ -3727,8 +3767,9 @@ impl HostBridge for MapRender {
             // puff at the cell (plan §1d) — read it BEFORE the punch.
             if let Some(id) = self.world_grid {
                 let (lo, hi) = cell_box_to_volume_grid(x, y, z, x, y, z);
+                let room = self.puffs.len() < MAX_PUFFS;
                 if let Some(grid) = self.scene.grid_mut(id) {
-                    if let Some(color) = grid.voxel_color(lo) {
+                    if let (true, Some(color)) = (room, grid.voxel_color(lo)) {
                         let center = volume_world_of(DVec3::new(
                             x as f64 + 0.5,
                             y as f64 + 0.5,
@@ -4343,6 +4384,78 @@ mod tests {
     //! frame computes for `update_actors` to apply.
     use super::*;
     use monada_sim::World;
+
+    /// Dust is decoration, and decoration gets a ceiling.
+    ///
+    /// The feature was written for a drill carving a handful of cells a
+    /// tick. A terraforming game carves thousands at once — one crater is
+    /// three thousand — and each puff is a 7³ sprite instance in the set
+    /// that gets uploaded. Unbudgeted, a single blast is a visible stall.
+    #[test]
+    fn a_blast_cannot_fill_the_air_with_dust() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        r.set_volume_terrain();
+        r.voxel_fill(0, 0, 0, 40, 40, 4, 0x8070_5838);
+        for y in 0..40 {
+            for x in 0..40 {
+                r.voxel_clear(x, y, 4);
+            }
+        }
+        assert_eq!(
+            r.puffs.len(),
+            MAX_PUFFS,
+            "sixteen hundred carves put {} puffs in the air",
+            r.puffs.len()
+        );
+        // And they still expire — a cap that leaked would be worse than
+        // no cap, because the air would never clear again.
+        r.age_puffs(PUFF_TTL + 0.01);
+        assert!(r.puffs.is_empty());
+    }
+
+    /// A puff must never reach a sprite set that is uploaded once.
+    ///
+    /// The static instance list is rebuilt every frame — but only on a
+    /// map with no posed sprites. On a dynamic-layer map it is uploaded
+    /// exactly once, so a puff appended to it hangs in the air for the
+    /// rest of the match while every later puff is invisible. A crater's
+    /// worth of them frozen over the hole is a permanent dust cloud that
+    /// costs a frame's sprite budget forever, and it is what playing the
+    /// desert actually looked like.
+    #[test]
+    fn dust_stays_out_of_a_sprite_set_that_gets_frozen() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        r.set_volume_terrain();
+        r.voxel_fill(0, 0, 0, 8, 8, 2, 0x8070_5838);
+
+        // A static-set map draws its dust: the set is rebuilt each frame,
+        // so an appended instance survives exactly one frame as intended.
+        r.voxel_clear(1, 1, 2);
+        assert!(!r.dynamic_layer());
+        let before = r.sprites.instances.len();
+        r.frame_puffs(0.0);
+        assert_eq!(
+            r.sprites.instances.len(),
+            before + 1,
+            "a static-set map should draw its dust"
+        );
+
+        // Now the map turns something, which is all it takes: posed
+        // sprites mean the static set is uploaded once and kept.
+        r.entity_set_facing(1, Fixed::from_f64(0.5));
+        assert!(r.dynamic_layer());
+        let before = r.sprites.instances.len();
+        r.frame_puffs(0.0);
+        assert_eq!(
+            r.sprites.instances.len(),
+            before,
+            "dust reached a set that will be frozen"
+        );
+        // Aged, though — a puff nobody draws must still die, or a map
+        // that carves and never draws accumulates them forever.
+        r.frame_puffs(PUFF_TTL + 0.01);
+        assert!(r.puffs.is_empty(), "undrawn dust never expired");
+    }
 
     /// A volume-map carve spawns a debris puff carrying the carved
     /// voxel's colour; clearing air spawns nothing; the puff dies after
