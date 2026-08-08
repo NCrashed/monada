@@ -78,3 +78,15 @@ id = "build3"
 kind = "button"
 default = ["Digit3"]
 label = { en = "Build silo" }
+
+[[action]]
+id = "turn"
+kind = "axis"
+default = { neg = "KeyQ", pos = "KeyE" }
+label = { en = "Turn camera" }
+
+[[action]]
+id = "zoom"
+kind = "axis"
+default = { neg = "KeyX", pos = "KeyZ" }
+label = { en = "Zoom" }

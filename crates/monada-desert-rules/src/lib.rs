@@ -19,7 +19,7 @@
 // Terse coordinate names are the domain's own (`x`, `y`, `z`, `lo`, `hi`).
 #![allow(clippy::many_single_char_names, clippy::similar_names)]
 
-use monada_fixed::{Fixed, FixedVec3};
+use monada_fixed::{trig, Fixed, FixedVec3};
 use monada_runtime::{
     Host, LocalHost, LocalRules, MapRules, MoverProfile, Repose,
 };
@@ -33,7 +33,7 @@ pub mod harvest;
 pub mod mover;
 pub mod terraform;
 
-pub use build::{Blueprint, Exposure, Refusal, Standing, Yards};
+pub use build::{Blueprint, Exposure, Queue, Refusal, Standing, Yards};
 pub use economy::{Building, Economy, Player, PlayerNo, Structure};
 pub use gen::{Desert, DesertParams, Surface};
 pub use harvest::{Fleet, Yield};
@@ -636,33 +636,41 @@ impl DesertRules {
         e
     }
 
-    /// The HUD line: whichever of the two loops is doing something.
+    /// The HUD line.
+    ///
+    /// **The build line's state comes from here, not from the sidebar.**
+    /// The queue is simulation state, so the local layer cannot see it —
+    /// and it must not guess, because a HUD that estimated its own
+    /// progress would be a second, disagreeing account of how far along a
+    /// refinery is. Without this line the whole flow is invisible: an
+    /// order takes a second to finish, a click before then does nothing,
+    /// and the player has no way to tell "not yet" from "broken".
     fn report(&self, host: &dyn Host) {
         let Some(p) = self.economy.get(0) else {
             return;
         };
-        if self.spent.total() > 0 {
-            host.status(&format!(
-                "terraforming — {} cells cut and filled, {} settling, {} orders, {}% power",
+        let queue = self.yards.queue_of(0);
+        let line = if let Some(kind) = queue.and_then(Queue::ready) {
+            format!("{} READY — click the ground to place it", name_of(kind))
+        } else if let Some((kind, done)) = queue.and_then(Queue::building) {
+            let total = build::blueprint(kind).map_or(1, |b| b.ticks.max(1));
+            format!("building {} — {}%", name_of(kind), done * 100 / total)
+        } else if !self.mcvs.is_empty() {
+            "select the MCV and press G to deploy".to_string()
+        } else if self.spent.total() > 0 {
+            format!(
+                "terraforming — {} cells edited, {} settling, {} orders",
                 self.spent.edited,
                 self.spent.settled,
-                self.terraform.pending(),
-                p.satisfaction()
-            ));
+                self.terraform.pending()
+            )
         } else {
-            host.status(&format!(
-                "{} credits of {} — {} power made, {} drawn{}",
-                p.credits,
-                p.capacity,
-                p.made,
-                p.used,
-                if p.spilled > 0 {
-                    format!(" — {} spilled, build a silo", p.spilled)
-                } else {
-                    String::new()
-                }
-            ));
-        }
+            "1 wind trap   2 refinery   3 silo".to_string()
+        };
+        host.status(&format!(
+            "{} credits / {} — power {}/{} — {line}",
+            p.credits, p.capacity, p.made, p.used
+        ));
     }
 
     /// D-1's patrol, now on the shared router: cross the map, corner to
@@ -722,7 +730,24 @@ pub struct DesertLocal {
     /// Edge detection for the click and key actions, so a held button is
     /// one order rather than thirty a second.
     held: [bool; 6],
+    /// Where the camera is looking, in sim cells.
+    ///
+    /// **The camera has to be the player's, not the simulation's.** It
+    /// followed whatever entity happened to be first in the world, which
+    /// meant a demo you could not look away from: the base was built off
+    /// screen while the view chased a patrol vehicle across the map.
+    /// Following is now something the player asks for by selecting a
+    /// unit, and stops the moment they touch a pan key.
+    look: Option<(Fixed, Fixed)>,
+    /// The entity the view is riding, if the player asked for one.
+    following: Option<EntityId>,
 }
+
+/// Cells per second the camera pans at, and radians per second it turns.
+const PAN_SPEED: i64 = 40;
+const TURN_SPEED: (i32, i32) = (3, 2); // 3/2 rad per second
+/// How close and how far the view may get.
+const ZOOM: (i64, i64) = (200, 1_400);
 
 impl Default for DesertLocal {
     fn default() -> Self {
@@ -735,6 +760,8 @@ impl Default for DesertLocal {
             clip: (gen::BEDROCK_Z, gen::SKY_Z),
             picked: None,
             held: [false; 6],
+            look: None,
+            following: None,
         }
     }
 }
@@ -757,14 +784,8 @@ impl LocalRules for DesertLocal {
         host.status("the desert — D-5");
     }
 
-    fn local_frame(&mut self, host: &dyn LocalHost, _dt: Fixed) {
-        // Follow the selection if there is one, and whatever is moving if
-        // there is not — the camera reads the world rather than being told
-        // where to look.
-        let focus = host.highlighted().or_else(|| host.entities().first().copied());
-        if let Some(e) = focus {
-            host.camera_focus(host.entity_position(e));
-        }
+    fn local_frame(&mut self, host: &dyn LocalHost, dt: Fixed) {
+        self.drive_camera(host, dt);
 
         // The build list: a structure is chosen with a number key, then
         // placed with a ground click. Icons and panels are D-11 — what
@@ -788,11 +809,16 @@ impl LocalRules for DesertLocal {
         }
 
         if self.pressed(host, 0, "select") {
-            if let Some(point) = host.pick_ground() {
-                host.submit_command(verb::PLACE, EntityId(0), point);
-            }
+            // A click on a unit selects it; a click on bare ground places
+            // whatever is waiting. Both, in that order, because clicking
+            // your own refinery to place a silo on top of it is not what
+            // anybody means.
             if let Some(e) = host.pick_entity() {
                 host.highlight(e);
+                self.following = Some(e);
+            } else if let Some(point) = host.pick_ground() {
+                host.submit_command(verb::PLACE, EntityId(0), point);
+                self.picked = None;
             }
         }
         if self.pressed(host, 4, "deploy") {
@@ -811,6 +837,62 @@ impl LocalRules for DesertLocal {
 }
 
 impl DesertLocal {
+    /// Pan, turn and zoom the view.
+    ///
+    /// Everything here is `f64`-free but not fixed-point-free: the camera
+    /// is local state, so it may use whatever arithmetic reads best —
+    /// what it may never do is feed a number back into the simulation.
+    fn drive_camera(&mut self, host: &dyn LocalHost, dt: Fixed) {
+        let (px, py) = host.action_axis2("pan");
+        let turn = host.action_axis("turn");
+        let zoom = host.action_axis("zoom");
+
+        if px != 0 || py != 0 {
+            // Touching a pan key is how a player says "stop following".
+            self.following = None;
+        }
+        if let Some(e) = self.following {
+            let p = host.entity_position(e);
+            self.look = Some((p.x, p.y));
+        }
+
+        let here = self.look.get_or_insert_with(|| {
+            // Open on the player's own corner rather than on the map's
+            // origin, which is a corner of empty sand.
+            let start = Fixed::from_int(i32::try_from(MAP_CELLS / 8).unwrap_or(32));
+            (start, start)
+        });
+        if px != 0 || py != 0 {
+            let speed = Fixed::from_int(i32::try_from(PAN_SPEED).unwrap_or(40)) * dt;
+            let (dx, dy) = pan_in_view(self.yaw, px, py);
+            here.0 += dx * speed;
+            here.1 += dy * speed;
+            let (lo, hi) = (
+                Fixed::ZERO,
+                Fixed::from_int(i32::try_from(MAP_CELLS - 1).unwrap_or(255)),
+            );
+            here.0 = here.0.clamp(lo, hi);
+            here.1 = here.1.clamp(lo, hi);
+        }
+        if turn != 0 {
+            let spin = TURN_SPEED.0 * i32::try_from(turn).unwrap_or(0);
+            self.yaw += Fixed::from_ratio(spin, TURN_SPEED.1) * dt;
+        }
+        if zoom != 0 {
+            let rate = Fixed::from_int(600) * dt;
+            self.dist = (self.dist - rate * Fixed::from_int(i32::try_from(zoom).unwrap_or(0))).clamp(
+                Fixed::from_int(i32::try_from(ZOOM.0).unwrap_or(200)),
+                Fixed::from_int(i32::try_from(ZOOM.1).unwrap_or(1400)),
+            );
+        }
+
+        let (x, y) = *here;
+        let z = Fixed::from_int(i32::try_from(gen::MEAN_SURFACE_Z).unwrap_or(32));
+        host.camera_focus(FixedVec3::new(x, y, z));
+        host.camera_angle(self.yaw, self.pitch);
+        host.camera_dist(self.dist);
+    }
+
     /// Draw the build list.
     ///
     /// Immediate mode: cleared and redrawn every frame, so "grey out what
@@ -824,19 +906,50 @@ impl DesertLocal {
             return; // headless, or a host that draws no HUD
         }
         host.ui_clear();
-        let x = w - 180;
+        let x = w - 210;
         host.ui_text(x, 12, "BUILD", 18);
         for (i, bp) in build::CATALOGUE.iter().enumerate().skip(1) {
-            let y = 12 + i64::try_from(i).unwrap_or(0) * 22;
+            let y = 34 + i64::try_from(i - 1).unwrap_or(0) * 20;
             let mark = if self.picked == Some(i) { ">" } else { " " };
-            host.ui_text(
-                x,
-                y + 18,
-                &format!("{mark}{i}  {}  {}", name_of(bp.kind), bp.cost),
-                14,
-            );
+            host.ui_text(x, y, &format!("{mark}{i}  {}  {}", name_of(bp.kind), bp.cost), 14);
         }
+        // What the build line is doing goes to the status line, which the
+        // SIMULATION writes: it owns the queue, and a HUD that guessed at
+        // its progress from the local side would be a second source of
+        // truth about how far along a refinery is.
+        host.ui_text(x, 132, "WASD pan  QE turn  ZX zoom", 12);
+        host.ui_text(x, 148, "G deploy  R repair", 12);
     }
+}
+
+/// A screen-relative pan, in sim cells per unit of speed.
+///
+/// `right` and `up` are the pan action's two axes as the player pressed
+/// them (D is `right = 1`, W is `up = 1`); the result is which way that
+/// is *on the ground*, given where the camera is looking.
+///
+/// **The world is mirrored in x on the way to the screen**, and that is
+/// the whole difficulty. `world_of` maps sim `+x` to world `−x`, so the
+/// camera basis — which is in world axes — cannot be used on sim
+/// coordinates unchanged. Derived rather than guessed:
+///
+/// - roxlap's screen-right is world `(−sin yaw, cos yaw, 0)`, which
+///   through the mirror is sim `(sin yaw, cos yaw)`;
+/// - screen-up along the ground is the horizontal part of the view
+///   direction, world `(cos yaw, sin yaw, 0)`, which is sim
+///   `(−cos yaw, sin yaw)`.
+///
+/// Getting the mirror wrong negates the x term of *both* axes, which
+/// reads as "A and D are swapped, and panning does not follow the
+/// camera" — two complaints, one sign.
+#[must_use]
+pub fn pan_in_view(yaw: Fixed, right: i64, up: i64) -> (Fixed, Fixed) {
+    let (c, s) = (trig::cos(yaw), trig::sin(yaw));
+    let (fx, fy) = (
+        Fixed::from_int(i32::try_from(right).unwrap_or(0)),
+        Fixed::from_int(i32::try_from(up).unwrap_or(0)),
+    );
+    (s * fx - c * fy, c * fx + s * fy)
 }
 
 /// A structure's name, as a player reads it.

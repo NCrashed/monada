@@ -605,6 +605,12 @@ fn volume_world_of(p: DVec3) -> DVec3 {
     DVec3::new(-SCALE * p.x, SCALE * p.y, GROUND_Z - SCALE * p.z)
 }
 
+/// [`volume_world_of`] the other way: world back to sim cells. What the
+/// cursor needs, since a pick starts as a world-space ray.
+fn volume_sim_of(w: DVec3) -> DVec3 {
+    DVec3::new(-w.x / SCALE, w.y / SCALE, (GROUND_Z - w.z) / SCALE)
+}
+
 /// [`world_of`] with a map's z convention: a volume map scales z by `SCALE`
 /// (isotropic cells — see [`MapRender::volume`]), a column map keeps the
 /// unscaled-z convention. Free function over the flag rather than a method, so
@@ -2316,14 +2322,41 @@ impl MapRender {
     /// Pick under a world ray: the sim-space point on the board plane, and
     /// the nearest model-bound entity within [`PICK_RADIUS`] (`-1` none).
     pub fn pick(&self, world: &World, origin: DVec3, dir: DVec3) -> (FixedVec3, i64) {
-        let Some(hit) = ground_hit(origin, dir) else {
+        // Where the cursor meets the ground, and in what frame.
+        //
+        // A volume map cannot use the `z = 0` plane: its ground sits at
+        // `GROUND_Z - SCALE·z`, hundreds of world units below it, so the
+        // plane hit lands far from anything the player is looking at and
+        // every entity pick misses. The column path is untouched — it is
+        // what every existing demo was measured against.
+        let found = if self.volume {
+            self.volume_ground_sim(origin, dir).map(|(sx, sy)| {
+                let point = FixedVec3::new(Fixed::from_f64(sx), Fixed::from_f64(sy), Fixed::ZERO);
+                // Back to world through the ENTITY transform, not
+                // `volume_world_of`: the two differ by half a cell,
+                // because `world_of` seats a sprite at its cell's centre
+                // while the voxel map addresses corners. Comparing the
+                // cursor against entity seats in the wrong one of those
+                // costs half a cell of aim in x and y — which, at a pick
+                // radius of three quarters of a cell, is most of it.
+                (point, entity_world_of_in(true, point))
+            })
+        } else {
+            ground_hit(origin, dir).map(|hit| {
+                (
+                    FixedVec3::new(
+                        // world X is mirrored (see world_of)
+                        Fixed::from_f64(-hit.x / SCALE),
+                        Fixed::from_f64(hit.y / SCALE),
+                        Fixed::ZERO,
+                    ),
+                    hit,
+                )
+            })
+        };
+        let Some((point, hit)) = found else {
             return (FixedVec3::ZERO, -1);
         };
-        let point = FixedVec3::new(
-            Fixed::from_f64(-hit.x / SCALE), // world X is mirrored (see world_of)
-            Fixed::from_f64(hit.y / SCALE),
-            Fixed::ZERO,
-        );
         let mut best: Option<(EntityId, f64)> = None;
         for &e in self.models.keys() {
             let Some(p) = world.position(e) else { continue };
@@ -2463,6 +2496,9 @@ impl MapRender {
     /// misses the ground plane.
     #[must_use]
     pub fn ground_sim(&self, origin: DVec3, dir: DVec3) -> Option<(f64, f64)> {
+        if self.volume {
+            return self.volume_ground_sim(origin, dir);
+        }
         // Heightfield-aware pick: march the ray against the sim collision
         // store, so a click on a plateau / ramp lands on the cell actually
         // under the cursor instead of its z=0 shadow (docs/plans/rts-demo.md
@@ -2499,6 +2535,75 @@ impl MapRender {
         }
         let p = origin + dir * hi;
         Some((-p.x / SCALE, p.y / SCALE))
+    }
+
+    /// Where the cursor ray first meets solid ground on a **volume** map.
+    ///
+    /// A volume map cannot use the column-store march above, and the way
+    /// it fails is quiet: `terrain` is the column heightmap, which is
+    /// empty by design on a volume map, so every probe reads a ground
+    /// height of zero, the march falls straight through to the `z = 0`
+    /// plane, and the answer comes back in the column convention's
+    /// coordinates rather than the isotropic cell grid's. The cursor
+    /// lands somewhere plausible-looking and completely wrong — which is
+    /// what a build placement that goes nowhere looks like from the
+    /// outside.
+    ///
+    /// So: march the *render* grid, which holds exactly the geometry the
+    /// player is pointing at, in the volume map's own transform.
+    fn volume_ground_sim(&self, origin: DVec3, dir: DVec3) -> Option<(f64, f64)> {
+        let id = self.world_grid?;
+        let grid = self.scene.grid(id)?;
+        let solid = |p: DVec3| {
+            let sim = volume_sim_of(p);
+            #[allow(clippy::cast_possible_truncation)]
+            let cell = (
+                sim.x.floor() as i64,
+                sim.y.floor() as i64,
+                sim.z.floor() as i64,
+            );
+            let (lo, _) = cell_box_to_volume_grid(cell.0, cell.1, cell.2, cell.0, cell.1, cell.2);
+            grid.voxel_color(lo).is_some()
+        };
+
+        // Bound the march where the ray leaves the world downwards: below
+        // sim z 0 there is nothing to hit, and an unbounded march off the
+        // edge of a map is a hang rather than a miss.
+        let floor_z = GROUND_Z; // world z of sim z = 0
+        if dir.z.abs() < 1e-9 {
+            return None;
+        }
+        let t_floor = (floor_z - origin.z) / dir.z;
+        if t_floor <= 0.0 {
+            return None; // pointing up, away from the ground
+        }
+
+        // Quarter-cell steps, then bisect the crossing — the same shape
+        // as the column march, against the geometry that actually exists.
+        let step = SCALE / 4.0;
+        let mut t = 0.0;
+        while t < t_floor && !solid(origin + dir * t) {
+            t += step;
+        }
+        let hit = if t >= t_floor {
+            // Nothing solid on the way down: answer with the bedrock
+            // plane, so a click on empty sky still names a cell rather
+            // than nothing at all.
+            t_floor
+        } else {
+            let (mut lo, mut hi) = ((t - step).max(0.0), t);
+            for _ in 0..12 {
+                let mid = (lo + hi) * 0.5;
+                if solid(origin + dir * mid) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            hi
+        };
+        let sim = volume_sim_of(origin + dir * hit);
+        Some((sim.x, sim.y))
     }
 
     /// The camera's focus point in the same sim convention as
@@ -5086,6 +5191,58 @@ mod tests {
                 < 1e-12,
             "-1 puts the camera back in the world frame"
         );
+    }
+
+    /// The cursor must land on the ground a **volume** map actually has.
+    ///
+    /// The column march reads `self.terrain`, the heightmap store, which
+    /// is empty by design on a volume map — so every probe saw a ground
+    /// height of zero, the ray fell through to the `z = 0` plane, and the
+    /// answer came back in the column convention's coordinates instead of
+    /// the isotropic cell grid's. Nothing crashed and nothing logged: the
+    /// cursor simply pointed somewhere else, which from the outside looks
+    /// like a build placement that does nothing at all.
+    #[test]
+    fn a_volume_map_picks_the_ground_it_has() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        r.set_volume_terrain();
+        // A plateau twenty cells up, around sim (40, 40).
+        r.voxel_fill(30, 30, 0, 50, 50, 20, 0x80c8_b48c);
+
+        // An OBLIQUE ray, because that is what a camera casts and because
+        // a vertical one cannot tell the two paths apart: straight down,
+        // the plane hit and the surface hit share an x and a y, and the
+        // test would pass against the broken code.
+        let eye = volume_world_of(DVec3::new(20.0, 20.0, 60.0));
+        let target = volume_world_of(DVec3::new(40.5, 40.5, 20.5));
+        let dir = (target - eye).normalize();
+        let (x, y) = r.ground_sim(eye, dir).expect("the ray meets the plateau");
+        // Within a cell of the aim point. The broken path answers ~47.9,
+        // where the ray would have crossed the world z = 0 plane eight
+        // cells further on and four cells below the plateau it hit.
+        assert!(
+            (x - 40.5).abs() < 1.0 && (y - 40.5).abs() < 1.0,
+            "the cursor landed at ({x:.2}, {y:.2}), not on the cell under it"
+        );
+
+        // And the same ray picks an entity standing there, which the flat
+        // `z = 0` hit could not: the plane is hundreds of world units
+        // below the plateau, so every candidate was out of range.
+        let hull = r.model_box(24, 16, 10, 0x80a8_b48c);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&[]);
+        let unit = world.spawn(arch);
+        world.set_position(
+            unit,
+            FixedVec3::new(
+                Fixed::from_f64(40.5),
+                Fixed::from_f64(40.5),
+                Fixed::from_int(21),
+            ),
+        );
+        r.entity_set_model(unit.0 as i64, hull);
+        let (_, picked) = r.pick(&world, eye, dir);
+        assert_eq!(picked, unit.0 as i64, "the unit under the cursor was missed");
     }
 
     /// A plain KV6 model with a script-set facing must turn its GEOMETRY
