@@ -1675,6 +1675,7 @@ dependencies = [
  "monada-format",
  "monada-host",
  "monada-net",
+ "monada-runtime",
  "monada-script",
  "monada-sim",
  "roxlap-formats",

@@ -60,6 +60,89 @@ pub trait Host {
     /// verbs are no-ops by design — rules must therefore treat drawing as
     /// optional and never let a bridge's absence change hashed state.
     fn bridge(&self) -> Option<&SharedBridge>;
+
+    // --- presentation ----------------------------------------------------
+    //
+    // These forward to the bridge and default to nothing when there is
+    // none, which is what makes a headless run of the same rules produce
+    // the same hashed state as a rendering one. They carry default bodies
+    // so an implementation only has to answer `bridge()`; a runtime that
+    // reaches the host another way (the wasm import table) overrides them.
+
+    /// Define a sprite model from a KV6 asset; returns its model id, or
+    /// `-1` with no bridge.
+    fn model_kv6(&self, asset_path: &str, turns: i64) -> i64 {
+        self.bridge().map_or(-1, |b| {
+            b.lock().expect("bridge mutex").model_kv6(asset_path, turns)
+        })
+    }
+
+    /// Define a procedural box sprite; returns its model id, or `-1`.
+    fn model_box(&self, w: i64, h: i64, d: i64, color: i64) -> i64 {
+        self.bridge().map_or(-1, |b| {
+            b.lock().expect("bridge mutex").model_box(w, h, d, color)
+        })
+    }
+
+    /// Bind an entity to a render model.
+    fn entity_set_model(&self, entity: EntityId, model: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .entity_set_model(entity_arg(entity), model);
+        }
+    }
+
+    /// Paint a solid box of voxels (sim cells). Colour is
+    /// `0xBB_RR_GG_BB` — the high byte is brightness, not alpha.
+    fn voxel_fill(&self, lo: (i64, i64, i64), hi: (i64, i64, i64), color: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .voxel_fill(lo.0, lo.1, lo.2, hi.0, hi.1, hi.2, color);
+        }
+    }
+
+    /// Aim the camera at a sim-space point.
+    fn camera_focus(&self, point: FixedVec3) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").camera_focus(point);
+        }
+    }
+
+    /// Set the camera's orbit angles (radians).
+    fn camera_angle(&self, yaw: Fixed, pitch: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").camera_angle(yaw, pitch);
+        }
+    }
+
+    /// Declare the directional "sun".
+    fn set_light(&self, dir: FixedVec3, intensity: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").set_light(dir, intensity);
+        }
+    }
+
+    /// Load a sky panorama from an asset.
+    fn set_sky(&self, asset_path: &str) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").set_sky(asset_path);
+        }
+    }
+
+    /// Set the HUD status line.
+    fn status(&self, text: &str) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").status(text);
+        }
+    }
+}
+
+/// Entity ids cross the bridge as the script surface's `i64`.
+#[allow(clippy::cast_possible_wrap)]
+fn entity_arg(entity: EntityId) -> i64 {
+    entity.0 as i64
 }
 
 /// The [`Host`] implementation over monada's own runtime state: the

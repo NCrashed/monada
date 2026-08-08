@@ -9,6 +9,10 @@ rust-version.workspace = true
 description = "Chess 2.0 — monada's first demo map (scripts + assets) with a thin `cargo run` launcher."
 publish = false
 
+[lib]
+name = "monada_chess"
+path = "src/lib.rs"
+
 [[bin]]
 name = "monada-chess"
 path = "src/main.rs"
@@ -19,6 +23,12 @@ path = "src/main.rs"
 # it to `monada_host::cli`.
 monada-host = { path = "../monada-host" }
 monada-format = { workspace = true }
+# The lib target is chess's rules as compiled Rust — the native backend's
+# twin of `map/scripts/main.rhai`, and the D-0 backend-parity gate
+# (docs/plans/desert-game.md §11).
+monada-runtime = { workspace = true }
+monada-sim = { workspace = true }
+monada-fixed = { workspace = true }
 
 [build-dependencies]
 # build.rs packs `map/` into a deterministic `chess.monada` in OUT_DIR.
