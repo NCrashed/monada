@@ -474,12 +474,30 @@ Each step is a headless test; nothing needs a display until S-4.
   axis the camera now rolls too — the deck holds still and the starfield sweeps.
   If that reads badly, the demo's tumble axis becomes pure `+z` (one literal) and
   the camera only yaws.
+- **A billboard's orientation was answered in the world's frame, twice over**
+  (fixed; upstream in roxlap 0.32 / BB.6, integrated here). Both halves are
+  questions about the FLOOR the actor stands on:
+  - *which sprite* — roxlap binned `bearing(camera − actor) − facing_yaw` in the
+    world's horizontal plane, so the host had to flatten a rotated nose, and
+    rotate-then-flatten does not commute with flatten-then-rotate under a tilted
+    rotation: **0.27 rad** of drift at the demo's tumble, a third of a sector,
+    and a crew member standing still visibly turned on the spot;
+  - *which way is up in the card* — pinned to a world-up constant
+    (`BILLBOARD_UP`), so a card on a tilted deck leaned, and so did one seen by
+    a camera riding that deck.
+
+  monada carried a consumer-side correction for the first half
+  (`billboard_yaw`) and could not fix the second at all. roxlap 0.32 took both:
+  `BillboardUp {World, Camera, Axis}` as a knob independent of `BillboardMode`,
+  and `ActorFacing {Yaw, Dir}` measuring the sector in the actor's own frame.
+  `actor_pose` now hands every grid-bound actor `Dir(hull_rot · nose)` +
+  `Axis(hull_rot · deck up)` through one `set_actor_pose`, and the workaround is
+  deleted. An unbound actor keeps `Yaw` + `World`, which roxlap pins as
+  bit-identical to its pre-BB.6 maths — so no other demo moved.
 - **Still upright on a rolling hull, by the same mechanism:** a `.rkc`
   character (`CharacterModel::transform` takes a yaw, not the grid's basis) and
   the selection ring (`sync_rings` places unposed instances). Neither is in the
-  ship demo's path — the crew are billboards, which cannot tilt at all — so they
-  are noted, not fixed. A billboard actor riding a rolling hull is a deeper
-  question than a bug: it has no "tilted" art to show.
+  ship demo's path, so they are noted, not fixed.
 
 ## 10. Open questions
 

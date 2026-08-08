@@ -38,9 +38,9 @@ use roxlap_formats::voxel_clip::{DecodedClip, LoopMode};
 use roxlap_formats::{OverlayColor, Rgb, VoxColor};
 use roxlap_render::gif_import::{voxel_clip_from_gif, GifImportOpts};
 use roxlap_render::{
-    ActorState, BillboardActorDef, BillboardActorId, BillboardMode, CharacterId,
-    DynSpriteTransform, FrameParams, Line3, SceneRenderer, SpriteInstanceDesc, SpriteSet,
-    ViewCutout, VoxelClipId,
+    ActorFacing, ActorState, BillboardActorDef, BillboardActorId, BillboardMode, BillboardUp,
+    CharacterId, DynSpriteTransform, FrameParams, Line3, SceneRenderer, SpriteInstanceDesc,
+    SpriteSet, ViewCutout, VoxelClipId,
 };
 use roxlap_scene::fow::{DeckBand, FogOfWar, FowObserver, FowTwin, VisionConfig};
 use roxlap_scene::{GridId, GridTransform, Scene};
@@ -208,12 +208,19 @@ fn actor_def(registered: &[(&'static str, Vec<VoxelClipId>)]) -> BillboardActorD
             })
             .collect(),
         // Cylindrical: the card only yaws to face the camera, staying upright
-        // (its vertical axis is exactly world-up). A grounded character's feet
-        // stay planted on its pivot. Spherical tilts the whole card to face the
-        // camera *including pitch*, which at this steep view leans the body up-
-        // and-back off its ground anchor — the sprite reads as floating above
-        // its collision box even though the feet-pivot is correctly on the
-        // ground. Feet-planted wins for a top-down ARPG.
+        // on its floor. A grounded character's feet stay planted on its pivot.
+        // Spherical tilts the whole card to face the camera *including pitch*,
+        // which at this steep view leans the body up- and-back off its ground
+        // anchor — the sprite reads as floating above its collision box even
+        // though the feet-pivot is correctly on the ground. Feet-planted wins
+        // for a top-down ARPG.
+        //
+        // Which floor that is comes from `up`, left at its default here because
+        // it is only an initial value: `update_actors` re-poses every actor each
+        // frame from the floor it actually stands on (`actor_pose`) — world for
+        // an unbound one, its grid's own up for a rider. Cylindrical yaws about
+        // whichever axis that is (roxlap 0.32 / BB.6), so a card on a tilted
+        // deck stands on the deck rather than leaning across it.
         mode: BillboardMode::Cylindrical,
         ..BillboardActorDef::default()
     }
@@ -998,6 +1005,41 @@ fn deck_clip_world_z(z_hi: i64, cell_z: i64) -> i32 {
     (GROUND_Z as i64 - z_hi * cell_z) as i32
 }
 
+/// The pose roxlap needs for a billboard actor whose facing is `local_yaw` in
+/// the frame of a grid rotated by `rot` — the card's FLOOR, in other words
+/// (BB.6, roxlap 0.32).
+///
+/// Both halves of an actor's orientation are questions about the floor it stands
+/// on, not about the world:
+///
+/// - which directional sprite to show is the angle between the viewer and the
+///   character's nose, measured in the plane it walks on. roxlap's `Yaw`
+///   spelling measures it in the WORLD's horizontal plane, so a consumer with a
+///   turning floor has to flatten a rotated nose — and rotate-then-flatten does
+///   not commute with flatten-then-rotate under a tilted rotation, so the sprite
+///   drifts (0.27 rad at the ship's tumble, a third of a sector: an actor
+///   standing still visibly turning on the spot). `Dir` takes the world-space
+///   nose and does the flattening in the actor's own frame.
+/// - which way is up inside the card: pinned to world up, a card on a tilted
+///   deck leans, and so does one seen by a camera riding that deck. `Axis`
+///   stands it on the deck instead — and upright on screen for free while the
+///   camera rides the same body.
+///
+/// An unrotated grid (and an unbound entity) takes the verbatim `Yaw` + `World`
+/// path, which roxlap keeps bit-identical to its pre-BB.6 sector maths.
+fn actor_pose(local_yaw: f64, rot: DQuat) -> (ActorFacing, BillboardUp) {
+    if rot == DQuat::IDENTITY {
+        return (ActorFacing::Yaw(local_yaw), BillboardUp::World);
+    }
+    let axis = |v: DVec3| [v.x as f32, v.y as f32, v.z as f32];
+    // A grid's local frame IS the world frame at rest, so the nose is the yaw's
+    // own direction and the deck's up is roxlap's world up (`-z`, z-down); the
+    // grid's rotation carries both into the world.
+    let nose = rot * DVec3::new(local_yaw.cos(), local_yaw.sin(), 0.0);
+    let up = rot * DVec3::new(0.0, 0.0, -1.0);
+    (ActorFacing::Dir(axis(nose)), BillboardUp::Axis(axis(up)))
+}
+
 /// The four sim-cell corners of a box-select drag rectangle, aligned to the
 /// SCREEN rather than to world north/south. The drag's two ground points
 /// `a`/`b` (press and release) are opposite corners; the other two follow the
@@ -1143,7 +1185,7 @@ pub struct MapRender {
     /// Actor render targets computed by `build_instances` (which has the
     /// world) for `render_into` (which has the renderer) to apply:
     /// `(entity, model index, world pos, world yaw)`.
-    actor_targets: Vec<(EntityId, usize, [f32; 3], f64)>,
+    actor_targets: Vec<(EntityId, usize, [f32; 3], f64, DQuat)>,
     /// Character render targets, same shape and lifetime as
     /// [`actor_targets`](Self::actor_targets) — the world pos is already
     /// seated (feet on the cell, `model_drop` applied).
@@ -1892,6 +1934,50 @@ impl MapRender {
         }
     }
 
+    /// Seat one static-sprite entity, already placed at world `w`.
+    ///
+    /// roxlap anchors the kv6's stored pivot at the sprite position, so seat by
+    /// the pivot, not an assumed centre: the model's bottom face sits
+    /// `(zsiz - zpiv)` below it (z grows down). For a centre-pivot box that is
+    /// the old `w.z - zsiz/2`; an off-centre piece no longer sinks.
+    ///
+    /// A prop riding a grid goes on the DYNAMIC layer, always. Two reasons, and
+    /// the second is the one that bites:
+    ///
+    /// 1. It has to TURN with its grid. roxlap's static instance
+    ///    (`SpriteInstanceDesc`) carries a position and nothing else, so a crate
+    ///    left there keeps its world-axis alignment while the hull rolls under
+    ///    it.
+    /// 2. In a dynamic-layer map the static set is uploaded EXACTLY ONCE
+    ///    (re-uploading resets the actors), so a static instance is FROZEN at
+    ///    wherever it stood on the first rendered frame. Routing only *turning*
+    ///    grids to the dynamic layer left every prop a ghost: the hull has not
+    ///    turned yet on frame 0 (`grid_orient` runs in `tick`), so each crate
+    ///    was baked into the static set and then ALSO drawn posed — one copy
+    ///    riding the ship, one hanging in space where it started.
+    ///
+    /// Hence the test is "does it ride a grid", not "is that grid turning": a
+    /// grid at rest poses with the identity basis, which is exactly what the
+    /// static path would have drawn.
+    fn seat_sprite(&mut self, e: EntityId, si: usize, w: DVec3) {
+        let drop = self.sprites.models.get(si).map_or(SCALE * 0.5, |m| {
+            f64::from(m.kv6.zsiz) - f64::from(m.kv6.zpiv)
+        });
+        let rot = self
+            .entity_grid
+            .get(&e)
+            .and_then(|&g| self.scene.grid(g))
+            .map(|g| g.transform.rotation);
+        if let (true, Some(rot)) = (self.dynamic_layer(), rot) {
+            self.prop_targets.push((si, w, rot, drop));
+        } else {
+            self.sprites.instances.push(SpriteInstanceDesc {
+                model: si,
+                pos: [w.x as f32, w.y as f32, (w.z - drop) as f32],
+            });
+        }
+    }
+
     /// Rebuild the sprite instances from the live world: one sprite per
     /// entity that has a model binding, seated on the board, plus the
     /// highlight marker on the selected entity.
@@ -1924,64 +2010,34 @@ impl MapRender {
                 self.place(e, p)
             };
             match self.model_refs.get(model_id) {
-                Some(&ModelRef::Sprite(si)) => {
-                    // roxlap anchors the kv6's stored pivot at the sprite
-                    // `pos`, so seat by the pivot, not an assumed centre: the
-                    // model's bottom face sits `(zsiz - zpiv)` below the pivot
-                    // (z grows down). For a centre-pivot box this is the old
-                    // `w.z - zsiz/2`; an off-centre piece no longer sinks.
-                    let drop = self.sprites.models.get(si).map_or(SCALE * 0.5, |m| {
-                        f64::from(m.kv6.zsiz) - f64::from(m.kv6.zpiv)
-                    });
-                    // A prop riding a grid goes on the DYNAMIC layer, always.
-                    // Two reasons, and the second is the one that bites:
-                    //
-                    // 1. It has to TURN with its grid. roxlap's static instance
-                    //    (`SpriteInstanceDesc`) carries a position and nothing
-                    //    else, so a crate left there keeps its world-axis
-                    //    alignment while the hull rolls under it.
-                    // 2. In a dynamic-layer map the static set is uploaded
-                    //    EXACTLY ONCE (re-uploading resets the actors), so a
-                    //    static instance is FROZEN at wherever it stood on the
-                    //    first rendered frame. Routing only *turning* grids here
-                    //    left every prop a ghost: the hull is still unturned on
-                    //    frame 0, so each crate was baked into the static set and
-                    //    then ALSO drawn posed — one copy riding the ship, one
-                    //    hanging in space where it started.
-                    //
-                    // Hence the test is "does it ride a grid", not "is that grid
-                    // turning": a grid at rest poses with the identity basis,
-                    // which is exactly what the static path would have drawn.
-                    let rot = self
-                        .entity_grid
-                        .get(&e)
-                        .and_then(|&g| self.scene.grid(g))
-                        .map(|g| g.transform.rotation);
-                    if let (true, Some(rot)) = (self.dynamic_layer(), rot) {
-                        self.prop_targets.push((si, w, rot, drop));
-                    } else {
-                        self.sprites.instances.push(SpriteInstanceDesc {
-                            model: si,
-                            pos: [w.x as f32, w.y as f32, (w.z - drop) as f32],
-                        });
-                    }
-                }
+                Some(&ModelRef::Sprite(si)) => self.seat_sprite(e, si, w),
                 Some(&ModelRef::Actor(ai)) => {
                     // A directional billboard actor: seat its bottom-centre
                     // pivot on the surface (plus the model's `model_drop`
                     // offset, world +z = down); facing comes from the script.
-                    let yaw = self.grid_facing_yaw(
-                        e,
-                        self.entity_actors
-                            .get(&e)
-                            .map_or(0.0, |a| facing_to_world_yaw(a.facing)),
-                    );
+                    //
+                    // The facing is kept in the entity's OWN frame here, paired
+                    // with the grid's rotation; `update_actors` turns the two
+                    // into the floor roxlap measures against (see `actor_pose`).
+                    // Which sprite to show is a question about the angle between
+                    // the viewer and the character's nose, and that angle only
+                    // means something in the frame the nose is defined in.
+                    let local_yaw = self
+                        .entity_actors
+                        .get(&e)
+                        .map_or(0.0, |a| facing_to_world_yaw(a.facing));
+                    let rot = self
+                        .entity_grid
+                        .get(&e)
+                        .and_then(|&g| self.scene.grid(g))
+                        .map_or(DQuat::IDENTITY, |g| g.transform.rotation);
                     let drop = self.actors.get(ai).map_or(0.0, |a| a.drop);
                     self.actor_targets.push((
                         e,
                         ai,
                         [w.x as f32, w.y as f32, w.z as f32 + drop],
-                        yaw,
+                        local_yaw,
+                        rot,
                     ));
                 }
                 Some(&ModelRef::Character(ci)) => {
@@ -2512,13 +2568,14 @@ impl MapRender {
 
         // Create / update each present actor entity from this frame's targets.
         let present: BTreeSet<EntityId> = self.actor_targets.iter().map(|t| t.0).collect();
-        for &(e, ai, pos, yaw) in &self.actor_targets {
+        for &(e, ai, pos, local_yaw, rot) in &self.actor_targets {
+            let (facing, up) = actor_pose(local_yaw, rot);
             let Some(inst) = self.entity_actors.get_mut(&e) else {
                 continue;
             };
             match inst.id {
                 Some(id) => {
-                    renderer.set_actor_transform(id, pos, yaw);
+                    renderer.set_actor_pose(id, pos, facing, up);
                     if inst.anim != inst.applied_anim {
                         renderer.set_actor_state(id, inst.anim);
                         inst.applied_anim = inst.anim;
@@ -2532,7 +2589,13 @@ impl MapRender {
                     if let Some(reg) = self.actors.get(ai).and_then(|a| a.registered.as_ref()) {
                         // roxlap 0.30: `add_billboard_actor` returns `None` for a
                         // malformed def (no states / empty dirs); skip if so.
-                        if let Some(id) = renderer.add_billboard_actor(actor_def(reg), pos, yaw) {
+                        if let Some(id) =
+                            renderer.add_billboard_actor(actor_def(reg), pos, local_yaw)
+                        {
+                            // `add_billboard_actor` still takes a world yaw, so
+                            // give a fresh actor its real floor at once — else
+                            // it draws one frame world-aligned.
+                            renderer.set_actor_pose(id, pos, facing, up);
                             renderer.set_actor_state(id, inst.anim);
                             if inst.tint != WHITE_TINT {
                                 renderer.set_actor_tint(id, Rgb(inst.tint));
@@ -2911,7 +2974,7 @@ impl MapRender {
         let box_col = OverlayColor(0xFF00_FF00); // green footprint
         let stalk_col = OverlayColor(0xFF00_FFFF); // cyan anchor stalk
         let mut lines = Vec::with_capacity(self.actor_targets.len() * 5);
-        for &(_, ai, pos, _) in &self.actor_targets {
+        for &(_, ai, pos, ..) in &self.actor_targets {
             // The target pos includes the model's `model_drop`; the collision
             // ground is the un-dropped z, so the box shows the true footprint.
             let drop = f64::from(self.actors.get(ai).map_or(0.0, |a| a.drop));
@@ -4838,6 +4901,61 @@ mod tests {
                  drawn {drawn:?}, computed {computed:?}"
             );
         }
+    }
+
+    /// Both halves of a billboard actor's orientation are questions about the
+    /// FLOOR it stands on: which directional sprite to show (the angle between
+    /// the viewer and its nose, measured in the plane it walks on) and which way
+    /// is up inside the card. roxlap 0.32's `ActorFacing::Dir` +
+    /// `BillboardUp::Axis` take that floor as a world-space nose and up axis, so
+    /// the host's job is to apply the grid's rotation to both — and to keep the
+    /// old world-floor spelling when there is no grid, which roxlap pins as
+    /// bit-identical to its pre-BB.6 maths.
+    #[test]
+    fn a_billboard_stands_on_its_grids_floor() {
+        let local_yaw = 0.6;
+
+        // No grid: the verbatim pre-BB.6 path.
+        let (facing, up) = actor_pose(local_yaw, DQuat::IDENTITY);
+        assert_eq!(facing, ActorFacing::Yaw(local_yaw));
+        assert_eq!(up, BillboardUp::World);
+
+        // On a hull rolled about a tilted axis, both the nose and the deck's up
+        // are that rotation applied to the actor's own frame.
+        let rot = DQuat::from_axis_angle(DVec3::new(0.3, 0.0, 1.0).normalize(), 0.7);
+        let (facing, up) = actor_pose(local_yaw, rot);
+        let arr = |a: [f32; 3]| DVec3::new(f64::from(a[0]), f64::from(a[1]), f64::from(a[2]));
+        let ActorFacing::Dir(dir) = facing else {
+            panic!("a turning floor needs a direction, not a world yaw");
+        };
+        let BillboardUp::Axis(deck) = up else {
+            panic!("a turning floor needs its own up axis, got {up:?}");
+        };
+        let want_nose = rot * DVec3::new(local_yaw.cos(), local_yaw.sin(), 0.0);
+        let want_up = rot * DVec3::new(0.0, 0.0, -1.0);
+        assert!(
+            (arr(dir) - want_nose).length() < 1e-6,
+            "the nose rides the hull"
+        );
+        assert!(
+            (arr(deck) - want_up).length() < 1e-6,
+            "and so does the deck's up"
+        );
+        assert!(
+            // Both axes cross the wall to roxlap as `f32`, so this is exact to
+            // that rounding, not to `f64`'s.
+            arr(dir).dot(arr(deck)).abs() < 1e-6,
+            "the nose lies IN the deck plane — it is a facing, not a lean"
+        );
+
+        // The tilt is what makes this worth passing at all: flattening the nose
+        // into the WORLD plane (every spelling before 0.32) points somewhere
+        // else, and that error is what turned a standing crew member on the spot.
+        let flattened = DVec3::new(want_nose.x, want_nose.y, 0.0).normalize();
+        assert!(
+            flattened.angle_between(want_nose) > 0.05,
+            "a tilted deck's nose is not its world-flattened shadow"
+        );
     }
 
     /// `camera_grid` turns the whole orbit frame with its grid, so the deck

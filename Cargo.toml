@@ -58,7 +58,25 @@ monada-voxvideo = { path = "crates/monada-voxvideo", version = "0.0.1" }
 monada-physics = { path = "crates/monada-physics", version = "0.0.1" }
 monada-format = { path = "crates/monada-format", version = "0.0.1" }
 
-# roxlap voxel engine 0.31.1 (crates.io, CI-safe). 0.31.1 fixes the fog
+# roxlap voxel engine 0.32.0 (crates.io, CI-safe). 0.32.0 is BB.6, the
+# billboard up axis, asked for from this repo's ship demo
+# (roxlap's docs/handover-billboard-camera-up.md): `BillboardMode` now
+# says only which way a card FACES, and the new `BillboardUp` says which
+# way is UP inside it — world up (unchanged default), the camera's own
+# up, or an app-supplied axis. Actors got the matching frame:
+# `ActorFacing::Dir(world_nose)` measures the directional sector in the
+# actor's own floor plane instead of the world's horizontal one. Both
+# halves matter here because monada's camera can now ride a rotating
+# grid (`camera_grid`, host_api 17): a crew member on a tumbling hull
+# was leaning on screen AND drifting through its sprite rotations (0.27
+# rad at the ship's tilt — a third of a sector). `map_render` hands each
+# grid-bound actor `Dir` + `Axis(grid up)` and drops the consumer-side
+# `billboard_yaw` correction that stood in for the second half; an
+# unbound actor keeps the verbatim `Yaw` + `World` path, which roxlap
+# pins as bit-identical. One breaking field — `BillboardActorDef::up` —
+# which `actor_def` inherits from `..default()`.
+#
+# 0.31.1 fixed the fog
 # twin freezing its render config on quiet frames: `FowTwin::sync` mirrored
 # the real grid's transform / `z_clip` / sky / LOD behind its quiet-frame
 # early-out, whose key moves on neither a re-pose nor a cutaway, so the
@@ -88,10 +106,10 @@ monada-format = { path = "crates/monada-format", version = "0.0.1" }
 # Oracle goldens are byte-identical across the bump. Still the unified
 # SceneRenderer facade over CPU/GPU. crates.io rather than the sibling path so
 # the author's in-progress roxlap working copy doesn't perturb monada's build.
-roxlap-core = "0.31.1"
-roxlap-render = "0.31.1"
-roxlap-scene = "0.31.1"
-roxlap-formats = "0.31.1"
+roxlap-core = "0.32.0"
+roxlap-render = "0.32.0"
+roxlap-scene = "0.32.0"
+roxlap-formats = "0.32.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
