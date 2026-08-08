@@ -16,7 +16,7 @@ use monada_fixed::{Fixed, FixedVec3};
 use monada_sim::{Command, EntityId, PlayerId, StateHash, StateHasher};
 
 use crate::host::{Host, LocalHost, RuntimeHost};
-use crate::{ScriptBackend, ScriptError, SharedBridge, SharedWorld, UiEvent};
+use crate::{ScriptBackend, ScriptError, SharedBridge, SharedPhysics, SharedWorld, UiEvent};
 
 /// A map's rules, as compiled code rather than a script.
 ///
@@ -104,6 +104,15 @@ impl NativeBackend {
     /// [`on_init`](ScriptBackend::on_init), matching `RhaiBackend`.
     pub fn set_bridge(&mut self, bridge: &SharedBridge) {
         self.host.set_bridge(bridge);
+    }
+
+    /// Attach the volume terrain + physics sim of a `terrain = "volume"`
+    /// map. Call before [`on_init`](ScriptBackend::on_init) — a map paints
+    /// its world there — and after
+    /// [`set_bridge`](NativeBackend::set_bridge), so the paints have
+    /// somewhere to draw.
+    pub fn set_volume(&mut self, phys: &SharedPhysics) {
+        self.host.set_volume(phys);
     }
 
     /// Set the tick duration for a fixed-rate map, as
