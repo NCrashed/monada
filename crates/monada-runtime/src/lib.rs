@@ -25,11 +25,13 @@ use monada_sim::{Command, PlayerId, World};
 
 mod host;
 mod native;
+mod physics;
 mod snapshot;
 mod volume;
 
 pub use host::{Host, LocalHost, RuntimeHost, WorldRead};
 pub use native::{LocalRules, MapRules, NativeBackend, NativeLocalBackend};
+pub use physics::{shared_physics, DrillToolDef, PhysicsSim, SharedPhysics};
 pub use snapshot::SNAPSHOT_VERSION;
 // Re-exported because it is part of VolumeStore's own API surface
 // (`set`/`fill`/`get` speak MaterialId) — consumers of the store should

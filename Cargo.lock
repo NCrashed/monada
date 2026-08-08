@@ -1682,6 +1682,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "monada-desert-rules"
+version = "0.0.1"
+dependencies = [
+ "monada-fixed",
+ "monada-runtime",
+ "monada-sim",
+]
+
+[[package]]
 name = "monada-digger"
 version = "0.0.1"
 dependencies = [

@@ -21,7 +21,7 @@
 use monada_fixed::{Fixed, FixedVec3};
 use monada_sim::{ArchetypeId, EntityId};
 
-use crate::{SharedBridge, SharedTerrain, SharedWorld};
+use crate::{MaterialId, SharedBridge, SharedPhysics, SharedTerrain, SharedWorld};
 
 /// What **both** layers may do: read the world, and draw.
 ///
@@ -226,6 +226,74 @@ pub trait Host: WorldRead {
             t.lock().expect("terrain mutex").nav_block(x, y, on);
         }
     }
+
+    // --- volume terrain ---------------------------------------------------
+    //
+    // A `terrain = "volume"` map (the desert game — decision L5) keeps its
+    // ground in the chunked 3D store instead of the column heightmap, so
+    // tunnels, overhangs and undercuts are first-class rather than
+    // unrepresentable. The verbs below are the same three shapes — fill,
+    // carve, ask — against that store, and each mirrors its paint to the
+    // bridge so the screen keeps up.
+    //
+    // `None` when the map declared no volume terrain, which is what makes
+    // calling these on a column map a quiet no-op rather than a panic.
+
+    /// The volume terrain + physics state, when the map has any.
+    fn volume(&self) -> Option<&SharedPhysics> {
+        None
+    }
+
+    /// Fill a solid box in the volume store with `material`, and paint it
+    /// on screen.
+    fn volume_fill(
+        &self,
+        lo: (i64, i64, i64),
+        hi: (i64, i64, i64),
+        material: MaterialId,
+        color: i64,
+    ) {
+        if let Some(p) = self.volume() {
+            let mut sim = p.lock().expect("physics mutex");
+            sim.terrain
+                .fill(lo.0, lo.1, lo.2, hi.0, hi.1, hi.2, material);
+            // P6: the solver caches per-chunk occupancy, so an edit has to
+            // announce itself or a sleeping body keeps colliding with
+            // terrain that is no longer there.
+            sim.world.notify_terrain_edit(lo, hi);
+        }
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .voxel_fill(lo.0, lo.1, lo.2, hi.0, hi.1, hi.2, color);
+        }
+    }
+
+    /// Punch out ONE cell — the tunnel primitive the column store could
+    /// only fake by truncating a whole column.
+    fn volume_clear(&self, x: i64, y: i64, z: i64) {
+        if let Some(p) = self.volume() {
+            let mut sim = p.lock().expect("physics mutex");
+            sim.terrain.clear(x, y, z);
+            sim.world.notify_terrain_edit((x, y, z), (x, y, z));
+        }
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").voxel_clear(x, y, z);
+        }
+    }
+
+    /// Whether the volume store holds a solid cell — the deterministic
+    /// terrain read on a volume map, where the column `voxel_solid`
+    /// answers an empty world by design.
+    fn volume_solid(&self, x: i64, y: i64, z: i64) -> bool {
+        self.volume().is_some_and(|p| {
+            p.lock()
+                .expect("physics mutex")
+                .terrain
+                .get(x, y, z)
+                .is_some()
+        })
+    }
 }
 
 /// The **local** layer's surface: everything in [`WorldRead`] plus input,
@@ -292,6 +360,7 @@ pub struct RuntimeHost {
     world: SharedWorld,
     bridge: Option<SharedBridge>,
     terrain: SharedTerrain,
+    volume: Option<SharedPhysics>,
 }
 
 impl RuntimeHost {
@@ -303,6 +372,7 @@ impl RuntimeHost {
             world,
             bridge: None,
             terrain: crate::shared_terrain(),
+            volume: None,
         }
     }
 
@@ -314,6 +384,7 @@ impl RuntimeHost {
             world,
             bridge: None,
             terrain: terrain.clone(),
+            volume: None,
         }
     }
 
@@ -327,6 +398,12 @@ impl RuntimeHost {
     /// `RhaiBackend::set_bridge`'s contract.
     pub fn set_bridge(&mut self, bridge: &SharedBridge) {
         self.bridge = Some(bridge.clone());
+    }
+
+    /// Attach the volume terrain + physics sim a `terrain = "volume"`
+    /// map runs on. Call before `init`, like the bridge.
+    pub fn set_volume(&mut self, phys: &SharedPhysics) {
+        self.volume = Some(phys.clone());
     }
 
     /// The shared world this host mutates.
@@ -375,6 +452,10 @@ impl WorldRead for RuntimeHost {
 }
 
 impl Host for RuntimeHost {
+    fn volume(&self) -> Option<&SharedPhysics> {
+        self.volume.as_ref()
+    }
+
     fn archetype(&self, fields: &[&str]) -> ArchetypeId {
         self.world
             .lock()
