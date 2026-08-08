@@ -22,6 +22,10 @@
 
 use std::collections::{BTreeMap, BinaryHeap};
 
+pub mod volume;
+
+pub use volume::{MoverProfile, NavVolume, Stand, VolumeLimits, VolumeWorld};
+
 /// The world a path is planned against: a heightfield + explicit blockers.
 /// Implementations must be pure functions of their state — the same cell
 /// always answers the same — or determinism is forfeit.
@@ -48,7 +52,7 @@ pub struct NavLimits {
 
 /// Fixed neighbour order (E, N, W, S, NE, NW, SW, SE): orthogonals first,
 /// then diagonals — part of the determinism contract, do not reorder.
-const NEIGHBOURS: [(i64, i64, i64); 8] = [
+pub(crate) const NEIGHBOURS: [(i64, i64, i64); 8] = [
     (1, 0, 10),
     (0, 1, 10),
     (-1, 0, 10),
