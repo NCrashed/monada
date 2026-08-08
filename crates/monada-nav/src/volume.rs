@@ -163,22 +163,31 @@ impl NavVolume {
             .or_insert_with(|| extract(world, x, y, z_range, profile))
     }
 
-    /// The stands this mover may actually use: all of them when it can
-    /// tunnel, the open top one otherwise.
-    fn usable(
-        &mut self,
-        world: &impl VolumeWorld,
-        x: i64,
-        y: i64,
-        z_range: (i64, i64),
-    ) -> Vec<Stand> {
-        let tunnels = self.profile.tunnels;
-        let all = self.stands(world, x, y, z_range);
-        if tunnels {
-            all.to_vec()
-        } else {
-            all.iter().copied().filter(|s| !s.enclosed).take(1).collect()
+    /// Make sure a column's stands are cached, then hand back a borrow of
+    /// them.
+    ///
+    /// Split from the reads below on purpose. The obvious shape —
+    /// "return the usable stands as a `Vec`" — allocates on every
+    /// neighbour probe, and a search probes ten times per popped node,
+    /// which measured as an entire order of magnitude: a corner-to-corner
+    /// vehicle route cost 47 ms allocating and a few milliseconds not.
+    fn ensure(&mut self, world: &impl VolumeWorld, x: i64, y: i64, z_range: (i64, i64)) {
+        if !self.stands.contains_key(&(x, y)) {
+            let stands = extract(world, x, y, z_range, self.profile);
+            self.stands.insert((x, y), stands);
         }
+    }
+
+    /// The stands this mover may use in a cached column: all of them when
+    /// it can tunnel, the topmost open one otherwise.
+    fn usable_cached(&self, x: i64, y: i64) -> impl Iterator<Item = &Stand> + '_ {
+        let tunnels = self.profile.tunnels;
+        self.stands
+            .get(&(x, y))
+            .into_iter()
+            .flatten()
+            .filter(move |s| tunnels || !s.enclosed)
+            .take(if tunnels { usize::MAX } else { 1 })
     }
 
     /// The stand of `(x, y)` a mover standing at ground height `z` would
@@ -192,9 +201,8 @@ impl NavVolume {
         z: i64,
         z_range: (i64, i64),
     ) -> Option<Stand> {
-        self.usable(world, x, y, z_range)
-            .into_iter()
-            .min_by_key(|s| (s.z - z).abs())
+        self.ensure(world, x, y, z_range);
+        self.usable_cached(x, y).min_by_key(|s| (s.z - z).abs()).copied()
     }
 
     /// A deterministic best-first path from one stand to another.
@@ -301,11 +309,22 @@ impl NavVolume {
         ny: i64,
         z_range: (i64, i64),
     ) -> Option<i64> {
-        let max_step = self.profile.max_step;
-        self.usable(world, nx, ny, z_range)
-            .into_iter()
+        // ONE map lookup, not two. A search probes this ten times per
+        // popped node — eight neighbours plus two corner flanks — so a
+        // "check, then fetch" pair doubles the tree walks that dominate
+        // the search's cost. `entry` does both at once, and the profile is
+        // copied out first so the borrow it holds does not collide.
+        let profile = self.profile;
+        let stands = self
+            .stands
+            .entry((nx, ny))
+            .or_insert_with(|| extract(world, nx, ny, z_range, profile));
+        stands
+            .iter()
+            .filter(|s| profile.tunnels || !s.enclosed)
+            .take(if profile.tunnels { usize::MAX } else { 1 })
             .map(|s| s.z)
-            .filter(|&z| (z - cz).abs() <= max_step)
+            .filter(|&z| (z - cz).abs() <= profile.max_step)
             .min_by_key(|&z| (z - cz).abs())
     }
 }
