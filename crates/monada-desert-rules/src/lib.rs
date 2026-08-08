@@ -20,13 +20,23 @@
 #![allow(clippy::many_single_char_names, clippy::similar_names)]
 
 use monada_fixed::{trig, Fixed, FixedVec3};
-use monada_runtime::{Host, LocalHost, LocalRules, MapRules, MoverProfile, VolumeLimits};
+use monada_runtime::{
+    Host, LocalHost, LocalRules, MapRules, MoverProfile, Repose, VolumeLimits,
+};
 use monada_sim::{ArchetypeId, EntityId};
 use std::collections::BTreeMap;
 
 pub mod gen;
+pub mod terraform;
 
 pub use gen::{Desert, DesertParams, Surface};
+pub use terraform::{JobId, Spent, Terraform, Work};
+
+/// Sand's angle of repose, as the steepest drop it will hold: one cell
+/// (§4d). Spice behaves the same — it is dust. Everything else on the
+/// map is stable at any slope, which is precisely what makes rock worth
+/// standing on, packed fill worth manufacturing and glass worth firing.
+pub const SAND_REPOSE: Repose = Repose { max_drop: 1 };
 
 /// Sim cells per gameplay tile (§4a). The rules reason in tiles — a
 /// building is 2×2 or 3×2 of them, a unit occupies one — while the
@@ -55,6 +65,40 @@ pub mod material {
     pub const PACKED_FILL: MaterialId = MaterialId(3);
     /// Binder product: fast, worm-proof and brittle (§6c).
     pub const GLASS: MaterialId = MaterialId(4);
+
+    /// What a material is painted as.
+    ///
+    /// The store holds the material and the screen needs a colour; a
+    /// terraform verb that changed one without the other would leave a
+    /// lie on the ground — glass you can drive on but that still looks
+    /// like sand.
+    #[must_use]
+    pub fn color(material: MaterialId) -> i64 {
+        match material.0 {
+            1 => 0x8078_6c60, // rock
+            2 => 0x80c8_7830, // spice
+            3 => 0x80a8_a098, // packed fill: grey, deliberately man-made
+            4 => 0x8090_c8d8, // glass: pale blue, and unmistakable
+            _ => 0x80c8_b48c, // sand
+        }
+    }
+
+    /// What comes out of the ground when you dig it up.
+    ///
+    /// **Works break back into sand.** Packed fill and glass are states
+    /// sand was put into, and excavating them undoes that — so a Dweller
+    /// bore through a Surfling causeway leaves a loose heap that slumps,
+    /// not a neat stack of blocks. Rock and spice come out as themselves:
+    /// rubble still will not flow, and spice is still worth collecting
+    /// wherever it ends up.
+    #[must_use]
+    pub fn spoil_of(material: MaterialId) -> MaterialId {
+        match material.0 {
+            1 => ROCK,
+            2 => SPICE,
+            _ => SAND,
+        }
+    }
 }
 
 /// Armour: three cells of clearance, climbs two, no tunnels — the
@@ -79,6 +123,11 @@ pub struct DesertRules {
     /// Retained paths, per vehicle — the state a Rhai map could not hold
     /// (§3c). Hashed like everything else reachable from the rules.
     paths: BTreeMap<EntityId, Vec<(i64, i64, i64)>>,
+    /// Terraform orders in flight and the allowance they share (§4e).
+    terraform: Terraform,
+    /// The last tick's terraform charge, for the HUD to show and a test
+    /// to assert on. Derived, not state: it is recomputed every tick.
+    spent: Spent,
     /// The archetype `init` registered for vehicles — a handle, re-derived
     /// identically on every peer, not hashed state.
     vehicle_kind: Option<ArchetypeId>,
@@ -96,8 +145,21 @@ impl DesertRules {
         DesertRules {
             desert: Desert::new(params),
             paths: BTreeMap::new(),
+            terraform: Terraform::new(),
+            spent: Spent::default(),
             vehicle_kind: None,
         }
+    }
+
+    /// The terraform queue, for orders and for tests.
+    pub fn terraform(&mut self) -> &mut Terraform {
+        &mut self.terraform
+    }
+
+    /// What the last tick's terraforming cost.
+    #[must_use]
+    pub fn spent(&self) -> Spent {
+        self.spent
     }
 
     /// Where a vehicle standing on cell `(x, y)` sits: the first solid
@@ -105,10 +167,7 @@ impl DesertRules {
     /// generator, because terraforming will make them differ the moment
     /// a faction touches the ground (§6).
     fn seat(host: &dyn Host, x: i64, y: i64) -> FixedVec3 {
-        let mut z = gen::SKY_Z;
-        while z > gen::BEDROCK_Z && !host.volume_solid(x, y, z) {
-            z -= 1;
-        }
+        let z = Self::ground_under(host, x, y);
         FixedVec3::new(
             Fixed::from_int(i32::try_from(x).unwrap_or(0)),
             Fixed::from_int(i32::try_from(y).unwrap_or(0)),
@@ -153,6 +212,18 @@ impl MapRules for DesertRules {
     fn init(&mut self, host: &dyn Host) {
         self.paint(host);
 
+        // Declare what flows — AFTER the paint, and that order is the
+        // design, not an optimisation. Painting is 65k edits, and every
+        // edit disturbs its column; register first and the whole desert
+        // wakes up on tick 1 with nothing to do, burning the allowance
+        // for twenty ticks. Registering second states the rule plainly:
+        // the desert as generated is at rest, and what moves is what
+        // somebody touched. (The generator earns that: its dune gradient
+        // never exceeds a cell, which `terraform.rs`'s repose test
+        // checks rather than assumes.)
+        host.granular_register(material::SAND, SAND_REPOSE);
+        host.granular_register(material::SPICE, SAND_REPOSE);
+
         // One vehicle, so D-1 has something that moves over the dunes and
         // proves the seat-on-terrain maths. Orders and pathfinding are
         // D-2; this one drives a fixed heading and turns at the edges.
@@ -173,9 +244,29 @@ impl MapRules for DesertRules {
             ),
             Fixed::from_int(1),
         );
+
+        if self.desert.params().proving_ground {
+            self.proving_ground(host, sx, sy);
+        }
     }
 
     fn tick(&mut self, host: &dyn Host, _dt: Fixed) {
+        // The ground first: settling and the terraform orders both change
+        // what the movers below are about to walk on, and a unit that
+        // steps onto a cell the same tick it collapses should fall, not
+        // hover. Doing it in the other order would hide that by one tick.
+        self.spent = self.terraform.run(host);
+        if self.spent.total() > 0 {
+            host.status(&format!(
+                "terraforming — {} cells cut and filled, {} settling, {} orders in flight",
+                self.spent.edited,
+                self.spent.settled,
+                self.terraform.pending()
+            ));
+        } else if self.terraform.pending() == 0 {
+            host.status("the desert — D-3");
+        }
+
         let Some(kind) = self.vehicle_kind else {
             return;
         };
@@ -183,9 +274,59 @@ impl MapRules for DesertRules {
             self.drive(host, vehicle);
         }
     }
+
+    /// The rules' own hashed state (§3c): the retained paths and the
+    /// terraform queue. Both are things a Rhai map could not have held,
+    /// and both are things two peers must agree on to the cell — a path
+    /// decides where a unit will be next second, a job decides what the
+    /// ground will be.
+    ///
+    /// The generator is not in here: it is a pure function of the
+    /// parameter block every peer already has, so serializing it would
+    /// only be a slower way of agreeing on what is already agreed.
+    fn snapshot(&self) -> Vec<u8> {
+        postcard::to_stdvec(&(&self.paths, &self.terraform)).unwrap_or_default()
+    }
+
+    fn restore(&mut self, bytes: &[u8]) {
+        if let Ok((paths, terraform)) = postcard::from_bytes(bytes) {
+            self.paths = paths;
+            self.terraform = terraform;
+        }
+    }
 }
 
 impl DesertRules {
+    /// Three faction verbs and a shell, laid out beside the starting
+    /// position so the whole of D-3 is visible in the first second of a
+    /// run: a Surfling berm going up with sheer sides, a Dweller trench
+    /// going down beside its slumping spoil heap, a Binder road turning
+    /// the dunes to glass without moving a grain of them, and a crater
+    /// whose rim falls in while you watch.
+    ///
+    /// A demonstration, and honest about being one — the units that will
+    /// order these are D-5's, and the orders are the same orders.
+    fn proving_ground(&mut self, host: &dyn Host, sx: i64, sy: i64) {
+        let ground = Self::ground_under(host, sx, sy);
+        let work = &mut self.terraform;
+
+        work.order(
+            (sx + 10, sy - 6),
+            (sx + 15, sy + 5),
+            Work::Raise { level: ground + 5 },
+        );
+        work.order(
+            (sx - 12, sy - 8),
+            (sx - 11, sy + 7),
+            Work::Dig {
+                level: ground - 5,
+                spoil: (sx - 16, sy),
+            },
+        );
+        work.order((sx - 4, sy - 10), (sx - 1, sy + 9), Work::Vitrify { depth: 2 });
+        Terraform::crater(host, (sx, sy + 22), 8);
+    }
+
     /// The whole map, as the search's bounds.
     fn nav_limits() -> VolumeLimits {
         VolumeLimits {
@@ -276,12 +417,14 @@ impl DesertRules {
     }
 
     /// The ground height under a cell, from the store.
+    ///
+    /// One host call, not the sixty-four a scan down from the sky used to
+    /// cost: the store walks its own chunks from the top of the column it
+    /// actually has (`host_api` 18). On a column of nothing but air the
+    /// answer is bedrock, which keeps a unit driven off the map's edge on
+    /// the floor rather than at `SKY_Z`.
     fn ground_under(host: &dyn Host, x: i64, y: i64) -> i64 {
-        let mut z = gen::SKY_Z;
-        while z > gen::BEDROCK_Z && !host.volume_solid(x, y, z) {
-            z -= 1;
-        }
-        z
+        host.volume_top(x, y).map_or(gen::BEDROCK_Z, |(z, _)| z)
     }
 }
 

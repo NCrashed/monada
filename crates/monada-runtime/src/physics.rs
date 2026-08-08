@@ -38,6 +38,10 @@ pub struct DrillToolDef {
 pub struct PhysicsSim {
     pub world: PhysicsWorld,
     pub terrain: VolumeStore,
+    /// The settling automaton for whatever the map declared granular
+    /// (docs/plans/desert-game.md §4d). Sim state like the terrain it
+    /// reshapes: it rides the same snapshot and the same digest.
+    pub granular: crate::Granular,
     /// Drill tools by body id (D3). Sim state like everything else here:
     /// registered deterministically, serialized, and folded into the
     /// driver hash via [`tools_hash`](PhysicsSim::tools_hash).
@@ -75,6 +79,7 @@ pub fn shared_physics(sim_hz: u32) -> SharedPhysics {
     Arc::new(Mutex::new(PhysicsSim {
         world: PhysicsWorld::new(sim_hz),
         terrain: VolumeStore::new(),
+        granular: crate::Granular::new(),
         tools: BTreeMap::new(),
     }))
 }

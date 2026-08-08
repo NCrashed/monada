@@ -38,6 +38,21 @@ pub struct Repose {
     pub max_drop: i64,
 }
 
+/// One cell of material moving downhill.
+///
+/// Reported rather than merely done, because the automaton edits the
+/// store *directly* — it is the one thing in the engine that changes the
+/// ground without going through a map's paint verb, and everything
+/// derived from the ground would otherwise never hear about it. A slump
+/// that the navigation stands and the screen do not know about is a unit
+/// walking through a dune that is no longer there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Slide {
+    pub from: (i64, i64, i64),
+    pub to: (i64, i64, i64),
+    pub material: MaterialId,
+}
+
 /// The order neighbours are examined in, and the order a tie is broken
 /// by: E, N, W, S. Part of the determinism contract — do not reorder.
 const NEIGHBOURS: [(i64, i64); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
@@ -94,50 +109,52 @@ impl Granular {
 
     /// Let the terrain settle, moving at most `budget` cells.
     ///
-    /// Returns how many moved. A pile does not finish in one call and is
-    /// not meant to: the remaining columns stay dirty, so a slope keeps
-    /// slumping over the following ticks — bounded work per tick, and a
-    /// collapse the player can watch happen.
-    pub fn settle(&mut self, store: &mut VolumeStore, budget: u32) -> u32 {
+    /// Returns the moves it made, in the order it made them. A pile does
+    /// not finish in one call and is not meant to: the remaining columns
+    /// stay dirty, so a slope keeps slumping over the following ticks —
+    /// bounded work per tick, and a collapse the player can watch happen.
+    pub fn settle(&mut self, store: &mut VolumeStore, budget: u32) -> Vec<Slide> {
+        let mut slides = Vec::new();
         if self.materials.is_empty() || budget == 0 {
-            return 0;
+            return slides;
         }
         let mut moved = 0;
-        // Take the whole set and re-add what still needs work: iterating
-        // a set while inserting into it is neither borrowable nor
-        // canonical, and "what was dirty when the sweep began" is the
-        // honest unit of work.
-        let pending = std::mem::take(&mut self.dirty);
-        let mut deferred = BTreeSet::new();
-        for (x, y) in pending {
-            if moved >= budget {
-                // Out of budget: the rest is next tick's business.
-                deferred.insert((x, y));
-                continue;
-            }
-            if self.slide_one(store, x, y) {
+        // A worklist, not a single pass. The dirty set is taken whole and
+        // worked lowest-key first; a column that slides goes back on the
+        // list with its ring, and the sweep keeps going until the budget
+        // is gone. One pass per call instead would make a collapse travel
+        // at one cell per tick regardless of the budget — a crater took
+        // fifty seconds of game time to find its angle — because the
+        // material has to move cell by cell and each tick only advanced
+        // the wavefront once. Draining the worklist makes the *budget*
+        // the pacing knob, which is where §4e wants it.
+        let mut work = std::mem::take(&mut self.dirty);
+        while moved < budget {
+            let Some((x, y)) = work.pop_first() else {
+                break;
+            };
+            if let Some(slide) = self.slide_one(store, x, y) {
                 moved += 1;
+                slides.push(slide);
                 // The column that lost a cell and the one that gained it
                 // are both unsettled now, along with their rings.
-                deferred.insert((x, y));
+                work.insert((x, y));
                 for (dx, dy) in NEIGHBOURS {
-                    deferred.insert((x + dx, y + dy));
+                    work.insert((x + dx, y + dy));
                 }
             }
         }
-        self.dirty.extend(deferred);
-        moved
+        // Whatever the budget did not reach is next tick's business.
+        self.dirty.extend(work);
+        slides
     }
 
     /// Move one cell off the top of a column, if it is standing steeper
     /// than its material allows.
-    fn slide_one(&self, store: &mut VolumeStore, x: i64, y: i64) -> bool {
-        let Some((z, material)) = surface(store, x, y) else {
-            return false;
-        };
-        let Some(&repose) = self.materials.get(&material) else {
-            return false; // rock does not flow
-        };
+    fn slide_one(&self, store: &mut VolumeStore, x: i64, y: i64) -> Option<Slide> {
+        let (z, material) = surface(store, x, y)?;
+        // Rock does not flow.
+        let &repose = self.materials.get(&material)?;
 
         // The lowest neighbour that is too far below, ties broken by the
         // fixed neighbour order — so a symmetric pile collapses the same
@@ -146,18 +163,28 @@ impl Granular {
         let mut best: Option<(i64, i64, i64)> = None;
         for (dx, dy) in NEIGHBOURS {
             let (nx, ny) = (x + dx, y + dy);
-            let nz = surface(store, nx, ny).map_or(i64::MIN / 4, |(z, _)| z);
+            // A column with no ground at all is not a destination. The
+            // store is unbounded below, so "empty" cannot mean "very low"
+            // — read that way, one grain at the edge of a painted island
+            // slides into the void, lands at half of `i64::MIN`, and the
+            // map is gone. The automaton reshapes ground; it does not
+            // invent a floor under a place that has none.
+            let Some((nz, _)) = surface(store, nx, ny) else {
+                continue;
+            };
             if z - nz > repose.max_drop && best.map_or(true, |(bz, _, _)| nz < bz) {
                 best = Some((nz, nx, ny));
             }
         }
-        let Some((nz, nx, ny)) = best else {
-            return false;
-        };
+        let (nz, nx, ny) = best?;
 
         store.clear(x, y, z);
         store.set(nx, ny, nz + 1, MaterialId(material));
-        true
+        Some(Slide {
+            from: (x, y, z),
+            to: (nx, ny, nz + 1),
+            material: MaterialId(material),
+        })
     }
 }
 

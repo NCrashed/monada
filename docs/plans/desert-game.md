@@ -315,15 +315,25 @@ Loose sand must not stand in vertical walls: a trench erodes, a berm slumps,
 an explosion craters and the crater's rim settles. Without this, terraforming
 is just voxel Lego and the factions of §6 have no cost or counterplay.
 
-Proposal: a deterministic **settle pass** in `monada-physics`, beside the
-existing voxel materials, rather than in the rules — it is generic granular
-behaviour (any future map wants gravel and snow), it needs the volume store's
-dirty tracking, and keeping it engine-side means the same hashed result on
-every peer without the rules crate reimplementing an automaton.
+**Built** (D-3), and not where the proposal put it. The pass is engine-side
+for the reasons below, but `monada-physics` was the wrong crate: physics
+cannot see `VolumeStore` — the dependency runs the other way — and the rules
+crate is the wrong home for something every future map wants the moment it
+has gravel or snow. It lives in `monada-runtime` beside the terrain it
+reshapes (`granular.rs`), and *when* to run it and *how much* is the map's
+call through the budget of §4e. Engine owns the rule; map owns the pacing.
 
 ```
-phys_granular(mat, repose, rate)   // per-material angle of repose + cells/tick
+granular_register(material, Repose { max_drop })   // declare what flows
+settle(budget) -> u32                              // let it, bounded
+settling() -> usize                                // is anything still moving
 ```
+
+A material never declared is stable at any slope, which is what makes rock
+worth standing on, packed fill worth manufacturing and glass worth firing.
+An automaton with nothing declared is *inert* and contributes nothing to the
+digest — the canonical-form rule that let this ship without re-blessing a
+single existing golden.
 
 - Cells of a granular material whose supporting neighbourhood is thinner than
   `repose` allows move one cell downhill, in a canonically ordered sweep over
@@ -332,9 +342,16 @@ phys_granular(mat, repose, rate)   // per-material angle of repose + cells/tick
 - The pass is hashed state, so a slump is identical on every peer, and it is
   bounded: quiet terrain costs nothing, an active battlefield costs a fixed
   ceiling.
-- Fallback if the engine-side pass proves contentious: the same automaton
-  lives in the rules crate over `TerrainApi`, at the cost of one host call per
-  candidate cell. Decide at D-3 with numbers, not taste.
+- A column with **no ground at all** beside it is not a destination. The
+  store is unbounded below, so an empty column cannot be read as "very low";
+  read that way, the edge grains of a painted island slide into the void,
+  land near `i64::MIN`, and the map drains away one cell at a time. The
+  automaton reshapes ground; it does not invent a floor under a place that
+  has none. (Found by a test plate, which is exactly the shape that has air
+  beside it.)
+- The fallback — the same automaton in the rules crate over the terrain API,
+  one host call per candidate cell — was not needed. The numbers are in
+  §13a.
 
 ### 4e. Terraform work as a resource
 
@@ -343,6 +360,37 @@ is performed by a *unit* at a bounded cells-per-second rate, costing power or
 spice. This is simultaneously the game's pacing knob and the engine's safety
 valve — it caps voxel edits per tick, which caps render re-uploads, nav
 invalidation and settle-pass work. One number, three problems.
+
+**Built** (D-3) as `monada_desert_rules::Terraform`: `CELLS_PER_TICK` is the
+one number, and every faction verb is a `Work` order over a rectangle of
+columns, worked column by column until the allowance runs out and resumed on
+the next tick. A tick spends it in a fixed order — **the desert answers
+before the engineers act**: up to half goes to settling whatever is still
+falling, then the orders get the rest plus whatever settling did not want. A
+player cannot out-dig an avalanche, and an avalanche cannot starve the
+player forever, because sand converges and the allowance flows back.
+
+The three verbs, and their asymmetry, which is the game:
+
+| | `Raise` (Surfling) | `Dig` (Dweller) | `Vitrify` (Binder) |
+|---|---|---|---|
+| Does what | builds columns up to a level in packed fill | cuts columns down to a level, piling the spoil on one column | converts the top *n* cells to glass |
+| Mass | **creates** it — fill is manufactured | **conserves** it exactly | unchanged |
+| Shape | changes, and stands: fill is not granular | changes, and erodes: the trench refills, the heap slumps into a visible cone | **unchanged** — only the substance moves |
+| Cost | 1 edit a cell | 2 (a cell out, a cell down) | 2 (a clear, then a paint — a paint over a solid does not recolour it) |
+
+Excavated works break back into sand: packed fill and glass are states sand
+was put into, so digging them undoes that, and a Dweller bore through a
+Surfling causeway leaves a loose heap rather than a neat stack of blocks.
+Rock and spice come out as themselves.
+
+A crater is *not* an order. An explosion does not queue and does not
+conserve — the material is thrown away, which is exactly what distinguishes
+a shell from an excavation — so `Terraform::crater` is an instant hemisphere
+(`depth² + d² ≤ r²`, integer square root, no floats anywhere near the shape
+of a hole in the ground). The hemisphere is deliberately steeper than sand
+holds right up to its lip: a gentler profile would come out of the ground
+already at rest and never slump, which is not what a shell does to a dune.
 
 ### 4f. Decks: shroud and camera
 
@@ -628,7 +676,15 @@ golden in `monada-hashes.txt`.
   granular pass (§4d) and the terraform work budget (§4e). *Gate:* a berm, a
   trench and a crater settle to the same hashed state on every platform; a
   3000-cell terraform tick stays under 1 ms in the store (it costs 21 ms
-  today) and inside the render and nav budgets.
+  today) and inside the render and nav budgets. **Met** (§13a): the store's
+  share of a 3000-cell tick is 1.30 ms against the 21 it was, and the whole
+  verb — reads, settling, navigation invalidation and the render mirror —
+  costs 2.85 ms of a 33.3 ms tick. Two things had to be fixed on the way and
+  both are recorded: the portal graph was sweeping itself per edit, and the
+  settle pass was advancing one cell per column per tick regardless of its
+  budget. `host_api` 18 carries the five new verbs; every existing golden is
+  byte-identical, because a map that declares nothing granular leaves the
+  automaton inert and an inert automaton hashes as nothing.
 - **D-4 — economy.** MCV deploy, refinery, harvester loop, surface crust
   depletion, deep veins via drill, silos, power. *Gate:* a scripted schedule
   mines an exact credit total at an exact tick.
@@ -839,16 +895,65 @@ patch, and the 4 MB store is a non-issue for snapshots. The full-map stand
 scan wants a chunk-local walk rather than per-cell `get`, but it runs once
 per mission load.
 
+**Terraforming, measured after building it** —
+`cargo run --release -p monada-desert-rules --example terraform_perf`,
+against the real generated desert with the navigation graph warmed by one
+army crossing, which is the state a match is actually in.
+
+| Case | Cost | Of a 33.3 ms tick |
+|---|---|---|
+| Mission load (paint 256²) | 43 ms | once |
+| 3000 raw `volume_fill` edits, nothing derived yet | 1.30 ms | 3.9 % |
+| A 3000-cell Surfling `Raise` tick, cold caches | 0.73 ms | 2.2 % |
+| A 3000-cell `Raise` tick, **warm nav** | **2.85 ms** | 8.5 % |
+| A 3000-cell Dweller `Dig` tick (two edits a cell) | 3.44 ms | 10.3 % |
+| One crater, radius 12, 3356 cells blasted | 2.81 ms | 8.4 % |
+| The settle tick after it (1500 cells moved) | 1.15 ms | 3.5 % |
+| That crater settling out completely | 62 ms over **12 ticks** | 0.4 s of game time |
+| 100 quiet ticks | 0.00 ms | free |
+
+The gate is met with room: the store's share is the 1.30 ms line, and the
+whole verb — reads, settling, nav invalidation and the render mirror — is
+under three milliseconds. Two things had to be fixed to get there, and both
+are the same shape of mistake.
+
+- **`PortalGraph::invalidate` swept the whole graph per edit.** It dropped
+  dirty blocks with two `retain` passes, which is fine at one edit a second
+  and costs 16.81 ms — half a tick — at three thousand. A border only ever
+  joins two orthogonally adjacent blocks, so the keys to drop are
+  enumerable: nine blocks and four borders each, whatever the graph's size.
+  16.81 → 2.85 ms.
+- **The settle pass advanced one cell per column per tick.** A grain has to
+  travel to reach the bottom of a crater, and a single canonical pass per
+  call meant the wavefront moved one cell a tick regardless of the budget —
+  a radius-12 crater took 1491 ticks, fifty seconds of game time, to find
+  its angle. Draining a worklist inside the call instead makes the *budget*
+  the pacing knob, which is where §4e wanted it all along. 1491 → 12 ticks.
+
+Both were found by measuring the thing the plan said to measure, and
+neither would have shown up in a test: the wrong one was merely slow, and
+the slow one was merely patient.
+
+**Settling is a terrain edit that no map made.** The automaton writes to the
+store directly — it is the only thing in the engine that reshapes the ground
+without going through a paint verb — so `Host::settle` has to do by hand
+what `disturb_terrain` does for everything else: drop the navigation stands
+of every column it touched, tell the physics solver, and mirror each moved
+cell to the render grid through the new `voxel_slide`. Forgetting any of
+those is not a visible bug. It is a vehicle driving through the middle of a
+dune that slid there a second ago, and a screen that still shows the dune
+where it used to be.
+
 ### 13b. Risks
 
 | Risk | Checkpoint | Mitigation |
 |---|---|---|
 | Volume store at 4× the digger: memory, hash | **measured (§13a) — clear.** 4 MB, hash 0.02 ms/tick | Nothing owed; snapshots are cheap at this size |
 | Terrain render cost at 256×256×64 | **measured (§13a) — passes on GPU.** 14.1 ms tactical with 400 posed vehicles; 62 ms on the CPU raycaster at 720p (31 ms even at RTS-demo scale) | The GPU backend is the target, as it already is for every demo; mip-0 stays pinned (LOD buys nothing and would break the deck cutaway). CPU fallback lives at 640×360. Re-measure at D-6 and D-9 — the 2.6 ms of headroom is where HUD, shroud and the sim mirror have to fit |
-| Terraforming churn — edits per tick blowing up hash, render re-uploads, nav invalidation, settle work | **measured (§13a) — the store needs work.** 7.01 µs/cell for per-voxel writes vs 0.07 for a batched box | Incremental chunk hash + a batched carve verb (§13a), then the terraform work budget (§4e) caps the rest |
+| Terraforming churn — edits per tick blowing up hash, render re-uploads, nav invalidation, settle work | **measured and addressed (§13a) — clear.** A 3000-cell tick costs 2.85 ms of 33.3 with the nav graph warm, against 21 ms for the store alone before D-3 | Incremental chunk hash, key-wise portal invalidation, and the §4e budget — one number capping edits, re-uploads, invalidation and settling together. Re-measure at D-6, when combat adds craters to the traffic |
 | 3D nav cost at 400 movers | **measured and addressed (§13a).** The flat search cost 41 ms on a long detour; the portal hierarchy brings it to 6.9 ms, and a scout pass keeps unobstructed routes at their old 1.6 ms | Retained paths + the hierarchy ship. Remaining: a per-tick cap on how many units may plan at once (5.9 ms each is fine; 200 in one tick is not) |
 | roxlap sprite path at 400 posed instances | **measured (§13a) — L4 is cheap.** Free yaw costs ~20 % over axis-aligned | Shroud culling (`fow_cull`), model voxel budget, infantry stays billboards |
-| Granular pass is a new determinism surface inside the engine | D-3 | Canonical sweep order over a dirty set, per-tick budget, snapshot-equivalence test, rules-side fallback |
+| Granular pass is a new determinism surface inside the engine | **closed at D-3.** Integer throughout, a canonical worklist drained lowest-key first, a fixed neighbour order, a per-call budget; folded into the driver digest, and inert on every map that declares nothing granular | Eight behaviour tests in `monada-runtime/tests/granular.rs` and the D-3 gate's hash-equality run; the rules-side fallback was not needed |
 | Native rules can express nondeterminism Rhai structurally could not | continuous | Lint wall, restricted dependencies, oracle matrix, nightly long-run; wasm (D-12) restores the structural guarantee |
 | Replay validity pinned to a binary, not a map hash | D-0 | `RULES_HASH` in the replay header; loud refusal, not silent desync |
 | The `rhai_backend.rs` → `monada-runtime` refactor breaks a demo subtly | D-0 | Byte-identical goldens are the gate, not a nice-to-have |

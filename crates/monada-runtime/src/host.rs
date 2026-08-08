@@ -23,7 +23,10 @@ use monada_sim::{ArchetypeId, EntityId};
 
 use monada_nav::{MoverProfile, VolumeLimits};
 
-use crate::{MaterialId, SharedBridge, SharedNav, SharedPhysics, SharedTerrain, SharedWorld};
+use crate::{
+    MaterialId, PhysicsSim, Repose, SharedBridge, SharedNav, SharedPhysics, SharedTerrain,
+    SharedWorld,
+};
 
 /// What **both** layers may do: read the world, and draw.
 ///
@@ -290,7 +293,7 @@ pub trait Host: WorldRead {
             // terrain that is no longer there.
             sim.world.notify_terrain_edit(lo, hi);
         }
-        self.invalidate_nav((lo.0, lo.1), (hi.0, hi.1));
+        self.disturb_terrain((lo.0, lo.1), (hi.0, hi.1));
         if let Some(b) = self.bridge() {
             b.lock()
                 .expect("bridge mutex")
@@ -306,7 +309,7 @@ pub trait Host: WorldRead {
             sim.terrain.clear(x, y, z);
             sim.world.notify_terrain_edit((x, y, z), (x, y, z));
         }
-        self.invalidate_nav((x, y), (x, y));
+        self.disturb_terrain((x, y), (x, y));
         if let Some(b) = self.bridge() {
             b.lock().expect("bridge mutex").voxel_clear(x, y, z);
         }
@@ -325,6 +328,118 @@ pub trait Host: WorldRead {
         })
     }
 
+    /// What a cell is *made of*, or `None` for air.
+    ///
+    /// The solidity read above answers "is there ground"; this answers
+    /// "whose ground" — which is the question the transmutative verbs are
+    /// built on (§6c): a Binder sinters an enemy's packed fill and leaves
+    /// raw sand alone, and a Dweller's spoil has to be the material that
+    /// came out of the hole.
+    fn volume_material(&self, x: i64, y: i64, z: i64) -> Option<MaterialId> {
+        self.volume()
+            .and_then(|p| p.lock().expect("physics mutex").terrain.get(x, y, z))
+    }
+
+    /// The topmost solid cell of a column and its material.
+    ///
+    /// One call for what the rules would otherwise ask sixty-four times
+    /// scanning down from the sky — and the store answers it by walking
+    /// its own chunks, so the cost is the column's height rather than the
+    /// world's.
+    fn volume_top(&self, x: i64, y: i64) -> Option<(i64, MaterialId)> {
+        self.volume().and_then(|p| {
+            p.lock()
+                .expect("physics mutex")
+                .terrain
+                .column_top(x, y)
+                .map(|(z, mat)| (z, MaterialId(mat)))
+        })
+    }
+
+    // --- granular terrain -------------------------------------------------
+
+    /// Declare a material granular: a slope of it steeper than `repose`
+    /// collapses (docs/plans/desert-game.md §4d). A material never
+    /// declared is stable at any slope — which is what makes a Surfling's
+    /// packed fill and a Binder's glass worth making.
+    fn granular_register(&self, material: MaterialId, repose: Repose) {
+        if let Some(p) = self.volume() {
+            p.lock()
+                .expect("physics mutex")
+                .granular
+                .register(material, repose);
+        }
+    }
+
+    /// Let disturbed terrain settle, moving at most `budget` cells;
+    /// returns how many moved.
+    ///
+    /// The map decides when and how much, because the answer belongs to
+    /// its terraform budget (§4e) rather than to the engine: one knob
+    /// paces the collapse, the render re-uploads, and the navigation
+    /// invalidation together.
+    fn settle(&self, budget: u32) -> u32 {
+        let Some(p) = self.volume() else {
+            return 0;
+        };
+        let slides = {
+            let mut sim = p.lock().expect("physics mutex");
+            let PhysicsSim {
+                granular,
+                terrain,
+                world,
+                ..
+            } = &mut *sim;
+            let slides = granular.settle(terrain, budget);
+            // The solver caches per-chunk occupancy, so a sleeping body
+            // has to be told the ground moved. One box around the whole
+            // slump rather than one call per cell: the call walks every
+            // body, and a thousand walks a tick is a worse trade than
+            // waking a few bodies that did not strictly need it.
+            if let Some((lo, hi)) = bounds(&slides) {
+                world.notify_terrain_edit(lo, hi);
+            }
+            slides
+        };
+        if slides.is_empty() {
+            return 0;
+        }
+
+        // Settling is the one thing that reshapes the ground WITHOUT
+        // going through a paint verb, so it has to do by hand what
+        // `disturb_terrain` does for everything else — and it must not
+        // re-disturb, or a slump would keep re-dirtying its own columns
+        // and never come to rest.
+        if let Some(nav) = self.nav() {
+            let mut nav = nav.lock().expect("nav mutex");
+            let mut seen = std::collections::BTreeSet::new();
+            for slide in &slides {
+                for column in [
+                    (slide.from.0, slide.from.1),
+                    (slide.to.0, slide.to.1),
+                ] {
+                    if seen.insert(column) {
+                        nav.invalidate(column, column);
+                    }
+                }
+            }
+        }
+        if let Some(b) = self.bridge() {
+            let mut b = b.lock().expect("bridge mutex");
+            for slide in &slides {
+                b.voxel_slide(slide.from, slide.to);
+            }
+        }
+        u32::try_from(slides.len()).unwrap_or(u32::MAX)
+    }
+
+    /// How many columns are still slumping — the map's cue that a slope
+    /// has not come to rest.
+    fn settling(&self) -> usize {
+        self.volume()
+            .map_or(0, |p| p.lock().expect("physics mutex").granular.pending())
+    }
+
     // --- navigation -------------------------------------------------------
 
     /// The stand-graph caches, one per mover profile
@@ -334,16 +449,20 @@ pub trait Host: WorldRead {
         None
     }
 
-    /// Drop the navigation stands of every column in the box.
+    /// Tell everything derived from the ground that the ground moved:
+    /// the navigation stands go stale, and the columns start slumping.
     ///
     /// Called by the paint verbs themselves, which is the point: whoever
     /// changes the ground invalidates what was derived from it. Left to
     /// the map, every terraforming verb would be a place to forget, and a
     /// stale stand is not a visible bug — it is a unit walking
     /// confidently through a wall raised two seconds ago.
-    fn invalidate_nav(&self, lo: (i64, i64), hi: (i64, i64)) {
+    fn disturb_terrain(&self, lo: (i64, i64), hi: (i64, i64)) {
         if let Some(nav) = self.nav() {
             nav.lock().expect("nav mutex").invalidate(lo, hi);
+        }
+        if let Some(p) = self.volume() {
+            p.lock().expect("physics mutex").granular.disturb(lo, hi);
         }
     }
 
@@ -430,6 +549,23 @@ pub trait LocalHost: WorldRead {
     fn highlight_clear(&self);
     /// The (first) selected entity, or `None`.
     fn highlighted(&self) -> Option<EntityId>;
+}
+
+/// An inclusive box of sim cells.
+type CellBox = ((i64, i64, i64), (i64, i64, i64));
+
+/// The inclusive cell box a set of slides covers, or `None` for none.
+fn bounds(slides: &[crate::Slide]) -> Option<CellBox> {
+    let mut it = slides
+        .iter()
+        .flat_map(|s| [s.from, s.to])
+        .map(|c| (c, c));
+    let (mut lo, mut hi) = it.next()?;
+    for (a, b) in it {
+        lo = (lo.0.min(a.0), lo.1.min(a.1), lo.2.min(a.2));
+        hi = (hi.0.max(b.0), hi.1.max(b.1), hi.2.max(b.2));
+    }
+    Some((lo, hi))
 }
 
 /// Entity ids cross the bridge as the script surface's `i64`.

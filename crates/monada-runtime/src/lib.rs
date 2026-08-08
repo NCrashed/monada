@@ -33,7 +33,7 @@ mod volume;
 
 pub use host::{Host, LocalHost, RuntimeHost, WorldRead};
 pub use native::{LocalLayer, LocalRules, MapRules, NativeBackend, NativeLocalBackend};
-pub use granular::{Granular, Repose};
+pub use granular::{Granular, Repose, Slide};
 pub use nav::{shared_nav, NavCache, SharedNav};
 pub use physics::{shared_physics, DrillToolDef, PhysicsSim, SharedPhysics};
 // The navigation vocabulary a map speaks, re-exported so a rules crate
@@ -119,8 +119,18 @@ pub use volume::VolumeStore;
 /// world-fixed camera the map's view-relative input steered in the
 /// ship's frame while the player looked at the world's — "forward"
 /// changed direction every tick as the hull turned. Riding the grid
-/// aligns the two and costs the map nothing but the one call.
-pub const HOST_API_VERSION: u32 = 17;
+/// aligns the two and costs the map nothing but the one call; 18 = the
+/// granular and volume-read verbs of the desert game's D-3 slice
+/// (docs/plans/desert-game.md §4d): `granular_register` / `settle` /
+/// `settling` declare a material's angle of repose and let the map pace
+/// its collapse, and `volume_material` / `volume_top` read back *what* a
+/// cell is made of and where a column ends. Native-surface only so far —
+/// no Rhai verb exposes them yet — but the manifest contract is the
+/// map's, not the language's, so the number moves. Additive twice over:
+/// a map that declares nothing granular leaves the automaton inert, and
+/// an inert automaton contributes nothing to the digest, so every
+/// existing golden holds.
+pub const HOST_API_VERSION: u32 = 18;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -275,6 +285,18 @@ pub trait HostBridge: Send {
     /// if the clear reached ground level. Same determinism contract as
     /// [`voxel_fill`](Self::voxel_fill). The default ignores it.
     fn voxel_clear(&mut self, _x: i64, _y: i64, _z: i64) {}
+
+    /// Move one already-painted voxel from one sim cell to another — the
+    /// render half of a settling step (docs/plans/desert-game.md §4d).
+    ///
+    /// Not a clear plus a fill, for two reasons. The colour is not the
+    /// caller's to supply: the automaton moved a cell of *whatever was
+    /// there*, and the render grid is the thing that knows what colour
+    /// that was. And a clear would seed the debris puff a carve does,
+    /// which is right for a drill and wrong for a dune finding its
+    /// angle — sand sliding is not sand exploding. The default ignores
+    /// it, so a headless peer settles identically and draws nothing.
+    fn voxel_slide(&mut self, _from: (i64, i64, i64), _to: (i64, i64, i64)) {}
 
     /// Spawn a new voxel grid offset by SIM cell `(wx, wy, wz)` from the world
     /// origin and return its render-side grid id. Use `(0, 0, 0)` for the world

@@ -19,7 +19,7 @@
 //! [`PhysicsWorld`]: monada_physics::PhysicsWorld
 
 use monada_net::SimDriver;
-use monada_sim::{Command, PlayerId, StateHasher};
+use monada_sim::{Command, PlayerId, StateHash, StateHasher};
 
 use crate::{
     PhysicsSim, RhaiBackend, ScriptBackend, ScriptError, SharedBridge, SharedGrids, SharedPhysics,
@@ -178,6 +178,14 @@ impl SimDriver for RhaiDriver {
         h.write_u64(sim.world.state_hash());
         h.write_u64(sim.terrain.state_hash());
         h.write_u64(sim.tools_hash());
+        // The settling automaton is sim state as much as the terrain it
+        // reshapes (docs/plans/desert-game.md §4d): its dirty set decides
+        // what slides next tick, so two peers that agree on the ground but
+        // not on what is still moving are already diverging. An *inert*
+        // automaton — a map that declared nothing granular — writes
+        // nothing at all, which is what keeps every pre-desert golden at
+        // the value it has today.
+        sim.granular.hash(&mut h);
         h.finish()
     }
 }

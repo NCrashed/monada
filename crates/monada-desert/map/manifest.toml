@@ -7,7 +7,7 @@ engine_version = "0.0.1"
 # a script (decision L1), but they reach the engine through the same host
 # surface, so the same compatibility gate applies: a host outside this
 # range refuses the map instead of desyncing.
-host_api = 17
+host_api = 18
 
 # Skirmish is 2..4 (D-9); D-1 is one player watching one vehicle.
 players = 1

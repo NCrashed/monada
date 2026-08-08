@@ -1698,6 +1698,8 @@ dependencies = [
  "monada-fixed",
  "monada-runtime",
  "monada-sim",
+ "postcard",
+ "serde",
 ]
 
 [[package]]

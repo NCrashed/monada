@@ -16,6 +16,11 @@ publish = false
 monada-runtime = { workspace = true }
 monada-sim = { workspace = true }
 monada-fixed = { workspace = true }
+# The rules own hashed state of their own (plan §3c), so they own its
+# canonical bytes too: `MapRules::snapshot` is what the driver hashes and
+# what a saved game restores from.
+serde = { workspace = true }
+postcard = { version = "1", features = ["use-std"] }
 
 [lints]
 workspace = true

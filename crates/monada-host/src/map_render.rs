@@ -3661,6 +3661,30 @@ impl HostBridge for MapRender {
         }
     }
 
+    fn voxel_slide(&mut self, from: (i64, i64, i64), to: (i64, i64, i64)) {
+        // Volume maps only: loose material is a volume-store idea, and a
+        // column heightmap has nowhere to put a grain that moved sideways.
+        if !self.volume {
+            return;
+        }
+        let Some(id) = self.world_grid else {
+            return;
+        };
+        let (flo, fhi) = cell_box_to_volume_grid(from.0, from.1, from.2, from.0, from.1, from.2);
+        let (tlo, thi) = cell_box_to_volume_grid(to.0, to.1, to.2, to.0, to.1, to.2);
+        let Some(grid) = self.scene.grid_mut(id) else {
+            return;
+        };
+        // The colour travels with the cell — the automaton moved sand, not
+        // "a cell", and reading the source is the only way the render side
+        // can know which. No debris puff: a slump is not a carve.
+        let Some(color) = grid.voxel_color(flo) else {
+            return;
+        };
+        grid.set_rect(flo, fhi, None);
+        grid.set_rect(tlo, thi, Some(color));
+    }
+
     fn voxel_set(&mut self, x: i64, y: i64, z: i64, color: i64) {
         // Column store: fed on column maps only — see voxel_fill.
         if !self.volume {

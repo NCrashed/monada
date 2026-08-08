@@ -67,6 +67,12 @@ pub struct DesertParams {
     pub ridge_half_width: i64,
     /// How many spice fields to scatter.
     pub spice_fields: i64,
+    /// Lay out a demonstration of the three terraform verbs beside the
+    /// starting position (§4e). On for a run you can look at; off for a
+    /// test that wants the ground the generator promised and nothing
+    /// else, and off for every real mission once D-5's units are the
+    /// ones giving the orders.
+    pub proving_ground: bool,
 }
 
 impl Default for DesertParams {
@@ -76,6 +82,7 @@ impl Default for DesertParams {
             rock_percent: 35,
             ridge_half_width: 14,
             spice_fields: 6,
+            proving_ground: true,
         }
     }
 }

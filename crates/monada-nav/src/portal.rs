@@ -22,7 +22,7 @@
 //! is a good path, not the shortest one, which is the trade every RTS
 //! makes and no player has ever noticed.
 
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::volume::{NavVolume, VolumeLimits, VolumeWorld};
 
@@ -95,14 +95,25 @@ impl PortalGraph {
     /// Drop every block and border the box touches, plus their immediate
     /// neighbours — a wall raised at a block's edge changes where its
     /// border can be crossed, not only what is inside it.
+    ///
+    /// Removed by key rather than by sweeping the graph, and that is a
+    /// measured difference, not a preference. A terraforming faction edits
+    /// thousands of cells a tick (docs/plans/desert-game.md §4e) and every
+    /// one of them lands here; two `retain` passes over every built block
+    /// and every border, three thousand times, cost 16 ms of a 33 ms tick
+    /// on the desert. A border only ever joins two orthogonally adjacent
+    /// blocks, so the keys to drop are enumerable: nine blocks and their
+    /// four borders each, whatever the size of the graph.
     pub fn invalidate(&mut self, lo: (i64, i64), hi: (i64, i64)) {
         let (b0, b1) = (block_of(lo.0, lo.1), block_of(hi.0, hi.1));
-        let dirty: BTreeSet<(i64, i64)> = ((b0.1 - 1)..=(b1.1 + 1))
-            .flat_map(|by| ((b0.0 - 1)..=(b1.0 + 1)).map(move |bx| (bx, by)))
-            .collect();
-        self.blocks.retain(|b, _| !dirty.contains(b));
-        self.borders
-            .retain(|(a, b), _| !dirty.contains(a) && !dirty.contains(b));
+        for by in (b0.1 - 1)..=(b1.1 + 1) {
+            for bx in (b0.0 - 1)..=(b1.0 + 1) {
+                self.blocks.remove(&(bx, by));
+                for (dx, dy) in [(1_i64, 0_i64), (-1, 0), (0, 1), (0, -1)] {
+                    self.borders.remove(&border_key((bx, by), (bx + dx, by + dy)));
+                }
+            }
+        }
     }
 
     /// How many blocks are built — for tests and for a host watching the

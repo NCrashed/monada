@@ -29,7 +29,7 @@ fn tower(material: MaterialId, height: i64) -> VolumeStore {
 /// Settle until nothing moves, or the guard trips.
 fn settle_out(g: &mut Granular, store: &mut VolumeStore, budget: u32) -> u32 {
     let mut ticks = 0;
-    while g.settle(store, budget) > 0 {
+    while !g.settle(store, budget).is_empty() {
         ticks += 1;
         assert!(ticks < 10_000, "the pile never came to rest");
     }
@@ -71,7 +71,7 @@ fn rock_does_not_flow() {
     let before = store.state_hash();
     let mut g = sandy();
     g.disturb((10, 10), (10, 10));
-    assert_eq!(g.settle(&mut store, 1000), 0);
+    assert!(g.settle(&mut store, 1000).is_empty());
     assert_eq!(store.state_hash(), before, "rock moved");
 }
 
@@ -125,7 +125,7 @@ fn the_budget_bounds_the_work() {
     let mut g = sandy();
     g.disturb((10, 10), (10, 10));
     for _ in 0..5 {
-        let moved = g.settle(&mut store, 3);
+        let moved = g.settle(&mut store, 3).len();
         assert!(moved <= 3, "a budget of three moved {moved} cells");
     }
     assert!(g.pending() > 0, "the pile should still be slumping");
@@ -136,8 +136,33 @@ fn quiet_terrain_costs_nothing() {
     let mut store = tower(SAND, 1);
     let mut g = sandy();
     // Never disturbed: the automaton has no reason to look at anything.
-    assert_eq!(g.settle(&mut store, 1000), 0);
+    assert!(g.settle(&mut store, 1000).is_empty());
     assert_eq!(g.pending(), 0);
+}
+
+#[test]
+fn sand_does_not_slide_off_the_edge_of_the_world() {
+    // A painted island — a test plate, a floating platform — has columns
+    // of pure air beside it. The store is unbounded below, so an empty
+    // column is not "very low ground", it is *no ground*: read the other
+    // way, the edge grains slide into the void, land near `i64::MIN`, and
+    // the whole island drains away one cell at a time.
+    let mut store = VolumeStore::new();
+    store.fill(0, 0, 0, 5, 5, 9, SAND); // a tall block standing in nothing
+    let mut g = sandy();
+    g.disturb((0, 0), (5, 5));
+    settle_out(&mut g, &mut store, 64);
+
+    for y in 0..=5 {
+        for x in 0..=5 {
+            assert_eq!(
+                store.column_top(x, y),
+                Some((9, SAND.0)),
+                "({x}, {y}) left the plate"
+            );
+        }
+    }
+    assert_eq!(store.column_top(-1, 0), None, "sand appeared beside it");
 }
 
 #[test]

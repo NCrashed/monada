@@ -24,9 +24,15 @@ use monada_runtime::{
 /// A backend with the desert loaded and painted, plus its volume store.
 fn painted() -> NativeBackend {
     let world = shared_world(0x0DE5_E271);
+    // No proving ground: this test is about the ground the GENERATOR
+    // promised arriving in the store, and the demonstration `init` lays
+    // out beside the start (§4e) is deliberately not that ground.
     let mut backend = NativeBackend::new(
         world,
-        Box::new(DesertRules::new(DesertParams::default())),
+        Box::new(DesertRules::new(DesertParams {
+            proving_ground: false,
+            ..DesertParams::default()
+        })),
     );
     let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
     backend.set_bridge(&bridge);
