@@ -70,3 +70,73 @@ hash rides in every replay and networked match, so opening a replay against
 the wrong version of a map fails loudly instead of desyncing silently.
 Packing is deterministic — sorted entries, zeroed timestamps — so the same
 source always produces the same hash.
+
+## Named constants, and enums
+
+Rhai has no `enum`, and a map script cannot reach a top-level `const` at all:
+**functions are pure**, so a `const NORTH = 2;` at the top of the file is
+invisible inside every `fn` (`Variable not found: NORTH`). The same goes for a
+top-level `let`.
+
+So a named constant in a map is a **zero-argument function**, and an enum is a
+family of them over small integers:
+
+```rhai
+// BlockSide — which face of a block something is on.
+fn SIDE_NORTH() { 0 }
+fn SIDE_EAST()  { 1 }
+fn SIDE_SOUTH() { 2 }
+fn SIDE_WEST()  { 3 }
+fn SIDE_COUNT() { 4 }
+```
+
+Integers, not strings, because that is what a value has to be to live anywhere
+that matters: an entity field holds a `Fixed`, so a side is stored as
+`entity_set_field(e, "side", fixed(SIDE_EAST()))` and read back with
+`to_int(entity_field(e, "side"))`. A command carries the same shapes — an `i64`
+verb and target, and three `Fixed` in its `arg` — so an integer enum crosses the
+network wire and enters the desync hash without a conversion. A string could do
+neither.
+
+Give the family the operations you actually want beside it, so the encoding
+stays in one place:
+
+```rhai
+/// The unit step of a side, as a sim-space direction.
+fn side_step(s) {
+    if s == SIDE_NORTH() { vec3(fixed(0), fixed(1), fixed(0)) }
+    else if s == SIDE_EAST() { vec3(fixed(1), fixed(0), fixed(0)) }
+    else if s == SIDE_SOUTH() { vec3(fixed(0), fixed(-1), fixed(0)) }
+    else { vec3(fixed(-1), fixed(0), fixed(0)) }
+}
+
+/// The opposite side — arithmetic the encoding earns you.
+fn side_opposite(s) { (s + 2) % SIDE_COUNT() }
+
+/// For the HUD only. Indexing an array by the value keeps the order in one
+/// place instead of spread over four branches.
+fn side_name(s) { ["north", "east", "south", "west"][s] }
+```
+
+`switch` works and reads better than a chain of `if`s — but **its labels must be
+literals**, so it cannot name your constants (`switch s { SIDE_NORTH() => … }`
+is a compile error, "Expecting a literal expression"). Use it where the numbers
+are obvious at the call site, and `if`/`else if` where the names carry the
+meaning:
+
+```rhai
+fn side_axis(s) { switch s { 0 => 1, 2 => 1, _ => 0 } } // 1 = the y axis
+```
+
+Two traps worth knowing before you hit them:
+
+- **A value out of range must be caught by you.** `side_name(7)` is an
+  out-of-bounds index and raises; `side_step(7)` silently answers "west",
+  because the last branch is an `else`. Decide which you want per function —
+  a total function with a defined default, or one that raises on a value that
+  should never exist — and say so in its doc comment.
+- **Never compare across number types.** `action_axis` answers with an `INT`
+  while `action_axis2` and every field answer with `Fixed`, and Rhai has no
+  `>` registered between them: it evaluates to `false` rather than raising, so
+  the branch silently never fires. Wrap at the boundary — `fixed(action_axis(…))`
+  — or compare integers with integers.
