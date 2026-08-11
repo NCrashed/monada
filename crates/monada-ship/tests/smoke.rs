@@ -549,3 +549,96 @@ fn the_hull_weighs_the_shell_it_is() {
         "a shell, not the block that bounds it (2400): {hull}"
     );
 }
+
+// --- the local layer (the half no canary watched) ------------------------
+// `local_tick` turns keys into the one command per tick the sim decodes. It
+// runs on the unsynced side of the wall, so nothing above tests it — which is
+// exactly where a bug hid: `action_axis` answers with an INT (-1, 0, +1) and
+// the ship compared it against a `Fixed`, an operator Rhai has no registration
+// for. Rhai answers such a comparison with `false` rather than raising, so the
+// turn keys did nothing at all and said nothing about it, while every other
+// control worked.
+
+/// A bridge that holds one set of held keys and records what the local layer
+/// submits. Everything else is the trait's defaults (headless no-ops).
+#[derive(Default)]
+struct Keys {
+    down: Vec<String>,
+    axis: Vec<(String, i64)>,
+    sent: Vec<FixedVec3>,
+}
+
+impl monada_script::HostBridge for Keys {
+    // The three that matter: what is held, and what the map submits.
+    fn action_down(&self, id: &str) -> bool {
+        self.down.iter().any(|d| d == id)
+    }
+    fn action_axis(&self, id: &str) -> i64 {
+        self.axis
+            .iter()
+            .find(|(a, _)| a == id)
+            .map_or(0, |&(_, v)| v)
+    }
+    fn submit_command(&mut self, _verb: i64, _target: i64, arg: FixedVec3) {
+        self.sent.push(arg);
+    }
+
+    // The trait's required rest, headless (`NullBridge`'s answers).
+    fn local_player(&self) -> Option<i64> {
+        Some(0)
+    }
+    fn model_box(&mut self, _w: i64, _h: i64, _d: i64, _color: i64) -> i64 {
+        -1
+    }
+    fn model_kv6(&mut self, _asset_path: &str, _turns: i64) -> i64 {
+        -1
+    }
+    fn entity_set_model(&mut self, _entity: i64, _model: i64) {}
+    fn voxel_fill(&mut self, _x0: i64, _y0: i64, _z0: i64, _x1: i64, _y1: i64, _z1: i64, _c: i64) {}
+    fn voxel_set(&mut self, _x: i64, _y: i64, _z: i64, _color: i64) {}
+    fn highlight(&mut self, _entity: i64) {}
+    fn highlight_clear(&mut self) {}
+    fn highlighted(&self) -> i64 {
+        -1
+    }
+    fn status(&mut self, _text: &str) {}
+    fn camera_focus(&mut self, _point: FixedVec3) {}
+    fn camera_angle(&mut self, _yaw: Fixed, _pitch: Fixed) {}
+    fn set_light(&mut self, _dir: FixedVec3, _intensity: Fixed) {}
+    fn set_sky(&mut self, _asset_path: &str) {}
+}
+
+/// Run one `local_tick` with the given keys held, and return the button mask
+/// it packed into the command's spare z.
+fn local_mask(down: &[&str], axis: &[(&str, i64)]) -> i64 {
+    let keys = Arc::new(Mutex::new(Keys {
+        down: down.iter().map(|s| (*s).to_string()).collect(),
+        axis: axis.iter().map(|&(a, v)| (a.to_string(), v)).collect(),
+        sent: Vec::new(),
+    }));
+    let bridge: SharedBridge = keys.clone();
+    let mut local = monada_script::LocalBackend::new(&shared_world(SEED), &bridge);
+    local.load(&script()).expect("compile the local layer");
+    local.on_local_init().expect("local_init");
+    local
+        .on_local_tick(Fixed::from_ratio(1, 30))
+        .expect("local_tick");
+    let sent = &keys.lock().unwrap().sent;
+    assert_eq!(sent.len(), 1, "local_tick submits exactly one command");
+    sent[0].z.to_f64() as i64
+}
+
+#[test]
+fn every_control_reaches_the_command() {
+    assert_eq!(local_mask(&[], &[]), 0, "hands off, nothing set");
+    assert_eq!(local_mask(&["use"], &[]), 1, "F: use");
+    assert_eq!(local_mask(&["door"], &[]), 2, "G: airlock");
+    assert_eq!(local_mask(&["burn"], &[]), 4, "SPACE: main drive");
+    assert_eq!(local_mask(&[], &[("turn", 1)]), 8, "Q: turn one way");
+    assert_eq!(local_mask(&[], &[("turn", -1)]), 16, "E: and the other");
+    assert_eq!(
+        local_mask(&["burn"], &[("turn", 1)]),
+        12,
+        "burning while turning is one command, not a choice"
+    );
+}

@@ -604,9 +604,14 @@ fn local_tick(dt) {
     if action_down("use") { btn = btn + 1; }
     if action_down("door") { btn = btn + 2; }
     if action_down("burn") { btn = btn + 4; }
+    // NB `action_axis` answers with an INT (-1, 0, +1), unlike `action_axis2`'s
+    // vec3 of `Fixed`. Comparing it against `fixed(0)` is an operator Rhai has
+    // no registration for, and Rhai answers such a comparison with `false`
+    // instead of raising — so the turn keys did nothing at all and said nothing
+    // about it. `every_control_reaches_the_command` now watches every bit.
     let turn = action_axis("turn");
-    if turn > fixed(0) { btn = btn + 8; }
-    if turn < fixed(0) { btn = btn + 16; }
+    if turn > 0 { btn = btn + 8; }
+    if turn < 0 { btn = btn + 16; }
     submit_command(0, 0, vec3(mv.x, mv.y, fixed(btn)));
 }
 

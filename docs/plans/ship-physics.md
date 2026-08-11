@@ -497,6 +497,25 @@ device is Mesa's NVK on an RTX 3070 under Vulkan.
 happily. That is how to look at this work today, and it is what the live pass
 §9 owes should use until the GPU path is fixed upstream — where it belongs,
 since nothing monada does can make a buffer roxlap created valid.
+
+### 8b. What the live pass caught that no test could
+
+**The turn keys did nothing, and nothing said so.** `action_axis` answers with
+an INT (−1, 0, +1) — unlike `action_axis2`, whose vec3 carries `Fixed` — and
+`local_tick` compared it against `fixed(0)`. Rhai has no `>` registered for
+`(INT, Fixed)` and, rather than raising, **answers such a comparison with
+`false`**: the burn key worked, the turn keys were inert, and the map ran
+without a word. (The digger has always written `fixed(action_axis("drive"))`,
+which is why its axes work.)
+
+Why nothing caught it: **the goldens drive the SIM layer.** `ship_input`
+synthesizes the command's button mask directly, so `local_tick` — the whole
+key → command half — sits outside every golden and every canary this demo had.
+Fixing the comparison without covering that would just move the next bug one
+verb along, so the fix ships with `every_control_reaches_the_command`: a fake
+bridge that holds keys, one `local_tick`, and an assertion on every bit of the
+mask, including two held at once. `ship@` did not move, which is the same fact
+from the other side.
 - **S-6 (optional, separate) — rider interpolation.** §4.3: pass
   `(prev_pos, curr_pos, alpha)` into `build_instances` and lerp a rider's local
   position. The host already keeps both vectors for circle scenes
