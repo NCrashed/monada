@@ -669,6 +669,9 @@ struct GridAnchor {
     /// cell the map named). `ZERO` — the grid's local origin — until the map
     /// calls `grid_pivot`, so an unset pivot is exactly the old behaviour.
     pivot: DVec3,
+    /// Render-rate smoothing between the last two tick-exact poses
+    /// ([`PoseTrack`]). Inert on a map with no fixed tick rate.
+    pose: PoseTrack,
     /// Whether this grid's CELLS ARE CUBES (`grid_spawn_cubic`, `host_api` 15):
     /// `SCALE³` world voxels per cell, so sim z scales like x/y. A plain
     /// `grid_spawn` grid keeps the column convention (`SCALE×SCALE×1`, z
@@ -677,6 +680,53 @@ struct GridAnchor {
     /// the fog band — asks the anchor rather than the map, because the cell
     /// shape belongs to the grid.
     cubic: bool,
+}
+
+/// A script grid's pose, twice: the tick-exact one the sim asked for, and the
+/// one that was on screen when it arrived (docs/plans/ship-physics.md §4).
+///
+/// A map writes a grid's pose once per tick; a display draws 60+ frames a
+/// second. Drawn as written, a hull that turns visibly steps — and so, rigidly
+/// attached to it, does every rider. So a pose write becomes a TARGET, and
+/// [`advance_grid_poses`](MapRender::advance_grid_poses) eases the scene
+/// transform onto it over exactly one tick.
+///
+/// Why the whole thing works from one write: a rider's seat ([`place_in`]), a
+/// prop's basis, an actor's facing, the fog twin, the deck cutaway and the
+/// camera's orbit frame ALL compose against `scene.grid(id).transform` at draw
+/// time. Nobody keeps a private copy of a hull's pose, so nothing can shear
+/// against the deck it stands on.
+///
+/// Render-side only. The sim's own frame table (`monada_script::GridStore`)
+/// stays tick-exact, so `grid_world` / `grid_local` and every hashed decision
+/// are bit-identical to what they were before smoothing existed.
+#[derive(Clone, Copy)]
+struct PoseTrack {
+    /// The pose that was DRAWN when `curr` arrived — deliberately not the
+    /// previous target. A frame that runs several catch-up ticks would
+    /// otherwise rewind to a pose the player already watched go by.
+    prev: (DVec3, DQuat),
+    /// The tick-exact pose the map last asked for.
+    curr: (DVec3, DQuat),
+    /// Seconds since `curr` arrived. `>= tick_dt` means fully arrived, and the
+    /// scene transform already equals `curr`.
+    age: f64,
+}
+
+/// Beyond this much translation between two poses, smoothing would smear a
+/// deliberate jump (a dock snap, a jump drive) across a tick instead of
+/// showing it. Two cells, in world voxels.
+const POSE_SNAP_DIST: f64 = 2.0 * SCALE;
+
+/// The rotation counterpart: `|dot(q0, q1)| = cos(θ/2)`, so this bound is a
+/// quarter-turn. Nothing physical turns 90° in one tick; a pose that does was
+/// re-authored, not integrated.
+const POSE_SNAP_DOT: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
+/// Is the step from `a` to `b` a re-authored pose rather than a tick of
+/// motion — i.e. must it snap rather than ease?
+fn is_pose_jump(a: (DVec3, DQuat), b: (DVec3, DQuat)) -> bool {
+    a.0.distance_squared(b.0) > POSE_SNAP_DIST * POSE_SNAP_DIST || a.1.dot(b.1).abs() < POSE_SNAP_DOT
 }
 
 /// How many world voxels one sim cell spans along z inside a grid with this
@@ -1118,6 +1168,13 @@ pub struct MapRender {
     /// GROUND_Z) + SCALE · R_y(π) · sim`. Set by the host from the manifest
     /// BEFORE the first paint.
     volume: bool,
+    /// One sim tick in seconds, for a map that declared a fixed rate — the
+    /// window a grid pose is eased over ([`PoseTrack`]). `None` on a
+    /// command-driven map, which turns smoothing off entirely: a turn-based
+    /// map's grid is posed by a click, not by a clock, and there is no next
+    /// pose to be on the way to. Set by the host from the manifest AFTER the
+    /// map's `init`, so poses authored during setup land immediately.
+    tick_dt: Option<f64>,
     /// Per-`BodyId` render mirrors of the embedded physics sim (volume maps
     /// only), fed by [`sync_physics`](Self::sync_physics). Map scripts never
     /// hand-mirror a body (plan §1d locked decision).
@@ -1338,6 +1395,13 @@ pub struct MapRender {
     /// that grid.s rotation, so a ship.s deck holds still on screen while the
     /// sky turns. `None` = the world frame (every map before this one).
     camera_grid: Option<GridId>,
+    /// What `camera_focus_entity` is following: the entity and the sim point
+    /// the map named, KEPT UNCOMPOSED. The focus has to be re-composed through
+    /// the grid every frame rather than at the tick that set it — with a
+    /// smoothed hull a stored world point is a tick stale, and the whole ship
+    /// slides under a lagging camera centre (docs/plans/ship-physics.md §4.4).
+    /// `None` = the focus is a world point (`camera_focus`).
+    camera_follow: Option<(EntityId, FixedVec3)>,
     /// Third-person wall cutout (`camera_cutout`): keyhole `(radius, feather)`
     /// in sim cells, projected to pixels each frame around the camera focus.
     /// `None` = no cutout. Render-side, never hashed.
@@ -1416,6 +1480,7 @@ impl MapRender {
             scene,
             world_grid: None,
             volume: false,
+            tick_dt: None,
             body_mirrors: BTreeMap::new(),
             puffs: Vec::new(),
             fx_grid: None,
@@ -1441,6 +1506,7 @@ impl MapRender {
             clips_registered: false,
             highlighted: BTreeSet::new(),
             camera_grid: None,
+            camera_follow: None,
             ring_model: None,
             ring_ids: Vec::new(),
             prop_targets: Vec::new(),
@@ -1528,6 +1594,19 @@ impl MapRender {
             "set_volume_terrain must precede the first terrain paint"
         );
         self.volume = true;
+    }
+
+    /// Declare the map's fixed tick rate, which turns grid-pose smoothing on
+    /// ([`PoseTrack`], docs/plans/ship-physics.md §4): from here on a
+    /// `grid_move` / `grid_orient` / `grid_pivot` is a target the render eases
+    /// onto over one tick instead of a pose that lands whole.
+    ///
+    /// The host calls this AFTER the map's `init`, deliberately: setup poses a
+    /// hull once, from nowhere, and easing that first pose in from the grid's
+    /// spawn frame would open the match with a 33 ms wobble. A command-driven
+    /// map never calls it at all.
+    pub fn set_tick_hz(&mut self, hz: u32) {
+        self.tick_dt = Some(1.0 / f64::from(hz.max(1)));
     }
 
     /// The grid the fog / deck cutaway attach to, DERIVED in this order:
@@ -1878,6 +1957,13 @@ impl MapRender {
                 spawn_origin: pos,
                 pivot: DVec3::ZERO,
                 cubic,
+                // Born already arrived at its spawn pose: `age` is only ever
+                // compared against `tick_dt`, and `f64::MAX` is past every one.
+                pose: PoseTrack {
+                    prev: (pos, DQuat::IDENTITY),
+                    curr: (pos, DQuat::IDENTITY),
+                    age: f64::MAX,
+                },
             },
         );
         idx
@@ -1914,9 +2000,88 @@ impl MapRender {
         let Some(anchor) = self.grid_anchors.get(&id).copied() else {
             return;
         };
-        if let Some(g) = self.scene.grid_mut(id) {
-            g.transform.rotation = rotation;
-            g.transform.origin = anchor.spawn_origin + anchor.pivot - rotation * anchor.pivot;
+        let origin = anchor.spawn_origin + anchor.pivot - rotation * anchor.pivot;
+        self.set_grid_pose(id, origin, rotation);
+    }
+
+    /// The single writer of a script grid's pose, and the seam smoothing hangs
+    /// off (docs/plans/ship-physics.md §4).
+    ///
+    /// On a map with a fixed tick rate the pose is a TARGET: the track keeps
+    /// what is on screen now, and [`advance_grid_poses`](Self::advance_grid_poses)
+    /// eases onto the target over one tick. Without a declared rate — every
+    /// turn-based map, and every test that poses a grid and reads it back — the
+    /// pose lands immediately, exactly as it did before smoothing existed.
+    ///
+    /// A pose that JUMPS ([`is_pose_jump`]) always lands immediately: easing a
+    /// dock snap or a re-authored frame across a tick would smear it, not
+    /// smooth it.
+    fn set_grid_pose(&mut self, id: GridId, origin: DVec3, rotation: DQuat) {
+        if !self.grid_anchors.contains_key(&id) {
+            return;
+        }
+        let target = (origin, rotation);
+        let drawn = self
+            .scene
+            .grid(id)
+            .map(|g| (g.transform.origin, g.transform.rotation));
+        let step = self.tick_dt;
+        let snap = match (step, drawn) {
+            (Some(_), Some(drawn)) => is_pose_jump(drawn, target),
+            // No tick rate (or no scene grid to read a drawn pose from):
+            // nothing to interpolate between.
+            _ => true,
+        };
+        if let Some(anchor) = self.grid_anchors.get_mut(&id) {
+            anchor.pose.prev = drawn.unwrap_or(target);
+            anchor.pose.curr = target;
+            // A snapped pose is "fully arrived" by definition; `f64::MAX`
+            // survives the `+= dt` below without ever coming back under a step.
+            anchor.pose.age = if snap { f64::MAX } else { 0.0 };
+        }
+        if snap {
+            if let Some(g) = self.scene.grid_mut(id) {
+                g.transform.origin = origin;
+                g.transform.rotation = rotation;
+            }
+        }
+    }
+
+    /// Ease every script grid's drawn pose toward the one the sim last asked
+    /// for, `dt` seconds' worth (docs/plans/ship-physics.md §4). Called once
+    /// per frame, BEFORE anything reads a grid transform — riders, props,
+    /// actors, the fog twin, the deck cutaway and the camera all compose
+    /// against it, and a reader that ran first would be one frame behind the
+    /// hull it stands on.
+    ///
+    /// A no-op on a map with no declared tick rate, so a turn-based map's
+    /// grids sit exactly where `grid_orient` put them.
+    pub fn advance_grid_poses(&mut self, dt: f64) {
+        let Some(step) = self.tick_dt else {
+            return;
+        };
+        // Disjoint fields, one loop: the anchors carry the track, the scene
+        // carries what is drawn.
+        let MapRender {
+            grid_anchors,
+            scene,
+            ..
+        } = self;
+        for (&id, anchor) in grid_anchors.iter_mut() {
+            if anchor.pose.age >= step {
+                continue; // arrived — the transform already equals `curr`
+            }
+            anchor.pose.age += dt;
+            let a = (anchor.pose.age / step).clamp(0.0, 1.0);
+            let (prev_origin, prev_rot) = anchor.pose.prev;
+            let (curr_origin, curr_rot) = anchor.pose.curr;
+            if let Some(g) = scene.grid_mut(id) {
+                g.transform.origin = prev_origin.lerp(curr_origin, a);
+                // `slerp` takes the short way round the double cover (glam
+                // flips the sign on a negative dot), so a hull never spins the
+                // long way between two poses a tick apart.
+                g.transform.rotation = prev_rot.slerp(curr_rot, a);
+            }
         }
     }
 
@@ -2394,7 +2559,17 @@ impl MapRender {
     }
 
     pub fn camera(&self) -> Camera {
-        let mut cam = self.camera.to_roxlap();
+        // Re-compose a followed focus HERE, per frame, rather than trusting the
+        // world point the tick composed: with a smoothed hull that point is up
+        // to a tick stale, and a stale centre makes the whole ship slide across
+        // the screen — a worse artifact than the judder smoothing removes
+        // (docs/plans/ship-physics.md §4.4). Unfollowed maps keep the stored
+        // centre exactly as before.
+        let mut orbit = self.camera;
+        if let Some((e, p)) = self.camera_follow {
+            orbit.center = self.place(e, p);
+        }
+        let mut cam = orbit.to_roxlap();
         // Ride a grid (`camera_grid`): turn the WHOLE orbit frame — the eye
         // offset and the view basis — by that grid's rotation, so the deck stays
         // put on screen and the sky turns around it instead. Without this a
@@ -2412,8 +2587,7 @@ impl MapRender {
             cam.forward = turn(cam.forward);
             cam.right = turn(cam.right);
             cam.down = turn(cam.down);
-            cam.pos =
-                (self.camera.center - DVec3::from_array(cam.forward) * self.camera.dist).to_array();
+            cam.pos = (orbit.center - DVec3::from_array(cam.forward) * orbit.dist).to_array();
         }
         // Volume maps: third-person camera collision (the keyhole cutout
         // is gone, so nothing else keeps the eye out of rock — a flipped
@@ -2423,7 +2597,7 @@ impl MapRender {
         // just short of the first hit. Render-side only — the orbit
         // distance the wheel owns is untouched.
         if self.volume {
-            let center = self.camera.center;
+            let center = orbit.center;
             let eye = DVec3::from_array(cam.pos);
             let back = eye - center;
             let dist = back.length();
@@ -4159,6 +4333,9 @@ impl HostBridge for MapRender {
     }
 
     fn camera_focus(&mut self, point: FixedVec3) {
+        // A world point stops any follow: the two are the same knob, and the
+        // last caller wins.
+        self.camera_follow = None;
         self.camera.center = self.entity_world_of(point);
     }
 
@@ -4166,7 +4343,14 @@ impl HostBridge for MapRender {
         // Compose through the grid the entity rides (the same seat
         // `build_instances` renders it at), so following a crew member on a
         // rotating hull tracks it instead of aiming at the un-transformed cell.
-        self.camera.center = self.place(EntityId(entity as u64), point);
+        //
+        // Composed twice, on purpose: the stored centre keeps `camera_pan`,
+        // `camera_center_sim` and the cursor path tick-exact, while
+        // [`camera`](Self::camera) re-composes the same pair each frame against
+        // the pose actually on screen (§4.4 of the ship-physics plan).
+        let e = EntityId(entity as u64);
+        self.camera_follow = Some((e, point));
+        self.camera.center = self.place(e, point);
     }
 
     fn camera_angle(&mut self, yaw: Fixed, pitch: Fixed) {
@@ -6491,6 +6675,197 @@ mod tests {
             "z-down stays z-down, scaled: {:?}",
             xf.forward
         );
+    }
+
+    // --- grid-pose smoothing (docs/plans/ship-physics.md §4) --------------
+
+    /// One tick at 30 Hz, in seconds — what `set_tick_hz(30)` declares.
+    const TICK: f64 = 1.0 / 30.0;
+
+    /// The drawn pose of a script grid.
+    fn drawn(r: &MapRender, g: i64) -> (DVec3, DQuat) {
+        let id = r.grid_id(g).expect("live grid");
+        let t = &r.scene.grid(id).expect("grid").transform;
+        (t.origin, t.rotation)
+    }
+
+    /// Turn `g` about +z by `angle` — the one-line pose write the ship's
+    /// `step_ship` makes every tick.
+    fn spin(r: &mut MapRender, g: i64, angle: f64) {
+        r.grid_orient(
+            g,
+            FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::from_int(1)),
+            Fixed::from_f64(angle),
+        );
+    }
+
+    /// A map that declared a tick rate gets its grid poses EASED: the write
+    /// itself changes nothing on screen, and the drawn pose arrives over
+    /// exactly one tick's worth of frames. Without this a 30 Hz hull is 30
+    /// distinct poses a second on a 60+ Hz display — the judder every rider
+    /// inherits rigidly.
+    #[test]
+    fn a_grid_pose_arrives_over_one_tick() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        r.set_tick_hz(30);
+
+        spin(&mut r, g, 1.0);
+        let turn = |r: &MapRender| (drawn(r, g).1 * DVec3::Y).angle_between(DVec3::Y);
+        assert!(
+            turn(&r) < 1e-9,
+            "the write alone must not move the drawn pose: {}",
+            turn(&r)
+        );
+
+        // Half a tick in, half turned — the frame the old code could not draw.
+        r.advance_grid_poses(TICK / 2.0);
+        let half = turn(&r);
+        assert!(
+            (half - 0.5).abs() < 0.02,
+            "half a tick is half the turn, got {half}"
+        );
+
+        // The rest of the tick lands it, and it stays landed.
+        r.advance_grid_poses(TICK / 2.0);
+        assert!((turn(&r) - 1.0).abs() < 1e-9, "arrived after one tick");
+        r.advance_grid_poses(TICK);
+        assert!((turn(&r) - 1.0).abs() < 1e-9, "and does not drift past it");
+    }
+
+    /// The invariant the whole design rests on: mid-interpolation a rider is
+    /// seated through the pose that is ON SCREEN, not the tick-exact one the
+    /// sim asked for. Compose it against the target instead and the crew
+    /// shears across a deck that has not turned that far yet — the one artifact
+    /// smoothing must not introduce.
+    #[test]
+    fn a_rider_is_seated_through_the_pose_that_is_drawn() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        r.set_tick_hz(30);
+        let model = r.model_box(2, 2, 2, 0x8055_5555);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let rider = world.spawn(arch);
+        let p = FixedVec3::new(Fixed::from_int(9), Fixed::from_int(3), Fixed::ZERO);
+        world.set_position(rider, p);
+        r.entity_set_model(rider.0 as i64, model);
+        r.entity_set_grid(rider.0 as i64, g);
+
+        spin(&mut r, g, 1.0);
+        r.advance_grid_poses(TICK / 2.0);
+        r.build_instances(&world);
+
+        let local = entity_world_of_in(true, p); // cubic grid, cubic z
+        let (origin, rotation) = drawn(&r, g);
+        let seat = rotation * local + origin;
+        let (target_o, target_r) = {
+            let id = r.grid_id(g).expect("live grid");
+            r.grid_anchors[&id].pose.curr
+        };
+        let target_seat = target_r * local + target_o;
+        assert!(
+            seat.distance(target_seat) > 1.0,
+            "the test is only decisive while the two frames differ"
+        );
+
+        let at = |w: DVec3| {
+            r.sprites.instances.iter().any(|i| {
+                i.model != HIGHLIGHT_MODEL
+                    && (f64::from(i.pos[0]) - w.x).abs() < 0.01
+                    && (f64::from(i.pos[1]) - w.y).abs() < 0.01
+            })
+        };
+        assert!(at(seat), "the rider sits on the deck as drawn");
+        assert!(
+            !at(target_seat),
+            "and NOT where the deck will be at the end of the tick"
+        );
+    }
+
+    /// A camera following a rider re-composes its focus every frame. Left as
+    /// the tick composed it, the focus lags the smoothed hull and the whole
+    /// ship slides across the screen — worse than the judder it replaced.
+    #[test]
+    fn a_followed_focus_tracks_the_drawn_hull() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        r.set_tick_hz(30);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let rider = world.spawn(arch);
+        let p = FixedVec3::new(Fixed::from_int(9), Fixed::from_int(3), Fixed::ZERO);
+        world.set_position(rider, p);
+        r.entity_set_grid(rider.0 as i64, g);
+
+        // The tick: turn the hull, then aim at the rider (the order
+        // `follow_camera` uses — `step_ship` runs first).
+        spin(&mut r, g, 1.0);
+        r.camera_focus_entity(rider.0 as i64, p);
+        let stale = r.camera.center;
+
+        r.advance_grid_poses(TICK / 2.0);
+        // `to_roxlap` puts the eye `dist` behind the focus along `forward`, so
+        // the focus is recoverable from the camera the renderer is handed.
+        let cam = r.camera();
+        let fwd = DVec3::from_array(cam.forward);
+        let focus = DVec3::from_array(cam.pos) + fwd * r.camera.dist;
+        let (origin, rotation) = drawn(&r, g);
+        let seat = rotation * entity_world_of_in(true, p) + origin;
+        assert!(
+            focus.distance(seat) < 1e-6,
+            "the focus is composed through the drawn hull: {focus:?} vs {seat:?}"
+        );
+        assert!(
+            focus.distance(stale) > 1.0,
+            "and that is not where the tick left it"
+        );
+    }
+
+    /// A pose that JUMPS — a dock snap, a re-authored frame — lands whole.
+    /// Easing it would smear a deliberate discontinuity across a tick.
+    #[test]
+    fn a_re_authored_pose_snaps() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        r.set_tick_hz(30);
+
+        // Well past POSE_SNAP_DIST (two cells).
+        r.grid_move(
+            g,
+            FixedVec3::new(Fixed::from_int(40), Fixed::ZERO, Fixed::ZERO),
+        );
+        assert!(
+            (drawn(&r, g).0.x + 40.0 * SCALE).abs() < 1e-9,
+            "a long move lands immediately, got {:?}",
+            drawn(&r, g).0
+        );
+
+        // …and so does a rotation nobody could have integrated in one tick.
+        spin(&mut r, g, std::f64::consts::PI);
+        let turned = drawn(&r, g).1 * DVec3::Y;
+        assert!(
+            (turned + DVec3::Y).length() < 1e-9,
+            "a half-turn lands immediately, got {turned:?}"
+        );
+    }
+
+    /// A map with no declared tick rate — every turn-based map, and every
+    /// host test that poses a grid and reads it back — is untouched: there is
+    /// no next pose to be on the way to, so poses land as they always did.
+    #[test]
+    fn a_map_without_a_tick_rate_poses_whole() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+
+        spin(&mut r, g, 1.0);
+        let turn = (drawn(&r, g).1 * DVec3::Y).angle_between(DVec3::Y);
+        assert!((turn - 1.0).abs() < 1e-9, "landed whole, got {turn}");
+        r.advance_grid_poses(TICK);
+        let after = (drawn(&r, g).1 * DVec3::Y).angle_between(DVec3::Y);
+        assert!((after - 1.0).abs() < 1e-9, "and the frame pass is inert");
     }
 
     #[test]

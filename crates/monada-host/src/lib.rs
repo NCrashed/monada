@@ -953,6 +953,12 @@ impl App {
                 let (script, local) = scripts.expect("a scripted map has scripts");
                 Self::boot_scripted(&world, &bridge, phys.as_ref(), hz, &script, &local)
             };
+        // Smoothing on, now that `init` has posed whatever it poses: from the
+        // first tick, a grid's pose is a target the render eases onto rather
+        // than a step it takes whole (docs/plans/ship-physics.md §4).
+        if let Some(hz) = hz {
+            render.lock().expect("render mutex").set_tick_hz(hz);
+        }
         Sim::Map(Box::new(MapSim {
             world,
             backend,
@@ -1099,6 +1105,10 @@ impl App {
             .load(&local_script)
             .expect("compile local script");
         local_layer.on_local_init().expect("map local_init");
+        // Grid-pose smoothing, after `init` — see `new_map`.
+        if let SimHz::Fixed(hz) = run.map.manifest.sim_hz {
+            render.lock().expect("render mutex").set_tick_hz(hz);
+        }
         let info = MatchInfo {
             seed: SEED,
             map_hash: run.map.hash,
@@ -1161,6 +1171,9 @@ impl App {
         .expect("compile map script");
         if let SimHz::Fixed(hz) = run.map.manifest.sim_hz {
             driver.set_tick_hz(hz);
+            // Grid-pose smoothing, after `init` — see `new_map`. A replay is
+            // paced from the same clock, so it smooths identically.
+            render.lock().expect("render mutex").set_tick_hz(hz);
         }
 
         // Consume the replay's own canonical grouping — the *same* source
@@ -1578,35 +1591,52 @@ impl App {
     /// replay) rebuild sprites from the live world + the script's model
     /// bindings.
     fn update_scene(&mut self, alpha: f64, dt: f64) {
+        // Grid poses first, every frame, before anything composes against one
+        // (docs/plans/ship-physics.md §4): a map writes a hull's pose once per
+        // tick, and the render eases onto it over that tick so riders, props,
+        // the fog and the camera all ride one smooth frame instead of a 30 Hz
+        // staircase. Rebuilding instances first would seat this frame's riders
+        // on last frame's hull — a one-frame shear, which is precisely what
+        // composing everything from a single transform is supposed to make
+        // impossible.
+        if let SceneKind::Map(render) = &self.scene {
+            render
+                .lock()
+                .expect("render mutex")
+                .advance_grid_poses(dt);
+        }
         // The physics body mirror (volume maps, plan §1d) syncs beside the
         // sprite rebuild on every path; `dt` drives its render-side wheel
-        // spin. `sync_physics` never touches hashed state.
+        // spin. `sync_physics` never touches hashed state. It runs BEFORE the
+        // sprite rebuild for the same reason as the pose pass: once a body can
+        // pose a script grid (ship-physics S-3), riders composed first would
+        // lag the hull they stand on.
         match (&self.sim, &mut self.scene) {
             (Sim::Map(map), SceneKind::Map(render)) => {
                 let world = map.world.lock().expect("world mutex");
                 let mut render = render.lock().expect("render mutex");
-                render.build_instances(&world);
                 if let Some(phys) = &map.phys {
                     render.sync_physics(&phys.lock().expect("physics mutex"), dt);
                 }
+                render.build_instances(&world);
             }
             (Sim::NetMap(nm), SceneKind::Map(render)) => {
                 let world = nm.session.driver().world().clone();
                 let guard = world.lock().expect("world mutex");
                 let mut render = render.lock().expect("render mutex");
-                render.build_instances(&guard);
                 if let Some(phys) = nm.session.driver().physics() {
                     render.sync_physics(&phys.lock().expect("physics mutex"), dt);
                 }
+                render.build_instances(&guard);
             }
             (Sim::Replay(r), SceneKind::Map(render)) => {
                 let world = r.driver.world().clone();
                 let guard = world.lock().expect("world mutex");
                 let mut render = render.lock().expect("render mutex");
-                render.build_instances(&guard);
                 if let Some(phys) = r.driver.physics() {
                     render.sync_physics(&phys.lock().expect("physics mutex"), dt);
                 }
+                render.build_instances(&guard);
             }
             (_, SceneKind::Circle(scene)) => {
                 scene.update(&self.prev_pos, &self.curr_pos, alpha);

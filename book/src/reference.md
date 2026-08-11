@@ -271,6 +271,18 @@ On a column-cell grid the frame is only *drawn* faithfully for a rotation about
 the vertical (see the cell-shape note above), so a map that converts coordinates
 through a tilted hull wants `grid_spawn_cubic`.
 
+**A pose is written once a tick and drawn over that tick.** On a real-time map
+(`sim_hz = "30hz"` and friends) `grid_move` / `grid_orient` / `grid_pivot` set a
+*target*: the renderer eases the grid onto it across the tick that follows, so a
+hull turning 0.02 rad per tick reads as motion rather than as a 30 Hz staircase,
+and everything composed against that frame — riders, props, actor facings, the
+fog cone, the deck cutaway, the camera — moves with it as one piece. What the
+map *reads* is unaffected: `grid_world` / `grid_local` and every hashed decision
+see the tick-exact frame, never the eased one. Poses authored during `init` land
+whole, as does any single step big enough to be a re-authoring rather than a
+tick of motion (more than two cells of travel, or more than a quarter-turn) —
+so a dock snap or a jump drive still snaps.
+
 ## Camera, lighting, sky — *presentation*
 
 | Function | Result |
