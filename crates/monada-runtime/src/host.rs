@@ -383,6 +383,50 @@ pub trait WorldRead {
                 .ui_button(tex.0, tex.1, tex.2, x, y, bit);
         }
     }
+
+    // --- overlay gizmos ---------------------------------------------------
+    //
+    // The overlay grid above answers "which cells", in whole cells of
+    // paint. These answer "what shape", in lines: alpha-blended
+    // world-space outlines drawn over the frame, in a grid's own frame,
+    // cleared every frame like the HUD. A placement ghost on a *moving*
+    // hull is theirs and not the overlay grid's — a grid of voxels has
+    // no pose but its own, and a cell is opaque and a whole cell across.
+
+    /// Start a fresh set of gizmos; the map's to call, like `ui_clear`.
+    fn gizmo_clear(&self) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").gizmo_clear();
+        }
+    }
+
+    /// Line width (pixels) and depth behaviour for the gizmos that
+    /// follow; state, like `ui_scale`.
+    fn gizmo_style(&self, width_px: i64, on_top: bool) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").gizmo_style(width_px, on_top);
+        }
+    }
+
+    /// Outline an inclusive cell box in `grid`'s frame (`-1` = the world
+    /// frame). `color` is `0xAA_RR_GG_BB`, alpha in the high byte.
+    fn gizmo_box(&self, grid: i64, lo: (i64, i64, i64), hi: (i64, i64, i64), color: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .gizmo_box(grid, lo.0, lo.1, lo.2, hi.0, hi.1, hi.2, color);
+        }
+    }
+
+    /// One overlay segment between two sim points of `grid`'s frame.
+    fn gizmo_line(&self, grid: i64, a: FixedVec3, b: FixedVec3, color: i64) {
+        if let Some(bridge) = self.bridge() {
+            bridge
+                .lock()
+                .expect("bridge mutex")
+                .gizmo_line(grid, a, b, color);
+        }
+    }
 }
 
 /// The **simulation** layer's surface: everything in [`WorldRead`] plus
@@ -686,6 +730,14 @@ pub trait LocalHost: WorldRead {
     fn pick_ground(&self) -> Option<FixedVec3>;
     /// The entity under the cursor, or `None`.
     fn pick_entity(&self) -> Option<EntityId>;
+    /// The grid the cursor ray first meets, or `None` — the question a
+    /// map asks when its world is geometry rather than a ground plane.
+    fn pick_grid(&self) -> Option<i64>;
+    /// The sim cell of that hit inside `grid` (`-1` = the world grid),
+    /// or `None` when the cursor misses it. Deck-clip aware.
+    fn pick_cell(&self, grid: i64) -> Option<FixedVec3>;
+    /// The outward face normal of the same hit, in `grid`'s sim axes.
+    fn pick_face(&self, grid: i64) -> Option<FixedVec3>;
     /// The sim-space angle from the local player toward the cursor.
     fn aim_yaw(&self) -> Fixed;
     /// HUD button bits clicked since the last call (take-and-clear).
@@ -930,6 +982,22 @@ impl LocalHost for RuntimeHost {
     fn pick_entity(&self) -> Option<EntityId> {
         self.bridge()
             .and_then(|b| entity_opt(b.lock().expect("bridge mutex").pick_entity()))
+    }
+
+    fn pick_grid(&self) -> Option<i64> {
+        self.bridge()
+            .map(|b| b.lock().expect("bridge mutex").pick_grid())
+            .filter(|&g| g >= 0)
+    }
+
+    fn pick_cell(&self, grid: i64) -> Option<FixedVec3> {
+        self.bridge()
+            .and_then(|b| b.lock().expect("bridge mutex").pick_cell(grid))
+    }
+
+    fn pick_face(&self, grid: i64) -> Option<FixedVec3> {
+        self.bridge()
+            .and_then(|b| b.lock().expect("bridge mutex").pick_face(grid))
     }
 
     fn aim_yaw(&self) -> Fixed {

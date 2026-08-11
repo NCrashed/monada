@@ -1,5 +1,5 @@
 # monada determinism goldens — @generated, do not hand-edit.
-# scenarios: walk (scripted circle), kernel (pure-Rust anchor), lockstep (two-session command demo), chess (turn-based rules), rpg (real-time action-RPG: per-tick input + voxel-query + wave RNG), ship (two-deck crew sim aboard a rigid-body hull: deck-relative collision, stairwell deck-flip, grid membership, and a ship flown under its own engines), rts (1v1 strategy: nav-routed orders + economy + combat + voxel_clear tree felling), phys (pure-Rust physics-crate anchor: PhysicsWorld fixed-timestep shell), digger (volume-terrain demo: physics-in-sim drive-train + chunk-hashed VolumeStore + combined digest); seed "MONADA_0".
+# scenarios: walk (scripted circle), kernel (pure-Rust anchor), lockstep (two-session command demo), chess (turn-based rules), rpg (real-time action-RPG: per-tick input + voxel-query + wave RNG), ship (two-deck crew sim aboard a rigid-body hull: deck-relative collision, stairwell deck-flip, grid membership, cursor-directed cargo placement, and a ship flown under its own engines), rts (1v1 strategy: nav-routed orders + economy + combat + voxel_clear tree felling), phys (pure-Rust physics-crate anchor: PhysicsWorld fixed-timestep shell), digger (volume-terrain demo: physics-in-sim drive-train + chunk-hashed VolumeStore + combined digest); seed "MONADA_0".
 # Regenerate with `cargo run -p monada-oracle -- --bless`.
 walk@0 = 9082980244576976004
 walk@1 = 8427201372180398837
@@ -24,11 +24,11 @@ rpg@1 = 12956450500479262196
 rpg@30 = 9084348256298852072
 rpg@150 = 9577889801584071636
 rpg@600 = 16406933199976642109
-ship@0 = 3132352549256469753
-ship@1 = 13705419448585599972
-ship@30 = 17769658198496102569
-ship@150 = 2377722387569538298
-ship@600 = 5314680329431394843
+ship@0 = 9469700101774750873
+ship@1 = 4080102080781752388
+ship@30 = 9918321465475171894
+ship@150 = 17582689019409244922
+ship@600 = 15777974178468554240
 rts@0 = 15790756914217728291
 rts@1 = 16885781275734021676
 rts@30 = 5774838032532593775

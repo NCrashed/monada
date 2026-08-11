@@ -120,15 +120,38 @@ to place in a command payload.
 | `action_axis2(id)` | an `axis2` action's value as a `Vec3` (`x`, `y`, `0`) |
 | `pick_ground()` | the cursor's ground point (`Vec3`), or `()` on a miss |
 | `pick_entity()` | the entity under the cursor, or `-1` |
+| `pick_grid()` | the grid whose voxels the cursor ray meets first, or `-1` (requires `host_api` 24) |
+| `pick_cell(grid)` | the sim cell of that hit in `grid`'s own cells (`-1` = the world grid), or `()` on a miss |
+| `pick_face(grid)` | the hit's outward face normal in `grid`'s sim axes, so `pick_cell + pick_face` is the empty cell in front of it |
 | `aim_yaw()` | the sim-space angle from the local player toward the cursor |
 | `ui_clicks()` | the HUD button bits clicked since the last call (take-and-clear) |
+
+## Overlay gizmos — *local*
+
+World-space outlines drawn over the frame, in a grid's own frame and cells:
+a placement ghost, a snap lattice, a range ring. Alpha-blended, which
+nothing else a map draws can be — `ui_*` is flat HUD pixels, and a voxel is
+opaque and a whole cell across. Immediate mode with the HUD's contract: the
+map calls `gizmo_clear` and redraws; what it drew last stays on screen
+through the frames between its ticks. Local layer only, and never hashed
+(requires `host_api` 24).
+
+| Function | Result |
+|---|---|
+| `gizmo_clear()` | start a fresh set; resets the style |
+| `gizmo_style(width_px, on_top)` | line width, and whether segments ignore the depth buffer |
+| `gizmo_box(grid, x0, y0, z0, x1, y1, z1, color)` | outline an inclusive cell box in `grid`'s frame (`-1` = the world frame) |
+| `gizmo_line(grid, a, b, color)` | one segment between two sim points of `grid`'s frame |
+
+`color` is `0xAA_RR_GG_BB` — here the high byte really is **alpha**, unlike
+a voxel colour's (which is brightness).
 
 ## Models and sprites — *presentation*
 
 | Function | Result |
 |---|---|
 | `model_box(w, h, d, color)` | define a procedural box sprite; returns a model id |
-| `model_box_sides(w, h, d, x, neg_x, y, neg_y, z, neg_z)` | define a procedural box sprite with each of its 6 local faces a distinct colour; returns a model id (requires `host_api` 25) |
+| `model_box_sides(w, h, d, x, neg_x, y, neg_y, z, neg_z)` | define a procedural box sprite with each of its 6 local faces a distinct colour; returns a model id (requires `host_api` 26) |
 | `model_kv6(path, turns)` | define a sprite from a KV6 asset; returns a model id |
 | `model_actor(path, states, height)` | define an animated 8-direction billboard; returns a model id |
 | `model_character(path, height)` | define a rigged `.rkc` voxel character (skeleton + named clips); returns a model id, or `-1` if the asset is missing or unparsable (requires `host_api` 14) |
@@ -140,7 +163,7 @@ to place in a command payload.
 | `entity_grid(entity)` | the grid an entity rides, or `-1` |
 | `entity_set_anim(entity, state)` | set an entity's animation: an actor state, or a character's `.rkc` clip name (an unknown name keeps the current one) |
 | `entity_set_facing(entity, yaw)` | set an entity's facing yaw (radians): an actor picks its directional sprite, a character turns its geometry |
-| `entity_set_side(entity, dir, roll)` | set an entity's axis-aligned side and roll — a discrete alternative to `entity_set_facing` that can point a KV6/box model along any of the 6 grid faces (`dir`) with any of 4 quarter-turns around it (`roll`), not just a horizontal turn. `dir`/`roll` are `Direction`/`Roll` discriminants; a billboard actor ignores it (requires `host_api` 24) |
+| `entity_set_side(entity, dir, roll)` | set an entity's axis-aligned side and roll — a discrete alternative to `entity_set_facing` that can point a KV6/box model along any of the 6 grid faces (`dir`) with any of 4 quarter-turns around it (`roll`), not just a horizontal turn. `dir`/`roll` are `Direction`/`Roll` discriminants; it WINS over `entity_set_facing` when a map sets both, and a billboard actor ignores it (requires `host_api` 25) |
 | `entity_set_tint(entity, tint)` | multiply an actor's sprite by a `0xRRGGBB` tint (billboard actors only) |
 
 A **billboard actor** is pre-drawn art: eight GIF facings the renderer picks

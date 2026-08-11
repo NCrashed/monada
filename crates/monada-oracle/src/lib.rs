@@ -404,14 +404,16 @@ fn ship_input(t: usize) -> Command {
             _ => (0, -1),
         }
     };
-    // The button mask the map reads from `arg.z` (1 = use, 2 = airlock), pressed
-    // on single ticks so the map's rising-edge rule fires exactly once. This is
-    // what puts grid MEMBERSHIP under the golden: tick 2 attaches the crate
-    // beside the spawn to the crew's hull, tick 240 cycles the airlock (which
-    // changes what the crew can walk through), and tick 320 sets the crate down
-    // wherever the walk has taken it.
+    // The button mask the map reads from `arg.z` (1 = use, 2 = airlock,
+    // 32 = rotate), pressed on single ticks so the map's rising-edge rule fires
+    // exactly once. This is what puts grid MEMBERSHIP and PLACEMENT under the
+    // golden: tick 1 takes the crate the cursor is on (see `ship_aim`) and
+    // attaches it to the crew's hull, tick 30 turns it a quarter, tick 32 sets
+    // it down on the cell the cursor names, and tick 240 cycles the airlock
+    // (which changes what the crew can walk through).
     let mut btn = match t {
-        2 | 320 => 1,
+        1 | 32 => 1,
+        30 => 32,
         240 => 2,
         _ => 0,
     };
@@ -440,11 +442,41 @@ fn ship_input(t: usize) -> Command {
     )
 }
 
+/// The cursor, on the ticks the schedule above uses one (verb 1, the hull
+/// CELL a client's pointer rests on — docs/plans/ship-building.md).
+///
+/// A cursor is per-client and never hashed; what crosses the wall is the cell
+/// it named, exactly as an ordinary command. So the golden sends cells, and
+/// what it gates is the half that IS shared: that every peer agrees a crate
+/// was taken from cell (4, 3) and put down on (10, 3), turned a quarter.
+///
+/// The cells are the demo's own: `init` stows a crate at (4, 3) beside the
+/// crew's spawn, and (10, 3) is clear deck a third of the way along the walk
+/// east. `arg.z` is the deck plate the pointer is on — cell 0 is the lower
+/// deck's floor, which is where this whole run happens.
+fn ship_aim(t: usize) -> Option<Command> {
+    let cell = match t {
+        1 => (4, 3),
+        30..=32 => (10, 3),
+        _ => return None,
+    };
+    Some(Command::on(
+        1,
+        EntityId(0),
+        FixedVec3::new(
+            Fixed::from_int(cell.0),
+            Fixed::from_int(cell.1),
+            Fixed::ZERO,
+        ),
+    ))
+}
+
 /// The ship golden: the crew-sim demo driven through its own script under a
 /// headless [`NullBridge`], one input command per tick, hashed at fixed
 /// tick counts. Gates cross-platform determinism of the two-deck movement,
-/// deck-relative collision, and the stairwell deck-flip — the ship's sim half
-/// (its visibility/camera work is render-side and unhashed by design).
+/// deck-relative collision, the stairwell deck-flip, and cursor-directed
+/// cargo placement — the ship's sim half (its visibility/camera work, and the
+/// ghost that previews a placement, are render-side and unhashed by design).
 ///
 /// # Panics
 /// Panics on a script compile/run failure (a bug, not a data condition).
@@ -474,6 +506,10 @@ pub fn ship_checkpoints() -> Vec<Checkpoint> {
     record(&driver, 0);
     for t in 1..=600usize {
         driver.apply_command(P0, &ship_input(t));
+        // A client with a pointer sends two commands a tick, not one.
+        if let Some(aim) = ship_aim(t) {
+            driver.apply_command(P0, &aim);
+        }
         driver.step();
         record(&driver, t);
     }
@@ -982,8 +1018,9 @@ pub fn render_goldens(checkpoints: &[Checkpoint]) -> String {
          lockstep (two-session command demo), chess (turn-based rules), \
          rpg (real-time action-RPG: per-tick input + voxel-query + wave \
          RNG), ship (two-deck crew sim aboard a rigid-body hull: \
-         deck-relative collision, stairwell deck-flip, grid membership, and \
-         a ship flown under its own engines), rts (1v1 strategy: nav-routed \
+         deck-relative collision, stairwell deck-flip, grid membership, \
+         cursor-directed cargo placement, and a ship flown under its own \
+         engines), rts (1v1 strategy: nav-routed \
          orders + economy + \
          combat + voxel_clear tree felling), phys (pure-Rust physics-crate \
          anchor: PhysicsWorld fixed-timestep shell), digger (volume-terrain \
@@ -1094,6 +1131,49 @@ pub fn diff(checkpoints: &[Checkpoint], goldens: &[(String, u64)]) -> Vec<(Check
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// The ship schedule really does what its comments claim.
+    ///
+    /// A golden hash gates that a run is *reproducible*, not that it is
+    /// interesting: a placement the map silently refuses hashes just as
+    /// happily as one it accepts, and the schedule would go on claiming to
+    /// cover cargo while covering nothing. So replay the same beats and look
+    /// at the crate — it must have been taken from the cell the cursor named,
+    /// turned, and put down on the other one.
+    // Small integers stored as fixed-point; reading them back through f64 is
+    // exact for the cell coordinates and flags here.
+    #[allow(clippy::cast_possible_truncation)]
+    #[test]
+    fn the_ship_schedule_actually_places_the_crate() {
+        let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
+        let world = shared_world(SEED);
+        let phys = shared_physics(SHIP_HZ);
+        let mut driver = RhaiDriver::with_physics(world.clone(), SHIP_SCRIPT, &bridge, &phys)
+            .expect("compile ship");
+        for t in 1..=40usize {
+            driver.apply_command(P0, &ship_input(t));
+            if let Some(aim) = ship_aim(t) {
+                driver.apply_command(P0, &aim);
+            }
+            driver.step();
+        }
+        let w = world.lock().expect("world mutex");
+        let crew = w.entities(monada_sim::ArchetypeId(0))[0];
+        let crate0 = w.entities(monada_sim::ArchetypeId(2))[0];
+        let carry = w.field(crew, "carry").expect("crew carries a field");
+        assert_eq!(carry.to_f64() as i64, 0, "the crate was set down again");
+        let p = w.position(crate0).expect("the crate exists");
+        assert_eq!(
+            ((p.x.to_f64() + 0.5).floor() as i64, (p.y.to_f64() + 0.5).floor() as i64),
+            (10, 3),
+            "…on the cell the cursor named, not where the crew stood"
+        );
+        assert_eq!(
+            w.field(crate0, "dir").expect("props carry a facing").to_f64() as i64,
+            2,
+            "…and kept the quarter turn tick 30 gave it (+y = Direction::Y)"
+        );
+    }
 
     /// Every `book/examples/*` map packs, loads, and runs headless. This
     /// is the book's "examples don't rot" gate — it runs under the normal

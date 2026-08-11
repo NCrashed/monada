@@ -102,6 +102,7 @@ impl RhaiBackend {
         // inside functions by default) so non-trivial setup loops / rule
         // tables compile. Determinism is unaffected.
         engine.set_max_expr_depths(0, 0);
+        set_call_depth(&mut engine);
         let events: UiEventBuffer = Arc::new(Mutex::new(Vec::new()));
         register_number_types(&mut engine);
         register_host_api(&mut engine, &world, &events);
@@ -321,6 +322,24 @@ impl ScriptBackend for RhaiBackend {
             );
         }
     }
+}
+
+/// Pin how deep a map's own functions may call, EXPLICITLY — because
+/// Rhai's default depends on the build profile: 64 levels in release, **8
+/// in debug**.
+///
+/// That asymmetry is not a tuning knob, it is a divergence. A map whose
+/// rules nest ten calls deep (the ship's `tick → step_crew → try_move →
+/// reachable → blocked → occupied → prop_covers → …` is exactly that)
+/// runs on a release peer and raises "Stack overflow" on a debug one —
+/// mid-tick, on one side of a lockstep session only, with an error naming
+/// no function at all. A limit that changes what a script *means*
+/// between two builds of the same engine cannot be left implicit.
+///
+/// 64 is the release default, kept as a real guard: runaway recursion
+/// should still stop, it just must stop identically everywhere.
+pub(crate) fn set_call_depth(engine: &mut Engine) {
+    engine.set_max_call_levels(64);
 }
 
 /// Register `Fixed` / `Vec3` and the only arithmetic scripts get (all

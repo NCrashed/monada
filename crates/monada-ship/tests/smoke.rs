@@ -28,6 +28,9 @@ const SEED: u64 = 0x4D4F_4E41_4441_5F30;
 const CREW: ArchetypeId = ArchetypeId(0);
 const SHIP: ArchetypeId = ArchetypeId(1);
 const VERB_INPUT: u32 = 0;
+/// The cursor: one hull cell per tick, from whichever peer has a pointer
+/// (docs/plans/ship-building.md).
+const VERB_AIM: u32 = 1;
 const P0: PlayerId = PlayerId(0);
 
 /// The ship demo rules, through the real archive path (pack `map/`, read back,
@@ -403,7 +406,7 @@ fn use_picks_a_crate_up_and_sets_it_down() {
 #[test]
 fn keys_1_and_2_turn_a_carried_crate() {
     let (world, mut b) = fresh();
-    step(&mut b, &input(0, 0)); // spawn at (5, 2); crate 0 waits at (6, 2)
+    step(&mut b, &input(0, 0)); // spawn at (5, 2); crate 0 waits at (4, 3)
     assert_eq!(
         crate_field(&world, 0, "dir"),
         2,
@@ -411,8 +414,8 @@ fn keys_1_and_2_turn_a_carried_crate() {
     );
     assert_eq!(crate_field(&world, 0, "roll"), 0, "stowed at Roll::Deg0");
 
-    // Bit 32 (key 1) is a no-op with empty hands.
-    step(&mut b, &input_btn(0, 0, 32));
+    // Bit 64 (key 1) is a no-op with empty hands.
+    step(&mut b, &input_btn(0, 0, 64));
     assert_eq!(
         crate_field(&world, 0, "dir"),
         2,
@@ -422,7 +425,7 @@ fn keys_1_and_2_turn_a_carried_crate() {
     step(&mut b, &input_btn(0, 0, 1)); // F: pick the crate up
     assert!(crew_carry(&world) != 0, "carrying it");
 
-    step(&mut b, &input_btn(0, 0, 32)); // 1: rotate around sim +x
+    step(&mut b, &input_btn(0, 0, 64)); // 1: rotate around sim +x
     assert_eq!(
         crate_field(&world, 0, "dir"),
         4,
@@ -430,17 +433,27 @@ fn keys_1_and_2_turn_a_carried_crate() {
     );
     // Holding it does not repeat the turn every tick — only the rising edge
     // fires, same as `use`/`door`.
-    step(&mut b, &input_btn(0, 0, 32));
+    step(&mut b, &input_btn(0, 0, 64));
     assert_eq!(crate_field(&world, 0, "dir"), 4, "held, not repeated");
 
-    step(&mut b, &input_btn(0, 0, 64)); // 2: roll CW
+    step(&mut b, &input_btn(0, 0, 128)); // 2: roll CW
     assert_eq!(
         crate_field(&world, 0, "roll"),
         1,
         "Roll::Deg0 CW is Roll::Deg90"
     );
-    step(&mut b, &input_btn(0, 0, 64)); // held
+    step(&mut b, &input_btn(0, 0, 128)); // held
     assert_eq!(crate_field(&world, 0, "roll"), 1, "held, not repeated");
+
+    // …and R (bit 32) turns it back to a face the DECK can take: the
+    // placement rotation owns the horizontal direction, the roll survives.
+    step(&mut b, &input_btn(0, 0, 32));
+    assert_eq!(
+        crate_field(&world, 0, "dir"),
+        2,
+        "R faced it along the crew's new placement rotation (+y)"
+    );
+    assert_eq!(crate_field(&world, 0, "roll"), 1, "…keeping the roll");
 }
 
 #[test]
@@ -485,9 +498,188 @@ fn a_crate_released_through_the_airlock_stays_in_space() {
     );
     assert_eq!(
         count(&world, CRATE),
-        2,
-        "releasing a crate does not destroy it"
+        3,
+        "releasing a crate does not destroy it (two crates + a locker)"
     );
+}
+
+// --- placement (docs/plans/ship-building.md) -------------------------------
+// Cargo goes where the CURSOR points, on the deck's own grid, and only where
+// the rules allow. The cursor itself is per-client and never hashed — what
+// crosses the wall is the CELL it named, as an ordinary command — so these
+// canaries drive that command exactly as a client with a pointer would.
+
+/// The aim command a client's `local_tick` submits for a cursor resting on
+/// hull cell `(cx, cy, cz)`.
+fn aim(cx: i32, cy: i32, cz: i32) -> Command {
+    Command::on(
+        VERB_AIM,
+        EntityId(0),
+        FixedVec3::new(
+            Fixed::from_int(cx),
+            Fixed::from_int(cy),
+            Fixed::from_int(cz),
+        ),
+    )
+}
+
+/// One tick from a client that has a pointer: the move/button command and the
+/// cursor cell, the pair `local_tick` sends together.
+fn step_aimed(b: &mut RhaiDriver, cmd: &Command, at: (i32, i32)) {
+    b.apply_command(P0, cmd);
+    b.apply_command(P0, &aim(at.0, at.1, 0)); // deck 0's floor plate
+    b.step();
+}
+
+/// Which cell a prop's first footprint cell is, rounded the way the map's
+/// `cell()` does (integer coords are cell centres).
+fn crate_cell(world: &SharedWorld, i: usize) -> (i64, i64) {
+    let p = crate_local(world, i);
+    (
+        (p.x.to_f64() + 0.5).floor() as i64,
+        (p.y.to_f64() + 0.5).floor() as i64,
+    )
+}
+
+/// The headline of the slice, and the players' second complaint: the crew
+/// takes what the pointer is on, not whatever happens to be nearest.
+#[test]
+fn use_takes_the_prop_under_the_cursor_and_nothing_else() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0)); // spawn at (5, 2); a crate waits at (4, 3)
+
+    // Pointing at an EMPTY cell while a crate is within arm's reach: the old
+    // nearest-crate rule would have grabbed it. The cursor says otherwise.
+    step_aimed(&mut b, &input_btn(0, 0, 1), (6, 2));
+    assert_eq!(crew_carry(&world), 0, "an empty cell hands you nothing");
+
+    // Pointing at the crate takes the crate.
+    step_aimed(&mut b, &input_btn(0, 0, 0), (4, 3)); // release the key first
+    step_aimed(&mut b, &input_btn(0, 0, 1), (4, 3));
+    assert_eq!(
+        crew_carry(&world),
+        crate_of(&world, 0).0 as i64 + 1,
+        "picked up the crate the cursor was on"
+    );
+}
+
+/// It goes down on the cell you point at — snapped to the deck grid, in the
+/// hull's own cells.
+#[test]
+fn a_crate_is_set_down_on_the_cell_the_cursor_names() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0));
+    step_aimed(&mut b, &input_btn(0, 0, 1), (4, 3));
+    assert!(crew_carry(&world) != 0, "carrying the crate");
+
+    step_aimed(&mut b, &input_btn(0, 0, 0), (6, 2));
+    step_aimed(&mut b, &input_btn(0, 0, 1), (6, 2));
+    assert_eq!(crew_carry(&world), 0, "hands free again");
+    assert_eq!(
+        crate_cell(&world, 0),
+        (6, 2),
+        "the crate stands on the cell the cursor named"
+    );
+    assert_eq!(
+        crate_grid(&world, &b, 0),
+        0,
+        "set down inside the ship, so it stays in the ship's frame"
+    );
+}
+
+/// And nowhere else. A refused placement is a no-op: you keep holding the
+/// thing, which is what the red ghost has been promising the whole time.
+#[test]
+fn a_placement_is_refused_out_of_reach_and_into_a_wall() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0));
+    step_aimed(&mut b, &input_btn(0, 0, 1), (4, 3));
+    let carried = crew_carry(&world);
+    assert!(carried != 0);
+
+    // Across the room: arm's reach is 1.5 cells and a placement is not a
+    // throw.
+    step_aimed(&mut b, &input_btn(0, 0, 0), (5, 8));
+    step_aimed(&mut b, &input_btn(0, 0, 1), (5, 8));
+    assert_eq!(crew_carry(&world), carried, "out of reach: still holding it");
+
+    // Into the hull: walk south to the rim and aim at the wall itself.
+    for _ in 0..10 {
+        step_aimed(&mut b, &input(-1, -1), (5, 0));
+    }
+    let y = crew_pos(&world).y.to_f64();
+    assert!(y < 1.6, "the crew reached the fore rim (y = {y})");
+    step_aimed(&mut b, &input_btn(0, 0, 1), (5, 0));
+    assert_eq!(crew_carry(&world), carried, "into a wall: still holding it");
+}
+
+/// A placed prop is as solid as the bulkhead beside it — which is what makes
+/// where you put it a decision rather than a decoration.
+#[test]
+fn a_placed_crate_blocks_the_crew() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0));
+    step_aimed(&mut b, &input_btn(0, 0, 1), (4, 3));
+    step_aimed(&mut b, &input_btn(0, 0, 0), (5, 3));
+    step_aimed(&mut b, &input_btn(0, 0, 1), (5, 3)); // straight north of the crew
+    assert_eq!(crew_cell_of(&world), (5, 2), "the crew has not moved");
+    assert_eq!(crate_cell(&world, 0), (5, 3), "the crate is in the way");
+
+    hold(&mut b, 1, 1, 30); // north, into it
+    let y = crew_pos(&world).y.to_f64();
+    assert!(
+        y < 2.5,
+        "the crate stopped the crew short of its cell (y = {y})"
+    );
+}
+
+/// Rotation is only a feature if it changes what a prop covers, so the demo
+/// carries a two-cell locker: turned, it lies north-south instead of
+/// east-west, and the cells it takes follow.
+#[test]
+fn rotation_turns_the_lockers_footprint() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0));
+    // West along the spawn row to the stowage, where the locker lies over
+    // cells (2, 3) and (3, 3).
+    for _ in 0..15 {
+        step_aimed(&mut b, &input(-1, 1), (3, 3));
+    }
+    step_aimed(&mut b, &input_btn(0, 0, 1), (3, 3));
+    assert_eq!(
+        crew_carry(&world),
+        crate_of(&world, 1).0 as i64 + 1,
+        "picked the locker up by pointing at its far cell"
+    );
+
+    // R: turn it a quarter, so it will lie along +y.
+    step_aimed(&mut b, &input_btn(0, 0, 32), (3, 3));
+    step_aimed(&mut b, &input_btn(0, 0, 0), (3, 3));
+    step_aimed(&mut b, &input_btn(0, 0, 1), (3, 3));
+    assert_eq!(crew_carry(&world), 0, "the locker went down");
+
+    let p = crate_local(&world, 1);
+    assert!(
+        (p.x.to_f64() - 3.0).abs() < 1e-6 && (p.y.to_f64() - 3.5).abs() < 1e-6,
+        "a two-cell prop stands on the half-cell between its cells (was {p:?})"
+    );
+    // The placement rotation IS the prop's face — one orientation, so the
+    // cells it takes and the way it is drawn cannot come apart. A quarter-turn
+    // of 1 (+y) is `Direction::Y`, discriminant 2.
+    assert_eq!(
+        crate_field(&world, 1, "dir"),
+        2,
+        "it kept the rotation it was placed with, as a grid face"
+    );
+}
+
+/// Which cell the crew member stands in, the way the map's `cell()` rounds.
+fn crew_cell_of(world: &SharedWorld) -> (i64, i64) {
+    let p = crew_pos(world);
+    (
+        (p.x.to_f64() + 0.5).floor() as i64,
+        (p.y.to_f64() + 0.5).floor() as i64,
+    )
 }
 
 #[test]
@@ -620,11 +812,15 @@ fn the_hull_weighs_the_shell_it_is() {
 struct Keys {
     down: Vec<String>,
     axis: Vec<(String, i64)>,
-    sent: Vec<FixedVec3>,
+    /// What `pick_cell` answers — the cursor resting on a hull cell, or
+    /// `None` for a peer whose pointer is off the ship (or has none).
+    cell: Option<FixedVec3>,
+    sent: Vec<(i64, FixedVec3)>,
 }
 
 impl monada_script::HostBridge for Keys {
-    // The three that matter: what is held, and what the map submits.
+    // The four that matter: what is held, where the cursor is, and what the
+    // map submits.
     fn action_down(&self, id: &str) -> bool {
         self.down.iter().any(|d| d == id)
     }
@@ -634,8 +830,11 @@ impl monada_script::HostBridge for Keys {
             .find(|(a, _)| a == id)
             .map_or(0, |&(_, v)| v)
     }
-    fn submit_command(&mut self, _verb: i64, _target: i64, arg: FixedVec3) {
-        self.sent.push(arg);
+    fn pick_cell(&self, _grid: i64) -> Option<FixedVec3> {
+        self.cell
+    }
+    fn submit_command(&mut self, verb: i64, _target: i64, arg: FixedVec3) {
+        self.sent.push((verb, arg));
     }
 
     // The trait's required rest, headless (`NullBridge`'s answers).
@@ -678,12 +877,13 @@ impl monada_script::HostBridge for Keys {
     fn set_sky(&mut self, _asset_path: &str) {}
 }
 
-/// Run one `local_tick` with the given keys held, and return the button mask
-/// it packed into the command's spare z.
-fn local_mask(down: &[&str], axis: &[(&str, i64)]) -> i64 {
+/// Run one `local_tick` with the given keys held and cursor, and return every
+/// `(verb, arg)` it submitted.
+fn local_sent(down: &[&str], axis: &[(&str, i64)], cell: Option<FixedVec3>) -> Vec<(i64, FixedVec3)> {
     let keys = Arc::new(Mutex::new(Keys {
         down: down.iter().map(|s| (*s).to_string()).collect(),
         axis: axis.iter().map(|&(a, v)| (a.to_string(), v)).collect(),
+        cell,
         sent: Vec::new(),
     }));
     let bridge: SharedBridge = keys.clone();
@@ -693,9 +893,17 @@ fn local_mask(down: &[&str], axis: &[(&str, i64)]) -> i64 {
     local
         .on_local_tick(Fixed::from_ratio(1, 30))
         .expect("local_tick");
-    let sent = &keys.lock().unwrap().sent;
-    assert_eq!(sent.len(), 1, "local_tick submits exactly one command");
-    sent[0].z.to_f64() as i64
+    let sent = keys.lock().unwrap().sent.clone();
+    sent
+}
+
+/// The button mask `local_tick` packed into the input command's spare z, for
+/// a client with no cursor on the hull.
+fn local_mask(down: &[&str], axis: &[(&str, i64)]) -> i64 {
+    let sent = local_sent(down, axis, None);
+    assert_eq!(sent.len(), 1, "without a cursor, one command per tick");
+    assert_eq!(sent[0].0, i64::from(VERB_INPUT), "the input command");
+    sent[0].1.z.to_f64() as i64
 }
 
 #[test]
@@ -706,6 +914,7 @@ fn every_control_reaches_the_command() {
     assert_eq!(local_mask(&["burn"], &[]), 4, "SPACE: main drive");
     assert_eq!(local_mask(&[], &[("turn", 1)]), 8, "Q: turn one way");
     assert_eq!(local_mask(&[], &[("turn", -1)]), 16, "E: and the other");
+    assert_eq!(local_mask(&["rotate"], &[]), 32, "R: turn what you hold");
     assert_eq!(
         local_mask(&["burn"], &[("turn", 1)]),
         12,
@@ -713,8 +922,30 @@ fn every_control_reaches_the_command() {
     );
     assert_eq!(
         local_mask(&["rotate_x"], &[]),
-        32,
-        "1: rotate a carried crate"
+        64,
+        "1: spin a carried crate"
     );
-    assert_eq!(local_mask(&["roll_cw"], &[]), 64, "2: roll it CW");
+    assert_eq!(local_mask(&["roll_cw"], &[]), 128, "2: roll it CW");
+}
+
+/// The cursor reaches the simulation, and only as a cell.
+///
+/// The same seam the turn keys hid a bug in: `local_tick` is the one place
+/// where a per-client fact becomes a shared one, and a `pick_cell` that never
+/// got submitted would look exactly like a cursor that does not work.
+#[test]
+fn the_cursor_reaches_the_command_as_a_cell() {
+    let at = FixedVec3::new(Fixed::from_int(7), Fixed::from_int(4), Fixed::ZERO);
+    let sent = local_sent(&[], &[], Some(at));
+    assert_eq!(sent.len(), 2, "input, and the cell the cursor is on");
+    assert_eq!(sent[1].0, i64::from(VERB_AIM), "the aim verb");
+    assert_eq!(sent[1].1, at, "the hull cell, unchanged");
+
+    // Off the ship, nothing is claimed: silence is what the simulation reads
+    // as "this client is not pointing at anything".
+    assert_eq!(
+        local_sent(&[], &[], None).len(),
+        1,
+        "a cursor off the hull sends no aim at all"
+    );
 }

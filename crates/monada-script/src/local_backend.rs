@@ -50,6 +50,7 @@ use rhai::{Dynamic, Engine, ImmutableString, Scope, AST};
 use crate::grids::register_grid_read_api;
 use crate::rhai_backend::{
     register_bridge_api, register_number_types, register_terrain_api, register_world_read_api,
+    set_call_depth,
 };
 use crate::{ScriptError, SharedBridge, SharedGrids, SharedTerrain, SharedWorld};
 
@@ -78,6 +79,11 @@ impl LocalBackend {
         // Same stance as the sim backend: map scripts are semi-trusted
         // assets; lift the conservative expression-depth limits.
         engine.set_max_expr_depths(0, 0);
+        // …and the same explicit call depth as the sim backend: the local
+        // layer compiles the SAME script, so a limit that differed between
+        // the two would make a ghost raise where the rule it previews runs
+        // fine (see `set_call_depth`).
+        set_call_depth(&mut engine);
         register_number_types(&mut engine);
         register_world_read_api(&mut engine, world);
         register_bridge_api(&mut engine, bridge);
@@ -279,6 +285,65 @@ fn register_input_api(engine: &mut Engine, bridge: &SharedBridge) {
     engine.register_fn("pick_entity", move || -> i64 {
         b.lock().expect("bridge mutex").pick_entity()
     });
+
+    // The grid cursor (`host_api` 24): the cursor resolved against the
+    // GEOMETRY rather than a ground plane, answering in the cells of the
+    // grid that was hit. What a map whose world is a moving hull has to
+    // ask, and what any map wants the moment its ground has a shape.
+    // `()` on a miss, the same convention `pick_ground` uses.
+    let b = bridge.clone();
+    engine.register_fn("pick_grid", move || -> i64 {
+        b.lock().expect("bridge mutex").pick_grid()
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("pick_cell", move |grid: i64| -> Dynamic {
+        match b.lock().expect("bridge mutex").pick_cell(grid) {
+            Some(cell) => Dynamic::from(cell),
+            None => Dynamic::UNIT,
+        }
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("pick_face", move |grid: i64| -> Dynamic {
+        match b.lock().expect("bridge mutex").pick_face(grid) {
+            Some(face) => Dynamic::from(face),
+            None => Dynamic::UNIT,
+        }
+    });
+
+    // Overlay gizmos: world-space outlines in a grid's own frame and
+    // cells, alpha-blended (`0xAA_RR_GG_BB`). Local-layer only — a ghost
+    // is per-client by definition, and nothing here touches the world.
+    let b = bridge.clone();
+    engine.register_fn("gizmo_clear", move || {
+        b.lock().expect("bridge mutex").gizmo_clear();
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("gizmo_style", move |width_px: i64, on_top: bool| {
+        b.lock()
+            .expect("bridge mutex")
+            .gizmo_style(width_px, on_top);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn(
+        "gizmo_box",
+        move |grid: i64, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .gizmo_box(grid, x0, y0, z0, x1, y1, z1, color);
+        },
+    );
+
+    let b = bridge.clone();
+    engine.register_fn(
+        "gizmo_line",
+        move |grid: i64, a: FixedVec3, c: FixedVec3, color: i64| {
+            b.lock().expect("bridge mutex").gizmo_line(grid, a, c, color);
+        },
+    );
 
     let b = bridge.clone();
     engine.register_fn("aim_yaw", move || -> Fixed {
