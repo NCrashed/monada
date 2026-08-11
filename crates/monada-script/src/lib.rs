@@ -18,12 +18,14 @@
 //! entity position and fields through the host API.
 #![forbid(unsafe_code)]
 
+mod direction;
 mod driver;
 mod grids;
 mod local_backend;
 mod physics;
 mod rhai_backend;
 
+pub use direction::{Direction, Roll};
 pub use driver::RhaiDriver;
 pub use grids::{shared_grids, GridStore, SharedGrids, NO_GRID};
 pub use local_backend::LocalBackend;
@@ -34,10 +36,9 @@ pub use rhai_backend::RhaiBackend;
 // own modules keep referring to `crate::HostBridge` and friends).
 pub use monada_runtime::{
     check_host_api, shared_physics, shared_terrain, shared_world, DrillToolDef, HostBridge,
-    LocalLayer, LocalRules, MapRules, NativeBackend, NativeLocalBackend,
-    MaterialId, NullBridge, PhysicsSim, ScriptBackend, ScriptError, SharedBridge, SharedPhysics,
-    SharedTerrain, SharedWorld, UiEvent, VolumeStore, VoxelStore, HOST_API_OLDEST,
-    HOST_API_VERSION,
+    LocalLayer, LocalRules, MapRules, MaterialId, NativeBackend, NativeLocalBackend, NullBridge,
+    PhysicsSim, ScriptBackend, ScriptError, SharedBridge, SharedPhysics, SharedTerrain,
+    SharedWorld, UiEvent, VolumeStore, VoxelStore, HOST_API_OLDEST, HOST_API_VERSION,
 };
 
 /// The M2 walk-in-a-circle scenario, as a script (DESIGN.md §7) — the

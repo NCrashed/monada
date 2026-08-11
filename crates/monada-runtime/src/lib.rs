@@ -25,15 +25,15 @@ use monada_sim::{Command, PlayerId, World};
 
 mod granular;
 mod host;
-mod nav;
 mod native;
+mod nav;
 mod physics;
 mod snapshot;
 mod volume;
 
+pub use granular::{Granular, Repose, Slide};
 pub use host::{Host, LocalHost, RuntimeHost, WorldRead};
 pub use native::{LocalLayer, LocalRules, MapRules, NativeBackend, NativeLocalBackend};
-pub use granular::{Granular, Repose, Slide};
 pub use nav::{shared_nav, NavCache, SharedNav};
 pub use physics::{shared_physics, DrillToolDef, PhysicsSim, SharedPhysics};
 // The navigation vocabulary a map speaks, re-exported so a rules crate
@@ -175,8 +175,25 @@ pub use volume::VolumeStore;
 /// `phys_angvel` reads the tumble back so a map can write its own
 /// stabiliser as `τ = −k·ω`. No new hashed state and no engine-side
 /// notion of a thruster: fuel, throttle, gimbal and which key fires it
-/// stay in the map.
-pub const HOST_API_VERSION: u32 = 23;
+/// stay in the map; 24 = `entity_set_side` (box/door/engine orientation).
+/// `entity_set_facing`'s yaw only turns a model about the vertical axis —
+/// enough for a walking crew member, not for an object that can point
+/// along any of a hull's 6 grid faces. `entity_set_side` takes a discrete
+/// face plus a quarter-turn roll around it instead, 24 orientations
+/// total rather than a continuous angle, so a script can snap a placed
+/// object to the grid the way it already snaps position. Scoped to the
+/// geometry-turning KV6/box path `entity_set_facing` uses for a plain
+/// model; a billboard actor still only answers to yaw. Additive: an
+/// entity nobody sides keeps whatever facing (or none) it already had;
+/// 25 = `model_box_sides` (orientation debugging). A box built by
+/// `model_box` is one flat colour, so a script that turns one with
+/// `entity_set_side` cannot tell from the render alone whether the turn
+/// actually happened — only that *something* did or didn't get posed.
+/// `model_box_sides` paints each local face its own colour so a rotation
+/// is visible on sight, the same way an authored `.kv6` would be.
+/// Debug/demo tooling, not a new render capability: identical geometry to
+/// `model_box`, just per-face colour instead of one colour throughout.
+pub const HOST_API_VERSION: u32 = 25;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -305,6 +322,26 @@ pub trait ScriptBackend {
 pub trait HostBridge: Send {
     /// Define a procedural box sprite model; returns its model id.
     fn model_box(&mut self, w: i64, h: i64, d: i64, color: i64) -> i64;
+    /// Define a procedural box sprite model with each of its 6 local
+    /// faces painted a distinct colour (`x`/`neg_x`/`y`/`neg_y`/`z`/
+    /// `neg_z`, in the box's own local axes — the same local X/Y/Z
+    /// [`entity_set_side`](Self::entity_set_side) rotates). A debug/demo
+    /// aid: it makes an orientation visible without relying on
+    /// directional shading alone to tell one side from another. Returns
+    /// its model id.
+    #[allow(clippy::too_many_arguments)]
+    fn model_box_sides(
+        &mut self,
+        w: i64,
+        h: i64,
+        d: i64,
+        x: i64,
+        neg_x: i64,
+        y: i64,
+        neg_y: i64,
+        z: i64,
+        neg_z: i64,
+    ) -> i64;
     /// Define a sprite model from a KV6 asset in the map archive (by its
     /// archive-relative path), turned `turns` quarter-steps clockwise about
     /// the vertical axis (so a map can face asymmetric art whichever way it
@@ -814,6 +851,19 @@ pub trait HostBridge: Send {
     /// Render-side only.
     fn entity_set_facing(&mut self, _entity: i64, _yaw: Fixed) {}
 
+    /// Set an entity's axis-aligned side and roll (`host_api` 24): a
+    /// discrete alternative to [`entity_set_facing`](Self::entity_set_facing)
+    /// for a model that should snap to a grid face rather than turn
+    /// continuously — a crate, a door, an engine bell. `dir` picks which of
+    /// the 6 faces points forward, `roll` turns that face's own axis in one
+    /// of 4 quarter-turns, 24 orientations total. `dir`/`roll` are the
+    /// `monada_script::Direction`/`Roll` enums' `u8` discriminants crossing
+    /// the host-API wall as plain ints, since this crate does not depend on
+    /// `monada-script` and cannot name the types themselves. Turns the KV6/
+    /// box model's geometry the same way `entity_set_facing` does; a
+    /// billboard actor has no roll to show and ignores it. Render-side only.
+    fn entity_set_side(&mut self, _entity: i64, _dir: i64, _roll: i64) {}
+
     /// Tint an actor entity's sprite by an `0x00RR_GGBB` colour multiply
     /// (`0x00FF_FFFF` = white = no tint; e.g. `0x00FF_4040` = damage red).
     /// Render-side only — flash a hit without touching the hashed sim.
@@ -1102,6 +1152,21 @@ pub struct NullBridge;
 
 impl HostBridge for NullBridge {
     fn model_box(&mut self, _w: i64, _h: i64, _d: i64, _color: i64) -> i64 {
+        0
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn model_box_sides(
+        &mut self,
+        _w: i64,
+        _h: i64,
+        _d: i64,
+        _x: i64,
+        _neg_x: i64,
+        _y: i64,
+        _neg_y: i64,
+        _z: i64,
+        _neg_z: i64,
+    ) -> i64 {
         0
     }
     fn model_kv6(&mut self, _asset_path: &str, _turns: i64) -> i64 {

@@ -255,10 +255,14 @@ fn init() {
     archetype(["door", "body"]);
     let ship = entity_create(1);
 
-    // Cargo crates: no fields of their own beyond "is someone holding me". What
-    // makes them interesting is WHICH FRAME they are in — riding the hull, or
-    // released into the world (see `step_use`). Archetype id 2.
-    archetype(["held"]);
+    // Cargo crates: "is someone holding me", plus the `Direction`/`Roll`
+    // discriminants `entity_set_side` last painted it with (0-5, 0-3) — hashed
+    // so every peer agrees on the crate's face, and re-sent to the renderer
+    // whenever `rotate_carried_crate_x` / `roll_carried_crate_cw` change them.
+    // What makes a crate interesting beyond that is WHICH FRAME it is in —
+    // riding the hull, or released into the world (see `step_use`).
+    // Archetype id 2.
+    archetype(["held", "dir", "roll"]);
 
     // Engines: a thruster is an ENTITY on the hull, at a hull cell, pointing
     // along a hull direction, with a throttle. Nothing about it is engine-side
@@ -327,7 +331,18 @@ fn init() {
     // RPG hero's idle/run GIFs under assets/char/crew.
     model_actor("assets/char/crew", ["idle", "run"], ratio(14, 10));
     // The crate: a procedural box, model id 1 (the call after the actor).
-    model_box(9, 9, 9, 0x80a8_7a3c);
+    // Each of its 6 local faces gets its own colour (X/NegX/Y/NegY/Z/NegZ,
+    // matching `Direction`'s order) rather than one flat colour, so
+    // `entity_set_side` turning it is visible on sight instead of only
+    // showing up as a shading change.
+    model_box_sides(
+        9, 9, 9, 0x80FF_4040, // X: red
+        0x8040_FFFF, // NegX: cyan
+        0x8040_FF40, // Y: green
+        0x80FF_40FF, // NegY: magenta
+        0x8040_40FF, // Z: blue
+        0x80FF_FF40, // NegZ: yellow
+    );
 
     // Two crates stowed on the lower deck, authored in HULL coordinates — so
     // `entity_set_grid` (the raw bind) is right here: nothing should move, the
@@ -368,7 +383,7 @@ fn init() {
     // (per-client — each peer sees its own line of sight). Render-side.
     vision_config(110, 9, 3);
 
-    status("ship demo — WASD walk, F crate, G airlock, SPACE burn, Q/E turn; the hull is a rigid body and you are standing in it");
+    status("ship demo — WASD walk, F crate, G airlock, SPACE burn, Q/E turn, 1/2 rotate/roll a carried crate; the hull is a rigid body and you are standing in it");
 }
 
 /// Paint the two-deck hull into `grid`, for the EYE. Collision is the `blocked`
@@ -458,6 +473,54 @@ fn stow_crate(cx, cy) {
     entity_set_position(k, vec3(fixed(cx), fixed(cy), fixed(0)));
     entity_set_model(k, 1);
     entity_set_grid(k, hull_grid());
+    // Snap to a grid face rather than a continuous yaw: 2 = Direction::Y
+    // (sim +y), 0 = Roll::Deg0. Hashed here (not just painted) so
+    // `rotate_carried_crate_x` / `roll_carried_crate_cw` have a value to turn.
+    entity_set_field(k, "dir", fixed(2));
+    entity_set_field(k, "roll", fixed(0));
+    entity_set_side(k, 2, 0);
+}
+
+/// `dir` (a `Direction` discriminant) rotated 90° around the sim +x axis —
+/// a Rhai-side mirror of `monada_script::Direction::rotate(self, Direction::X)`,
+/// since that Rust method isn't itself exposed over the host-API wall.
+/// Indexed by discriminant (X=0, NegX=1, Y=2, NegY=3, Z=4, NegZ=5): X and
+/// NegX are the rotation axis and stay fixed; the other four cycle
+/// Y -> Z -> NegY -> NegZ -> Y.
+fn rotate_dir_x(dir) {
+    let table = [0, 1, 4, 5, 3, 2];
+    table[dir]
+}
+
+/// `roll` (a `Roll` discriminant, 0-3) advanced one quarter-turn clockwise —
+/// a Rhai-side mirror of `monada_script::Roll::cw`.
+fn roll_cw(roll) { (roll + 1) % 4 }
+
+/// Debug aid for `entity_set_side` (key 1): while `c` carries a crate, spin
+/// its facing 90° around the sim +x axis, so a rotation is provable by eye —
+/// the crate's `model_box_sides` colours each of its 6 faces distinctly. A
+/// no-op with empty hands.
+fn rotate_carried_crate_x(c) {
+    let carried = to_int(entity_field(c, "carry"));
+    if carried != 0 {
+        let k = carried - 1;
+        let dir = rotate_dir_x(to_int(entity_field(k, "dir")));
+        entity_set_field(k, "dir", fixed(dir));
+        entity_set_side(k, dir, to_int(entity_field(k, "roll")));
+    }
+}
+
+/// Debug aid for `entity_set_side` (key 2): while `c` carries a crate, roll
+/// it one quarter-turn clockwise around whichever axis it currently faces.
+/// A no-op with empty hands.
+fn roll_carried_crate_cw(c) {
+    let carried = to_int(entity_field(c, "carry"));
+    if carried != 0 {
+        let k = carried - 1;
+        let roll = roll_cw(to_int(entity_field(k, "roll")));
+        entity_set_field(k, "roll", fixed(roll));
+        entity_set_side(k, to_int(entity_field(k, "dir")), roll);
+    }
 }
 
 /// Is the airlock open? HASHED ship state, so every peer's collision agrees.
@@ -523,13 +586,24 @@ fn step_use(c) {
     let btn = to_int(entity_field(c, "btn"));
     let prev = to_int(entity_field(c, "prev"));
     entity_set_field(c, "prev", fixed(btn));
-    // Bits that went 0 -> 1 this tick, over the EDGE bits only (1 = use,
-    // 2 = airlock). The flight controls above them (4 = burn, 8/16 = turn) are
-    // held states, read as they are — an engine fires while the key is down.
-    let pressed = btn & (3 - (prev & 3));
+    // Bits that went 0 -> 1 this tick, over any bit (`btn ^ prev` is the bits
+    // that changed since last tick; ANDing with `btn` keeps only the ones that
+    // are now down, i.e. rising edges). Only the EDGE bits below are read from
+    // `pressed` (1 = use, 2 = airlock, 32/64 = the crate-orient debug keys) —
+    // the flight controls between them (4 = burn, 8/16 = turn) are held
+    // states, read straight off `btn` in `step_ship` — an engine fires while
+    // the key is down, so computing their edge here would be harmless but
+    // unused.
+    let pressed = btn & (btn ^ prev);
 
     if (pressed & 2) == 2 {
         toggle_door();
+    }
+    if (pressed & 32) == 32 {
+        rotate_carried_crate_x(c);
+    }
+    if (pressed & 64) == 64 {
+        roll_carried_crate_cw(c);
     }
     if (pressed & 1) == 1 {
         let carried = to_int(entity_field(c, "carry"));
@@ -612,6 +686,11 @@ fn local_tick(dt) {
     let turn = action_axis("turn");
     if turn > 0 { btn = btn + 8; }
     if turn < 0 { btn = btn + 16; }
+    // Debug aids for `entity_set_side` (see `rotate_carried_crate_x` /
+    // `roll_carried_crate_cw`) — edge-triggered like `use`/`door`, above the
+    // flight bits so they never alias them.
+    if action_down("rotate_x") { btn = btn + 32; }
+    if action_down("roll_cw") { btn = btn + 64; }
     submit_command(0, 0, vec3(mv.x, mv.y, fixed(btn)));
 }
 

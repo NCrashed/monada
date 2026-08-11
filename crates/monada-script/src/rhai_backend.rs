@@ -312,7 +312,13 @@ impl ScriptBackend for RhaiBackend {
                 .collect()
         };
         for (grid, position, orientation) in poses {
-            pose_bound_grid(&self.grids, self.bridge.as_ref(), grid, position, orientation);
+            pose_bound_grid(
+                &self.grids,
+                self.bridge.as_ref(),
+                grid,
+                position,
+                orientation,
+            );
         }
     }
 }
@@ -613,6 +619,26 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
 
     let b = bridge.clone();
     engine.register_fn(
+        "model_box_sides",
+        #[allow(clippy::too_many_arguments)]
+        move |w: i64,
+              h: i64,
+              d: i64,
+              x: i64,
+              neg_x: i64,
+              y: i64,
+              neg_y: i64,
+              z: i64,
+              neg_z: i64|
+              -> i64 {
+            b.lock()
+                .expect("bridge mutex")
+                .model_box_sides(w, h, d, x, neg_x, y, neg_y, z, neg_z)
+        },
+    );
+
+    let b = bridge.clone();
+    engine.register_fn(
         "model_kv6",
         move |path: ImmutableString, turns: i64| -> i64 {
             b.lock()
@@ -672,6 +698,12 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     let b = bridge.clone();
     engine.register_fn("entity_set_facing", move |e: i64, yaw: Fixed| {
         b.lock().expect("bridge mutex").entity_set_facing(e, yaw);
+    });
+    let b = bridge.clone();
+    engine.register_fn("entity_set_side", move |e: i64, dir: i64, roll: i64| {
+        b.lock()
+            .expect("bridge mutex")
+            .entity_set_side(e, dir, roll);
     });
     let b = bridge.clone();
     engine.register_fn("entity_set_tint", move |e: i64, tint: i64| {

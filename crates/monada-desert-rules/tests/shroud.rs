@@ -30,7 +30,11 @@ impl MapRules for Plain {
     fn init(&mut self, host: &dyn Host) {
         host.volume_fill(
             (0, 0, 0),
-            (monada_desert_rules::MAP_CELLS - 1, monada_desert_rules::MAP_CELLS - 1, GROUND),
+            (
+                monada_desert_rules::MAP_CELLS - 1,
+                monada_desert_rules::MAP_CELLS - 1,
+                GROUND,
+            ),
             material::SAND,
             material::color(material::SAND),
         );
@@ -68,6 +72,21 @@ impl HostBridge for Counter {
     fn voxel_fill(&mut self, _: i64, _: i64, _: i64, _: i64, _: i64, _: i64, _: i64) {}
     fn voxel_set(&mut self, _: i64, _: i64, _: i64, _: i64) {}
     fn model_box(&mut self, _: i64, _: i64, _: i64, _: i64) -> i64 {
+        0
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn model_box_sides(
+        &mut self,
+        _: i64,
+        _: i64,
+        _: i64,
+        _: i64,
+        _: i64,
+        _: i64,
+        _: i64,
+        _: i64,
+        _: i64,
+    ) -> i64 {
         0
     }
     fn model_kv6(&mut self, _: &str, _: i64) -> i64 {
@@ -118,11 +137,7 @@ fn client(bridge: Arc<Mutex<dyn HostBridge>>) -> Client {
 
     let mut local = NativeLocalBackend::new(&world, &shared, &terrain, Box::new(Idle));
     local.set_volume(&phys);
-    Client {
-        sim,
-        local,
-        bridge,
-    }
+    Client { sim, local, bridge }
 }
 
 // --- the gate -------------------------------------------------------------

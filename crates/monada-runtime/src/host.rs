@@ -197,6 +197,28 @@ pub trait WorldRead {
         })
     }
 
+    /// Define a procedural box sprite with each of its 6 local faces a
+    /// distinct colour; returns its model id, or `-1`.
+    #[allow(clippy::too_many_arguments)]
+    fn model_box_sides(
+        &self,
+        w: i64,
+        h: i64,
+        d: i64,
+        x: i64,
+        neg_x: i64,
+        y: i64,
+        neg_y: i64,
+        z: i64,
+        neg_z: i64,
+    ) -> i64 {
+        self.bridge().map_or(-1, |b| {
+            b.lock()
+                .expect("bridge mutex")
+                .model_box_sides(w, h, d, x, neg_x, y, neg_y, z, neg_z)
+        })
+    }
+
     /// Bind an entity to a render model.
     fn entity_set_model(&self, entity: EntityId, model: i64) {
         if let Some(b) = self.bridge() {
@@ -243,6 +265,18 @@ pub trait WorldRead {
             b.lock()
                 .expect("bridge mutex")
                 .entity_set_facing(entity_arg(entity), yaw);
+        }
+    }
+
+    /// Snap an entity to one of the 6 axis-aligned grid faces, with one of
+    /// 4 quarter-turns around it. `dir`/`roll` are a `Direction`/`Roll`
+    /// discriminant each — this trait stays in `monada-runtime`, so it
+    /// takes the plain ints the bridge does, not the script-side enums.
+    fn entity_set_side(&self, entity: EntityId, dir: i64, roll: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .entity_set_side(entity_arg(entity), dir, roll);
         }
     }
 
@@ -316,8 +350,9 @@ pub trait WorldRead {
 
     /// Make an overlay grid whose cells are cubes, returning its id.
     fn grid_overlay(&self) -> i64 {
-        self.bridge()
-            .map_or(-1, |b| b.lock().expect("bridge mutex").grid_spawn_cubic(0, 0, 0))
+        self.bridge().map_or(-1, |b| {
+            b.lock().expect("bridge mutex").grid_spawn_cubic(0, 0, 0)
+        })
     }
 
     /// Paint a box into an overlay grid.
@@ -332,7 +367,9 @@ pub trait WorldRead {
     /// Rub one cell out of an overlay grid.
     fn overlay_clear(&self, grid: i64, x: i64, y: i64, z: i64) {
         if let Some(b) = self.bridge() {
-            b.lock().expect("bridge mutex").voxel_clear_in(grid, x, y, z);
+            b.lock()
+                .expect("bridge mutex")
+                .voxel_clear_in(grid, x, y, z);
         }
     }
 
@@ -536,10 +573,7 @@ pub trait Host: WorldRead {
             let mut nav = nav.lock().expect("nav mutex");
             let mut seen = std::collections::BTreeSet::new();
             for slide in &slides {
-                for column in [
-                    (slide.from.0, slide.from.1),
-                    (slide.to.0, slide.to.1),
-                ] {
+                for column in [(slide.from.0, slide.from.1), (slide.to.0, slide.to.1)] {
                     if seen.insert(column) {
                         nav.invalidate(column, column);
                     }
@@ -678,10 +712,7 @@ type CellBox = ((i64, i64, i64), (i64, i64, i64));
 
 /// The inclusive cell box a set of slides covers, or `None` for none.
 fn bounds(slides: &[crate::Slide]) -> Option<CellBox> {
-    let mut it = slides
-        .iter()
-        .flat_map(|s| [s.from, s.to])
-        .map(|c| (c, c));
+    let mut it = slides.iter().flat_map(|s| [s.from, s.to]).map(|c| (c, c));
     let (mut lo, mut hi) = it.next()?;
     for (a, b) in it {
         lo = (lo.0.min(a.0), lo.1.min(a.1), lo.2.min(a.2));
@@ -902,9 +933,8 @@ impl LocalHost for RuntimeHost {
     }
 
     fn aim_yaw(&self) -> Fixed {
-        self.bridge().map_or(Fixed::ZERO, |b| {
-            b.lock().expect("bridge mutex").aim_yaw()
-        })
+        self.bridge()
+            .map_or(Fixed::ZERO, |b| b.lock().expect("bridge mutex").aim_yaw())
     }
 
     fn ui_clicks(&self) -> i64 {

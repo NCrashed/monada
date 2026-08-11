@@ -21,11 +21,11 @@ use image::AnimationDecoder;
 
 use crate::autotile;
 use crate::bindings::{MapActionStates, MapActionValue, Part};
-use glam::{DQuat, DVec3, IVec2, IVec3, Vec2};
+use glam::{DMat3, DQuat, DVec3, IVec2, IVec3, Vec2};
 use monada_fixed::{Fixed, FixedQuat, FixedVec3};
 use monada_format::ActionDecl;
 use monada_render::OrbitCamera;
-use monada_script::{HostBridge, VoxelStore};
+use monada_script::{Direction, HostBridge, Roll, VoxelStore};
 use monada_sim::{Command, EntityId, World};
 use roxlap_core::kfa_draw::{compose_attachment, solve_kfa_limbs};
 use roxlap_core::opticast::OpticastSettings;
@@ -97,6 +97,83 @@ const ACTOR_SIDES: [&str; 8] = [
 /// `atan2(dy, -dx) = PI - yaw`.
 fn facing_to_world_yaw(sim_yaw: f64) -> f64 {
     std::f64::consts::PI - sim_yaw
+}
+
+/// Decode an `entity_set_side` `dir` argument — a `Direction` discriminant
+/// crossing the host-API wall as a plain `i64` (`monada-runtime` cannot
+/// name the `monada-script` type). Out of range is `None`, the same
+/// convention as an out-of-range grid handle: ignored, not a panic.
+fn direction_from_i64(dir: i64) -> Option<Direction> {
+    match dir {
+        0 => Some(Direction::X),
+        1 => Some(Direction::NegX),
+        2 => Some(Direction::Y),
+        3 => Some(Direction::NegY),
+        4 => Some(Direction::Z),
+        5 => Some(Direction::NegZ),
+        _ => None,
+    }
+}
+
+/// Decode an `entity_set_side` `roll` argument — a `Roll` discriminant.
+fn roll_from_i64(roll: i64) -> Option<Roll> {
+    match roll {
+        0 => Some(Roll::Deg0),
+        1 => Some(Roll::Deg90),
+        2 => Some(Roll::Deg180),
+        3 => Some(Roll::Deg270),
+        _ => None,
+    }
+}
+
+/// `dir`'s unit vector in SIM space.
+fn direction_axis(dir: Direction) -> DVec3 {
+    match dir {
+        Direction::X => DVec3::X,
+        Direction::NegX => DVec3::NEG_X,
+        Direction::Y => DVec3::Y,
+        Direction::NegY => DVec3::NEG_Y,
+        Direction::Z => DVec3::Z,
+        Direction::NegZ => DVec3::NEG_Z,
+    }
+}
+
+/// The WORLD-space rotation for `(dir, roll)`: `dir` picks the box's
+/// forward face, `roll` turns a quarter-turn around it. Ports `world_of`'s
+/// sign flip (`(x,y,z) -> (-x,y,-z)`, see its doc comment) from positions
+/// to directions — only the sign pattern matters here, not `world_of`'s
+/// scale/offset — then builds the rotation from the resulting world nose
+/// and up, the same construction a pure yaw reduces to: locked in by
+/// `side_quat_matches_facing_on_the_horizontal` below, which checks all 4
+/// horizontal faces against `entity_set_facing`'s own basis.
+fn side_quat(dir: Direction, roll: Roll) -> DQuat {
+    let mirror = |v: DVec3| DVec3::new(-v.x, v.y, -v.z);
+
+    let nose_sim = direction_axis(dir);
+    // The roll reference is sim +Z ("up") rotated around the nose axis —
+    // except when the nose IS the Z axis, which has no perpendicular Z to
+    // reference, so it rolls around sim +X instead. Either choice is a
+    // free pick: nothing yet gives a vertical face a "home" roll to match.
+    let up_ref = if matches!(dir, Direction::Z | Direction::NegZ) {
+        DVec3::X
+    } else {
+        DVec3::Z
+    };
+    let roll_angle = match roll {
+        Roll::Deg0 => 0.0,
+        Roll::Deg90 => std::f64::consts::FRAC_PI_2,
+        Roll::Deg180 => std::f64::consts::PI,
+        Roll::Deg270 => 3.0 * std::f64::consts::FRAC_PI_2,
+    };
+    let up_sim = DQuat::from_axis_angle(nose_sim, roll_angle) * up_ref;
+
+    // Local +X is forward (matches `entity_set_facing`'s `rot * DVec3::X`);
+    // local -Z is up (roxlap's world up is -z, see `actor_pose`'s `BillboardUp`),
+    // so local +Z carries the up reference's mirrored OPPOSITE.
+    let forward = mirror(nose_sim);
+    let local_z = -mirror(up_sim);
+    let local_y = local_z.cross(forward);
+    DQuat::from_mat3(&DMat3::from_cols(forward, local_y, local_z))
 }
 
 /// A pending background-music change the map requested (`play_music` /
@@ -487,6 +564,49 @@ fn sprite_box(w: u32, h: u32, d: u32, color: u32, shaded: bool) -> Sprite {
     s
 }
 
+/// A box sprite model with each of its 6 local faces painted a distinct
+/// colour — a debug/demo aid that makes a rotation visible without relying
+/// on directional shading alone to tell one side from another. `x`/`neg_x`/
+/// `y`/`neg_y`/`z`/`neg_z` are the box's own local axes: the same local
+/// X/Y/Z `side_quat` rotates (local +X is the `entity_set_side` "forward"
+/// [`direction_axis`] maps onto, before mirroring into world space). A
+/// voxel shared by more than one face — an edge or corner — shows
+/// whichever of z, then y, then x it matches; a fixed but arbitrary
+/// priority, since one voxel can only carry one colour.
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+fn sprite_box_sides(
+    w: u32,
+    h: u32,
+    d: u32,
+    x: u32,
+    neg_x: u32,
+    y: u32,
+    neg_y: u32,
+    z: u32,
+    neg_z: u32,
+) -> Sprite {
+    let kv6 = Kv6::from_fn(w, h, d, |vx, vy, vz| {
+        Some(VoxColor(if vz == 0 {
+            neg_z
+        } else if vz == d - 1 {
+            z
+        } else if vy == 0 {
+            neg_y
+        } else if vy == h - 1 {
+            y
+        } else if vx == 0 {
+            neg_x
+        } else if vx == w - 1 {
+            x
+        } else {
+            // Interior: `from_fn` only emits surface voxels, so this
+            // colour is never actually seen.
+            0x8080_8080
+        }))
+    });
+    Sprite::axis_aligned(kv6, [0.0, 0.0, 0.0])
+}
+
 /// One 90°-clockwise quarter-turn of a sprite about the vertical axis,
 /// applied `turns` times by `model_kv6` so a map can face its asymmetric art
 /// (e.g. opposing sides facing each other). Rotating the sprite *basis*
@@ -726,7 +846,8 @@ const POSE_SNAP_DOT: f64 = std::f64::consts::FRAC_1_SQRT_2;
 /// Is the step from `a` to `b` a re-authored pose rather than a tick of
 /// motion — i.e. must it snap rather than ease?
 fn is_pose_jump(a: (DVec3, DQuat), b: (DVec3, DQuat)) -> bool {
-    a.0.distance_squared(b.0) > POSE_SNAP_DIST * POSE_SNAP_DIST || a.1.dot(b.1).abs() < POSE_SNAP_DOT
+    a.0.distance_squared(b.0) > POSE_SNAP_DIST * POSE_SNAP_DIST
+        || a.1.dot(b.1).abs() < POSE_SNAP_DOT
 }
 
 /// How many world voxels one sim cell spans along z inside a grid with this
@@ -1291,6 +1412,13 @@ pub struct MapRender {
     /// (decision L4), and which kind an entity is bound to is not settled
     /// until `build_instances` walks it.
     entity_yaw: BTreeMap<EntityId, f64>,
+    /// Per-entity full orientation set by `entity_set_side`, in WORLD
+    /// space (already through `world_of`'s sim→world map — see
+    /// `side_quat`). Geometry-turning only, like `entity_yaw`, and
+    /// preferred over it in `seat_sprite` when both are set: a side is a
+    /// stronger claim (6 faces × 4 rolls) than a bare yaw, so it wins
+    /// rather than composing.
+    entity_orient: BTreeMap<EntityId, DQuat>,
     entity_actors: BTreeMap<EntityId, ActorInst>,
     /// Per-entity live character state (entities bound to a `.rkc` model).
     /// The character twin of [`entity_actors`](Self::entity_actors), driven
@@ -1324,10 +1452,12 @@ pub struct MapRender {
     ring_ids: Vec<roxlap_render::SpriteInstanceId>,
     /// Static-sprite props that ride a TURNING grid, computed by
     /// `build_instances` for [`sync_props`](Self::sync_props) to place:
-    /// `(sprite model index, world seat, grid rotation, pivot drop)`. They
-    /// cannot use the static instance list — it has no orientation — so they
-    /// live on the dynamic layer, posed by the grid's own basis.
-    prop_targets: Vec<(usize, DVec3, DQuat, f64)>,
+    /// `(sprite model index, world seat, full basis rotation, pivot-drop
+    /// rotation, pivot drop)`. They cannot use the static instance list — it
+    /// has no orientation — so they live on the dynamic layer, posed by the
+    /// grid's own basis. The drop rotation is kept separate from the full
+    /// basis rotation: see `seat_sprite`'s split of `grid_rot` from `rot`.
+    prop_targets: Vec<(usize, DVec3, DQuat, DQuat, f64)>,
     /// Sprite models registered with the renderer's dynamic layer, by their
     /// index in [`SpriteSet::models`]. Registered lazily, once per model.
     prop_models: BTreeMap<usize, roxlap_render::SpriteModelId>,
@@ -1534,6 +1664,7 @@ impl MapRender {
             models: BTreeMap::new(),
             entity_grid: BTreeMap::new(),
             entity_yaw: BTreeMap::new(),
+            entity_orient: BTreeMap::new(),
             entity_actors: BTreeMap::new(),
             entity_chars: BTreeMap::new(),
             actor_targets: Vec::new(),
@@ -2205,10 +2336,17 @@ impl MapRender {
         // path stops moving. The desert's vehicle drives due +x with
         // heading 0 until it reaches the map edge, so it sat still on
         // screen while the simulation drove it across the dunes.
-        let facing = self.entity_yaw.get(&e).copied().map(|y| {
-            // World yaw, not sim yaw: `world_of` mirrors X, so a sim
-            // heading reads as `PI - yaw` on screen (`facing_to_world_yaw`).
-            DQuat::from_rotation_z(facing_to_world_yaw(y))
+        // `entity_set_side` wins over `entity_set_facing` when a script sets
+        // both: a side is a stronger claim (6 faces * 4 rolls) than a bare
+        // yaw, and composing the two would need a precedence rule with no
+        // obvious right answer (a scripted side is presumably deliberate,
+        // not a stale yaw the map forgot to clear).
+        let facing = self.entity_orient.get(&e).copied().or_else(|| {
+            self.entity_yaw.get(&e).copied().map(|y| {
+                // World yaw, not sim yaw: `world_of` mirrors X, so a sim
+                // heading reads as `PI - yaw` on screen (`facing_to_world_yaw`).
+                DQuat::from_rotation_z(facing_to_world_yaw(y))
+            })
         });
         let rot = match (grid_rot, facing) {
             (Some(g), Some(f)) => Some(g * f),
@@ -2216,7 +2354,19 @@ impl MapRender {
             (None, f) => f,
         };
         if let (true, Some(rot)) = (self.dynamic_layer(), rot) {
-            self.prop_targets.push((si, w, rot, drop));
+            // The pivot-drop offset (`sync_props`) turns with `drop_rot`, not
+            // the full `rot`: it exists so a hull rolled onto its side pushes
+            // a resting crate sideways instead of down (the grid tipping the
+            // FLOOR the model's local -Z sits on). `facing`/`entity_orient` is
+            // a different thing — the model's OWN pose, e.g. a crate spun in
+            // a crew member's hand — and folding it into the drop rotation
+            // makes the model orbit the entity's position instead of turning
+            // in place, since the offset vector swings every time the model's
+            // own orientation changes rather than staying fixed. So only the
+            // grid contributes to the drop; `rot` (grid * facing) still drives
+            // the drawn basis.
+            let drop_rot = grid_rot.unwrap_or(DQuat::IDENTITY);
+            self.prop_targets.push((si, w, rot, drop_rot, drop));
         } else {
             self.sprites.instances.push(SpriteInstanceDesc {
                 model: si,
@@ -3061,7 +3211,10 @@ impl MapRender {
         // be a POSED instance rather than a positional one, and the posed
         // layer is what `set_sprites` resets — so the static set must be
         // uploaded once instead of rebuilt per frame.
-        !self.actors.is_empty() || !self.characters.is_empty() || !self.entity_yaw.is_empty()
+        !self.actors.is_empty()
+            || !self.characters.is_empty()
+            || !self.entity_yaw.is_empty()
+            || !self.entity_orient.is_empty()
     }
 
     /// Draw this map: upload its sprites and render its scene, lit by the
@@ -3276,7 +3429,7 @@ impl MapRender {
         for id in self.prop_ids.drain(..) {
             renderer.remove_sprite_instance(id);
         }
-        for (si, seat, rot, drop) in std::mem::take(&mut self.prop_targets) {
+        for (si, seat, rot, drop_rot, drop) in std::mem::take(&mut self.prop_targets) {
             let model = if let Some(&m) = self.prop_models.get(&si) {
                 m
             } else {
@@ -3288,7 +3441,7 @@ impl MapRender {
                 m
             };
             let axis = |v: DVec3| [v.x as f32, v.y as f32, v.z as f32];
-            let pos = seat + rot * DVec3::new(0.0, 0.0, -drop);
+            let pos = seat + drop_rot * DVec3::new(0.0, 0.0, -drop);
             let xf = DynSpriteTransform {
                 pos: axis(pos),
                 right: axis(rot * DVec3::X),
@@ -3416,6 +3569,33 @@ impl HostBridge for MapRender {
         self.sprites
             .models
             .push(sprite_box(w as u32, h as u32, d as u32, color as u32, true));
+        self.push_sprite_model(self.sprites.models.len() - 1)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+    fn model_box_sides(
+        &mut self,
+        w: i64,
+        h: i64,
+        d: i64,
+        x: i64,
+        neg_x: i64,
+        y: i64,
+        neg_y: i64,
+        z: i64,
+        neg_z: i64,
+    ) -> i64 {
+        self.sprites.models.push(sprite_box_sides(
+            w as u32,
+            h as u32,
+            d as u32,
+            x as u32,
+            neg_x as u32,
+            y as u32,
+            neg_y as u32,
+            z as u32,
+            neg_z as u32,
+        ));
         self.push_sprite_model(self.sprites.models.len() - 1)
     }
 
@@ -3775,6 +3955,14 @@ impl HostBridge for MapRender {
         // the binding is a sprite, an actor or a character is not settled
         // until `build_instances` walks it.
         self.entity_yaw.insert(e, yaw.to_f64());
+    }
+
+    fn entity_set_side(&mut self, entity: i64, dir: i64, roll: i64) {
+        let (Some(dir), Some(roll)) = (direction_from_i64(dir), roll_from_i64(roll)) else {
+            return;
+        };
+        self.entity_orient
+            .insert(EntityId(entity as u64), side_quat(dir, roll));
     }
 
     fn entity_set_tint(&mut self, entity: i64, tint: i64) {
@@ -5742,7 +5930,10 @@ mod tests {
         );
         r.entity_set_model(unit.0 as i64, hull);
         let (_, picked) = r.pick(&world, eye, dir);
-        assert_eq!(picked, unit.0 as i64, "the unit under the cursor was missed");
+        assert_eq!(
+            picked, unit.0 as i64,
+            "the unit under the cursor was missed"
+        );
     }
 
     /// A plain KV6 model with a script-set facing must turn its GEOMETRY
@@ -5790,10 +5981,10 @@ mod tests {
         // heading reads as `PI - yaw` on screen. Getting this backwards
         // is a tank that turns the wrong way — visible, but only to an
         // eye that knows which way it asked for.
-        let (_, _, rot, _) = r.prop_targets[0];
+        let (_, _, rot, _, _) = r.prop_targets[0];
         let nose = rot * DVec3::X;
-        let want = DQuat::from_rotation_z(facing_to_world_yaw(std::f64::consts::FRAC_PI_2))
-            * DVec3::X;
+        let want =
+            DQuat::from_rotation_z(facing_to_world_yaw(std::f64::consts::FRAC_PI_2)) * DVec3::X;
         assert!(
             (nose - want).length() < 1e-9,
             "the hull points at {nose:?}, expected {want:?}"
@@ -5818,7 +6009,10 @@ mod tests {
         let mut world = World::new(0);
         let arch = world.register_archetype(&["heading"]);
         let tank = world.spawn(arch);
-        world.set_position(tank, FixedVec3::new(Fixed::from_int(3), Fixed::ZERO, Fixed::ZERO));
+        world.set_position(
+            tank,
+            FixedVec3::new(Fixed::from_int(3), Fixed::ZERO, Fixed::ZERO),
+        );
         r.entity_set_model(tank.0 as i64, hull);
         r.entity_set_facing(tank.0 as i64, Fixed::ZERO);
 
@@ -5833,15 +6027,219 @@ mod tests {
 
         // …and it must follow the entity, which is the property the freeze
         // actually broke.
-        world.set_position(tank, FixedVec3::new(Fixed::from_int(9), Fixed::ZERO, Fixed::ZERO));
+        world.set_position(
+            tank,
+            FixedVec3::new(Fixed::from_int(9), Fixed::ZERO, Fixed::ZERO),
+        );
         r.build_instances(&world);
-        let (_, seat, _, _) = r.prop_targets[0];
+        let (_, seat, _, _, _) = r.prop_targets[0];
         assert!(
             (seat.x - world_of(FixedVec3::new(Fixed::from_int(9), Fixed::ZERO, Fixed::ZERO)).x)
                 .abs()
                 < 1e-9,
             "the posed instance did not follow the entity"
         );
+    }
+
+    /// `entity_set_side`'s basis must agree with `entity_set_facing`'s on
+    /// every horizontal face: `side_quat(dir, Deg0)`'s nose has to be the
+    /// same world vector `entity_set_facing`'s `PI - yaw` basis already
+    /// produces for the matching sim yaw, or a map switching between the
+    /// two verbs would see its model snap by however far the two
+    /// conventions disagree — exactly the handedness bug this test is
+    /// here to catch.
+    #[test]
+    fn side_quat_matches_facing_on_the_horizontal() {
+        let cases = [
+            (Direction::X, 0.0),
+            (Direction::Y, std::f64::consts::FRAC_PI_2),
+            (Direction::NegX, std::f64::consts::PI),
+            (Direction::NegY, -std::f64::consts::FRAC_PI_2),
+        ];
+        for (dir, yaw) in cases {
+            let from_side = side_quat(dir, Roll::Deg0) * DVec3::X;
+            let from_facing = DQuat::from_rotation_z(facing_to_world_yaw(yaw)) * DVec3::X;
+            assert!(
+                (from_side - from_facing).length() < 1e-9,
+                "{dir:?}: side gave {from_side:?}, facing gave {from_facing:?}"
+            );
+        }
+    }
+
+    /// A `entity_set_side` model turns its GEOMETRY exactly like a faced one
+    /// (decision L4) — same routing to the posed/dynamic path, same reason: a
+    /// voxel solid has no pre-drawn side to pick.
+    #[test]
+    fn a_sided_model_turns_its_geometry() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let hull = r.model_box(24, 16, 10, 0x80a8_b48c);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["heading"]);
+        let tank = world.spawn(arch);
+        world.set_position(
+            tank,
+            FixedVec3::new(Fixed::from_int(10), Fixed::from_int(10), Fixed::ZERO),
+        );
+        r.entity_set_model(tank.0 as i64, hull);
+
+        // Unturned: nothing dynamic in the map, so the cheap static path.
+        r.build_instances(&world);
+        assert_eq!(r.prop_targets.len(), 0);
+        assert_eq!(r.sprites.instances.len(), 1, "placed, not posed");
+
+        // Face sim +y, unrolled.
+        r.entity_set_side(tank.0 as i64, Direction::Y as i64, Roll::Deg0 as i64);
+        r.build_instances(&world);
+        assert_eq!(r.prop_targets.len(), 1, "a sided model is posed");
+        assert!(
+            r.sprites.instances.is_empty(),
+            "…and leaves the static path, or it would be drawn twice"
+        );
+
+        let (_, _, rot, _, _) = r.prop_targets[0];
+        let nose = rot * DVec3::X;
+        let want =
+            DQuat::from_rotation_z(facing_to_world_yaw(std::f64::consts::FRAC_PI_2)) * DVec3::X;
+        assert!(
+            (nose - want).length() < 1e-9,
+            "the hull points at {nose:?}, expected {want:?}"
+        );
+    }
+
+    /// A model spun in place with `entity_set_side` must turn about its OWN
+    /// centre, not swing around it: with no grid underneath it, the pivot-drop
+    /// offset (`sync_props`'s `seat + drop_rot * (0,0,-drop)`) must stay
+    /// IDENTITY-rotated regardless of which way the model itself faces, since
+    /// there is no floor here for the model's local -Z to stay planted
+    /// against. Folding the model's own orientation into `drop_rot` (as it
+    /// once did) made the offset vector swing with every `entity_set_side`
+    /// call — the same rotation that turns the geometry also dragged the
+    /// whole model sideways, so what should have been a spin in place read as
+    /// an orbit around the entity's position.
+    #[test]
+    fn entity_set_side_spins_the_model_without_moving_it() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let hull = r.model_box(24, 16, 10, 0x80a8_b48c);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["heading"]);
+        let tank = world.spawn(arch);
+        world.set_position(
+            tank,
+            FixedVec3::new(Fixed::from_int(10), Fixed::from_int(10), Fixed::ZERO),
+        );
+        r.entity_set_model(tank.0 as i64, hull);
+
+        let mut seats = Vec::new();
+        let mut bases = Vec::new();
+        for (dir, roll) in [
+            (Direction::X, Roll::Deg0),
+            (Direction::Y, Roll::Deg90),
+            (Direction::NegZ, Roll::Deg270),
+        ] {
+            r.entity_set_side(tank.0 as i64, dir as i64, roll as i64);
+            r.build_instances(&world);
+            let (_, seat, rot, drop_rot, drop) = r.prop_targets[0];
+            assert_eq!(
+                drop_rot,
+                DQuat::IDENTITY,
+                "{dir:?}/{roll:?}: no grid to tip, so the drop rotation must stay put"
+            );
+            seats.push(seat + drop_rot * DVec3::new(0.0, 0.0, -drop));
+            bases.push(rot * DVec3::X);
+        }
+        for w in seats.windows(2) {
+            assert!(
+                (w[0] - w[1]).length() < 1e-9,
+                "the drawn pivot moved between orientations: {:?} -> {:?}",
+                w[0],
+                w[1]
+            );
+        }
+        assert!(
+            (bases[0] - bases[1]).length() > 1e-3 && (bases[1] - bases[2]).length() > 1e-3,
+            "the model's basis must actually have turned between the three sides"
+        );
+    }
+
+    /// A side of `(X, Deg0)` — the "do nothing" orientation — must still be
+    /// posed: the `entity_set_side` analogue of `a_facing_of_zero_is_still_posed`.
+    /// Recording a side is what makes a map dynamic-layer, so leaving the
+    /// identity case on the static path would freeze the model exactly the
+    /// way a zero facing once did.
+    #[test]
+    fn a_side_of_x_deg0_is_still_posed() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let hull = r.model_box(24, 16, 10, 0x80a8_b48c);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["heading"]);
+        let tank = world.spawn(arch);
+        world.set_position(
+            tank,
+            FixedVec3::new(Fixed::from_int(3), Fixed::ZERO, Fixed::ZERO),
+        );
+        r.entity_set_model(tank.0 as i64, hull);
+        r.entity_set_side(tank.0 as i64, Direction::X as i64, Roll::Deg0 as i64);
+
+        r.build_instances(&world);
+        assert_eq!(
+            r.prop_targets.len(),
+            1,
+            "an identity side is still a side: the model must be posed"
+        );
+        assert!(r.sprites.instances.is_empty());
+    }
+
+    /// `entity_set_side` wins over an earlier `entity_set_facing` on the
+    /// same entity — the precedence `seat_sprite` picks when a script sets
+    /// both (accidentally or not).
+    #[test]
+    fn entity_set_side_wins_over_entity_set_facing() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let hull = r.model_box(24, 16, 10, 0x80a8_b48c);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["heading"]);
+        let tank = world.spawn(arch);
+        world.set_position(
+            tank,
+            FixedVec3::new(Fixed::from_int(3), Fixed::ZERO, Fixed::ZERO),
+        );
+        r.entity_set_model(tank.0 as i64, hull);
+        r.entity_set_facing(tank.0 as i64, Fixed::ZERO);
+        r.entity_set_side(tank.0 as i64, Direction::Y as i64, Roll::Deg0 as i64);
+
+        r.build_instances(&world);
+        let (_, _, rot, _, _) = r.prop_targets[0];
+        let nose = rot * DVec3::X;
+        let want =
+            DQuat::from_rotation_z(facing_to_world_yaw(std::f64::consts::FRAC_PI_2)) * DVec3::X;
+        assert!(
+            (nose - want).length() < 1e-9,
+            "facing (yaw 0) should have been overridden by side (+y): got {nose:?}, want {want:?}"
+        );
+    }
+
+    /// An out-of-range `dir`/`roll` discriminant is ignored, the same
+    /// convention as an out-of-range grid handle elsewhere in this bridge —
+    /// not a panic, and not a pose.
+    #[test]
+    fn entity_set_side_ignores_an_out_of_range_discriminant() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let hull = r.model_box(24, 16, 10, 0x80a8_b48c);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["heading"]);
+        let tank = world.spawn(arch);
+        world.set_position(tank, FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ZERO));
+        r.entity_set_model(tank.0 as i64, hull);
+        r.entity_set_side(tank.0 as i64, 99, 0);
+
+        r.build_instances(&world);
+        assert_eq!(
+            r.prop_targets.len(),
+            0,
+            "a bad discriminant must not pose the model"
+        );
+        assert_eq!(r.sprites.instances.len(), 1);
     }
 
     /// A prop riding a TURNING grid must be POSED, not merely placed: roxlap's
@@ -5907,7 +6305,7 @@ mod tests {
             "the crate in the world frame stays on the static path"
         );
 
-        let (si, seat, rot, drop) = r.prop_targets[0];
+        let (si, seat, rot, drop_rot, drop) = r.prop_targets[0];
         assert_eq!(si, crate_model as usize, "posed with its own sprite model");
         let grid_rot = r
             .scene
@@ -5920,12 +6318,16 @@ mod tests {
             "the prop's basis IS the hull's rotation"
         );
         assert!(
+            (drop_rot * DVec3::X - grid_rot * DVec3::X).length() < 1e-12,
+            "with no entity_set_side, the drop rotation is the hull's too"
+        );
+        assert!(
             (seat - r.place(stowed, p)).length() < 1e-9,
             "and it is seated where the entity rides"
         );
         // The pivot drop is a MODEL-space offset, so a rolled hull must push the
         // crate along the hull's own down, not the world's.
-        let posed = seat + rot * DVec3::new(0.0, 0.0, -drop);
+        let posed = seat + drop_rot * DVec3::new(0.0, 0.0, -drop);
         let naive = seat - DVec3::new(0.0, 0.0, drop);
         assert!(
             drop > 0.0 && (posed - naive).length() > 1e-6,

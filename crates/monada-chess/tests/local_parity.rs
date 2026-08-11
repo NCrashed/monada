@@ -48,6 +48,21 @@ impl HostBridge for Recorder {
     fn model_box(&mut self, _w: i64, _h: i64, _d: i64, _color: i64) -> i64 {
         -1
     }
+    #[allow(clippy::too_many_arguments)]
+    fn model_box_sides(
+        &mut self,
+        _w: i64,
+        _h: i64,
+        _d: i64,
+        _x: i64,
+        _neg_x: i64,
+        _y: i64,
+        _neg_y: i64,
+        _z: i64,
+        _neg_z: i64,
+    ) -> i64 {
+        -1
+    }
     fn model_kv6(&mut self, _asset_path: &str, _turns: i64) -> i64 {
         -1
     }
@@ -138,8 +153,7 @@ fn run_native_local(clicks: &[Click], player: Option<i64>) -> Emitted {
     let world = started_world();
     let (rec, bridge) = recorder(player);
     let terrain = monada_runtime::shared_terrain();
-    let mut local =
-        NativeLocalBackend::new(&world, &bridge, &terrain, Box::new(ChessLocal));
+    let mut local = NativeLocalBackend::new(&world, &bridge, &terrain, Box::new(ChessLocal));
     local.on_local_init().expect("local_init");
     for &(x, y) in clicks {
         local.on_pointer(0, square(x, y), -1).expect("pointer");
@@ -211,8 +225,7 @@ fn the_command_names_the_selected_piece() {
     let world = started_world();
     let (rec, bridge) = recorder(None);
     let terrain = monada_runtime::shared_terrain();
-    let mut local =
-        NativeLocalBackend::new(&world, &bridge, &terrain, Box::new(ChessLocal));
+    let mut local = NativeLocalBackend::new(&world, &bridge, &terrain, Box::new(ChessLocal));
     for &(x, y) in &[(4, 1), (4, 3)] {
         local.on_pointer(0, square(x, y), -1).expect("pointer");
     }
@@ -242,8 +255,7 @@ fn the_gesture_follows_the_world() {
     let mut sim = NativeBackend::new(world.clone(), Box::new(ChessRules::new()));
     sim.set_bridge(&bridge);
     let terrain = monada_runtime::shared_terrain();
-    let mut local =
-        NativeLocalBackend::new(&world, &bridge, &terrain, Box::new(ChessLocal));
+    let mut local = NativeLocalBackend::new(&world, &bridge, &terrain, Box::new(ChessLocal));
 
     // Click e2 then e4, then route the command the way the host would.
     local.on_pointer(0, square(4, 1), -1).expect("pointer");

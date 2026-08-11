@@ -128,6 +128,7 @@ to place in a command payload.
 | Function | Result |
 |---|---|
 | `model_box(w, h, d, color)` | define a procedural box sprite; returns a model id |
+| `model_box_sides(w, h, d, x, neg_x, y, neg_y, z, neg_z)` | define a procedural box sprite with each of its 6 local faces a distinct colour; returns a model id (requires `host_api` 25) |
 | `model_kv6(path, turns)` | define a sprite from a KV6 asset; returns a model id |
 | `model_actor(path, states, height)` | define an animated 8-direction billboard; returns a model id |
 | `model_character(path, height)` | define a rigged `.rkc` voxel character (skeleton + named clips); returns a model id, or `-1` if the asset is missing or unparsable (requires `host_api` 14) |
@@ -139,6 +140,7 @@ to place in a command payload.
 | `entity_grid(entity)` | the grid an entity rides, or `-1` |
 | `entity_set_anim(entity, state)` | set an entity's animation: an actor state, or a character's `.rkc` clip name (an unknown name keeps the current one) |
 | `entity_set_facing(entity, yaw)` | set an entity's facing yaw (radians): an actor picks its directional sprite, a character turns its geometry |
+| `entity_set_side(entity, dir, roll)` | set an entity's axis-aligned side and roll — a discrete alternative to `entity_set_facing` that can point a KV6/box model along any of the 6 grid faces (`dir`) with any of 4 quarter-turns around it (`roll`), not just a horizontal turn. `dir`/`roll` are `Direction`/`Roll` discriminants; a billboard actor ignores it (requires `host_api` 24) |
 | `entity_set_tint(entity, tint)` | multiply an actor's sprite by a `0xRRGGBB` tint (billboard actors only) |
 
 A **billboard actor** is pre-drawn art: eight GIF facings the renderer picks

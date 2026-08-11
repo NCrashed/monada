@@ -316,6 +316,18 @@ fn crate_world(world: &SharedWorld, b: &RhaiDriver, i: usize) -> FixedVec3 {
     grids.to_world(grids.grid_of(k), p)
 }
 
+/// A crate's `dir`/`roll` field (the `Direction`/`Roll` discriminants
+/// `entity_set_side` was last called with).
+fn crate_field(world: &SharedWorld, i: usize, name: &str) -> i64 {
+    let k = crate_of(world, i);
+    world
+        .lock()
+        .unwrap()
+        .field(k, name)
+        .expect("crate field")
+        .to_f64() as i64
+}
+
 fn crew_carry(world: &SharedWorld) -> i64 {
     let w = world.lock().unwrap();
     let e = w.entities(CREW)[0];
@@ -386,6 +398,49 @@ fn use_picks_a_crate_up_and_sets_it_down() {
         0,
         "set down INSIDE the ship, so it stays in the ship's frame"
     );
+}
+
+#[test]
+fn keys_1_and_2_turn_a_carried_crate() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0)); // spawn at (5, 2); crate 0 waits at (6, 2)
+    assert_eq!(
+        crate_field(&world, 0, "dir"),
+        2,
+        "stowed facing Direction::Y"
+    );
+    assert_eq!(crate_field(&world, 0, "roll"), 0, "stowed at Roll::Deg0");
+
+    // Bit 32 (key 1) is a no-op with empty hands.
+    step(&mut b, &input_btn(0, 0, 32));
+    assert_eq!(
+        crate_field(&world, 0, "dir"),
+        2,
+        "nobody is carrying it yet"
+    );
+
+    step(&mut b, &input_btn(0, 0, 1)); // F: pick the crate up
+    assert!(crew_carry(&world) != 0, "carrying it");
+
+    step(&mut b, &input_btn(0, 0, 32)); // 1: rotate around sim +x
+    assert_eq!(
+        crate_field(&world, 0, "dir"),
+        4,
+        "Direction::Y rotated 90° around X lands on Direction::Z"
+    );
+    // Holding it does not repeat the turn every tick — only the rising edge
+    // fires, same as `use`/`door`.
+    step(&mut b, &input_btn(0, 0, 32));
+    assert_eq!(crate_field(&world, 0, "dir"), 4, "held, not repeated");
+
+    step(&mut b, &input_btn(0, 0, 64)); // 2: roll CW
+    assert_eq!(
+        crate_field(&world, 0, "roll"),
+        1,
+        "Roll::Deg0 CW is Roll::Deg90"
+    );
+    step(&mut b, &input_btn(0, 0, 64)); // held
+    assert_eq!(crate_field(&world, 0, "roll"), 1, "held, not repeated");
 }
 
 #[test]
@@ -590,6 +645,21 @@ impl monada_script::HostBridge for Keys {
     fn model_box(&mut self, _w: i64, _h: i64, _d: i64, _color: i64) -> i64 {
         -1
     }
+    #[allow(clippy::too_many_arguments)]
+    fn model_box_sides(
+        &mut self,
+        _w: i64,
+        _h: i64,
+        _d: i64,
+        _x: i64,
+        _neg_x: i64,
+        _y: i64,
+        _neg_y: i64,
+        _z: i64,
+        _neg_z: i64,
+    ) -> i64 {
+        -1
+    }
     fn model_kv6(&mut self, _asset_path: &str, _turns: i64) -> i64 {
         -1
     }
@@ -641,4 +711,10 @@ fn every_control_reaches_the_command() {
         12,
         "burning while turning is one command, not a choice"
     );
+    assert_eq!(
+        local_mask(&["rotate_x"], &[]),
+        32,
+        "1: rotate a carried crate"
+    );
+    assert_eq!(local_mask(&["roll_cw"], &[]), 64, "2: roll it CW");
 }
