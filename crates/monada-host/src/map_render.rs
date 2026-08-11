@@ -916,7 +916,10 @@ const WHEEL_RENDER_SCALE: f64 = 1.5;
 /// [`PUFF_TTL`] seconds. World position is the cell centre at spawn; the
 /// rise is derived from `age` at draw time.
 struct Puff {
-    pos: DVec3,
+    /// The sim cell it rose from. A CELL, not a world point: dust is
+    /// drawn as voxels in an effects grid now, and a grid addresses
+    /// cells.
+    cell: (i64, i64, i64),
     color: u32,
     age: f64,
 }
@@ -931,8 +934,6 @@ const PUFF_TTL: f64 = 0.45;
 /// puts three thousand of them in the sprite set for half a second.
 /// Decoration gets a ceiling; a drill never reaches it.
 const MAX_PUFFS: usize = 96;
-/// Puff rise rate, world voxels per second (upward = −z).
-const PUFF_RISE: f64 = 24.0;
 
 /// The render-side suspension length of a stateless wheel: march the
 /// solver's own ray — from the anchor along body-down through the volume
@@ -1132,7 +1133,10 @@ pub struct MapRender {
     /// dynamic ring layer gets reset by that same upload). NB an
     /// actor-ful volume map would need the dynamic-layer route instead;
     /// no such map exists yet.
-    puff_models: BTreeMap<u32, usize>,
+    /// The effects grid debris is painted into, and the cells painted
+    /// last frame so they can be rubbed out.
+    fx_grid: Option<i64>,
+    fx_painted: Vec<(i64, i64, i64)>,
     /// Map-declared physics-material colours (`phys_material_color`,
     /// D4): the body mirror consults this before the engine's fallback
     /// palette. Render-side only.
@@ -1414,7 +1418,8 @@ impl MapRender {
             volume: false,
             body_mirrors: BTreeMap::new(),
             puffs: Vec::new(),
-            puff_models: BTreeMap::new(),
+            fx_grid: None,
+            fx_painted: Vec::new(),
             phys_colors: BTreeMap::new(),
             sun: None,
             body_decos: BTreeMap::new(),
@@ -2570,6 +2575,8 @@ impl MapRender {
                 sim.y.floor() as i64,
                 sim.z.floor() as i64,
             );
+            // The WORLD grid's mapping, not a cubic grid's: it is created
+            // with `at_scale`, so its cells address differently.
             let (lo, _) = cell_box_to_volume_grid(cell.0, cell.1, cell.2, cell.0, cell.1, cell.2);
             grid.voxel_color(lo).is_some()
         };
@@ -2874,7 +2881,7 @@ impl MapRender {
         // So: age them either way, and only draw them where drawing them
         // works. Dust on a dynamic-layer map wants the dynamic path,
         // which is the FX bridge of D-6 rather than a patch here.
-        self.frame_puffs(dt);
+        self.sync_puffs(dt);
         // Upload the static sprite set *before* driving the actors:
         // `set_sprites` resets the dynamic layer (clips + actors +
         // characters), so a map with animated models uploads its static set
@@ -2972,20 +2979,6 @@ impl MapRender {
     /// path can't carry them on actor maps). Tear-down + re-add per frame:
     /// selection counts are tiny and `remove_sprite_instance` is an O(1)
     /// swap, so reconciliation would be complexity for nothing.
-    /// One frame.s worth of debris: age it, and draw it only where
-    /// drawing it works.
-    ///
-    /// A separate method rather than an `if` inside the render path so a
-    /// headless test can hold it to the rule — the render path itself
-    /// needs a window, and this is precisely the decision that was wrong.
-    fn frame_puffs(&mut self, dt: f64) {
-        if self.dynamic_layer() {
-            self.age_puffs(dt);
-        } else {
-            self.sync_puffs(dt);
-        }
-    }
-
     /// Age the debris puffs and drop the dead ones, without drawing any.
     ///
     /// The half of [`sync_puffs`](Self::sync_puffs) that has to happen on
@@ -3001,40 +2994,53 @@ impl MapRender {
         self.puffs.retain(|p| p.age < PUFF_TTL);
     }
 
-    /// Age, cull and draw the debris puffs: each is a static-set sprite
-    /// instance (see `puff_models` on why not the dynamic layer), rising
-    /// from its cell for [`PUFF_TTL`] seconds. Runs before the sprite-set
-    /// upload each frame; `build_instances` has already rebuilt the
-    /// instance list, so appending here survives exactly one frame — the
-    /// immediate-mode contract the rest of the sprite path already lives
-    /// by.
+    /// Age, cull and draw the debris puffs: a voxel each, in an effects
+    /// grid of the renderer's own, cleared and repainted every frame.
+    ///
+    /// **Voxels rather than sprites, and that is the fix.** Dust used to
+    /// be sprite instances appended to the STATIC set — safe only while
+    /// that set is rebuilt each frame, which stops being true the moment
+    /// a map poses anything. On a dynamic-layer map the set is uploaded
+    /// once, so the dust alive at that instant froze onto the screen for
+    /// the rest of the match and every later puff was invisible.
+    ///
+    /// A grid has no such contract: the scene is walked every frame, so
+    /// geometry painted into one appears and disappears when it is told
+    /// to. It is also the native idiom here — this is a voxel game, and
+    /// a cell of dust in the colour of the cell that was carved reads
+    /// exactly right.
     fn sync_puffs(&mut self, dt: f64) {
         self.age_puffs(dt);
-        for i in 0..self.puffs.len() {
-            let (color, pos, age) = {
-                let p = &self.puffs[i];
-                (p.color, p.pos, p.age)
-            };
-            let model = if let Some(&m) = self.puff_models.get(&color) {
-                m
-            } else {
-                // A chunky dust ball in the carved voxel's colour, unlit.
-                let c = 3.0;
-                let kv6 = Kv6::from_fn(7, 7, 7, |x, y, z| {
-                    let (dx, dy, dz) = (f64::from(x) - c, f64::from(y) - c, f64::from(z) - c);
-                    (dx * dx + dy * dy + dz * dz <= c * c).then_some(VoxColor(color))
-                });
-                let mut s = Sprite::axis_aligned(kv6, [0.0, 0.0, 0.0]);
-                s.flags = SPRITE_FLAG_NO_SHADING;
-                self.sprites.models.push(s);
-                let m = self.sprites.models.len() - 1;
-                self.puff_models.insert(color, m);
-                m
-            };
-            self.sprites.instances.push(SpriteInstanceDesc {
-                model,
-                pos: [pos.x as f32, pos.y as f32, (pos.z - age * PUFF_RISE) as f32],
-            });
+        if self.puffs.is_empty() && self.fx_painted.is_empty() {
+            return;
+        }
+        let grid = if let Some(g) = self.fx_grid {
+            g
+        } else {
+            let g = self.grid_spawn_cubic(0, 0, 0);
+            self.fx_grid = Some(g);
+            g
+        };
+        for (x, y, z) in std::mem::take(&mut self.fx_painted) {
+            self.voxel_clear_in(grid, x, y, z);
+        }
+        let live: Vec<((i64, i64, i64), i64)> = self
+            .puffs
+            .iter()
+            .map(|p| {
+                // Half a life in, the dust lifts a cell. Cell granularity
+                // is all a grid has, so it is a hop rather than a drift —
+                // which at four hundredths of a second reads as a puff.
+                let lift = i64::from(p.age * 2.0 > PUFF_TTL);
+                (
+                    (p.cell.0, p.cell.1, p.cell.2 + lift),
+                    i64::from(p.color) & 0xffff_ffff,
+                )
+            })
+            .collect();
+        for (cell, color) in live {
+            self.voxel_set_in(grid, cell.0, cell.1, cell.2, color);
+            self.fx_painted.push(cell);
         }
     }
 
@@ -3770,13 +3776,8 @@ impl HostBridge for MapRender {
                 let room = self.puffs.len() < MAX_PUFFS;
                 if let Some(grid) = self.scene.grid_mut(id) {
                     if let (true, Some(color)) = (room, grid.voxel_color(lo)) {
-                        let center = volume_world_of(DVec3::new(
-                            x as f64 + 0.5,
-                            y as f64 + 0.5,
-                            z as f64 + 0.5,
-                        ));
                         self.puffs.push(Puff {
-                            pos: center,
+                            cell: (x, y, z),
                             color: color.0,
                             age: 0.0,
                         });
@@ -4413,48 +4414,53 @@ mod tests {
         assert!(r.puffs.is_empty());
     }
 
-    /// A puff must never reach a sprite set that is uploaded once.
+    /// Dust must draw on every map, and must never touch the sprite set.
     ///
-    /// The static instance list is rebuilt every frame — but only on a
-    /// map with no posed sprites. On a dynamic-layer map it is uploaded
-    /// exactly once, so a puff appended to it hangs in the air for the
-    /// rest of the match while every later puff is invisible. A crater's
-    /// worth of them frozen over the hole is a permanent dust cloud that
-    /// costs a frame's sprite budget forever, and it is what playing the
-    /// desert actually looked like.
+    /// It used to be sprite instances appended to the STATIC list, which
+    /// is rebuilt each frame — but only on a map with no posed sprites.
+    /// On a dynamic-layer map that list is uploaded exactly once, so the
+    /// dust alive at that instant froze onto the screen for the rest of
+    /// the match while every later puff was invisible. A crater's worth
+    /// of it hanging over the hole is what playing the desert looked
+    /// like. Voxels in an effects grid have no such contract: the scene
+    /// is walked every frame.
     #[test]
-    fn dust_stays_out_of_a_sprite_set_that_gets_frozen() {
+    fn dust_is_drawn_as_geometry_on_any_map() {
         let mut r = MapRender::new(BTreeMap::new(), None, &[]);
         r.set_volume_terrain();
         r.voxel_fill(0, 0, 0, 8, 8, 2, 0x8070_5838);
 
-        // A static-set map draws its dust: the set is rebuilt each frame,
-        // so an appended instance survives exactly one frame as intended.
-        r.voxel_clear(1, 1, 2);
-        assert!(!r.dynamic_layer());
-        let before = r.sprites.instances.len();
-        r.frame_puffs(0.0);
-        assert_eq!(
-            r.sprites.instances.len(),
-            before + 1,
-            "a static-set map should draw its dust"
-        );
-
-        // Now the map turns something, which is all it takes: posed
-        // sprites mean the static set is uploaded once and kept.
+        // Turn something: the static set is now upload-once, which is the
+        // case the old path got wrong.
         r.entity_set_facing(1, Fixed::from_f64(0.5));
         assert!(r.dynamic_layer());
-        let before = r.sprites.instances.len();
-        r.frame_puffs(0.0);
+
+        r.voxel_clear(1, 1, 2);
+        let sprites = r.sprites.instances.len();
+        r.sync_puffs(0.0);
         assert_eq!(
             r.sprites.instances.len(),
-            before,
-            "dust reached a set that will be frozen"
+            sprites,
+            "dust reached a sprite set that will be frozen"
         );
-        // Aged, though — a puff nobody draws must still die, or a map
-        // that carves and never draws accumulates them forever.
-        r.frame_puffs(PUFF_TTL + 0.01);
-        assert!(r.puffs.is_empty(), "undrawn dust never expired");
+        assert_eq!(r.fx_painted.len(), 1, "dust was not drawn at all");
+        let grid = r.fx_grid.and_then(|g| r.grid_id(g)).expect("effects grid");
+        let cell = r.fx_painted[0];
+        let (lo, _) = cell_box_to_cubic(cell.0, cell.1, cell.2, cell.0, cell.1, cell.2);
+        assert!(
+            r.scene.grid(grid).and_then(|g| g.voxel_color(lo)).is_some(),
+            "the effects grid has no voxel where the dust is"
+        );
+
+        // And it clears itself: a frame after the puff dies, the cell it
+        // occupied is empty again.
+        r.sync_puffs(PUFF_TTL + 0.01);
+        assert!(r.puffs.is_empty(), "the dust never expired");
+        assert!(r.fx_painted.is_empty(), "the dust was never rubbed out");
+        assert!(
+            r.scene.grid(grid).and_then(|g| g.voxel_color(lo)).is_none(),
+            "a dead puff left its voxel behind"
+        );
     }
 
     /// A volume-map carve spawns a debris puff carrying the carved

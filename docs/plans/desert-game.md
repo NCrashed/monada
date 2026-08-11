@@ -741,13 +741,46 @@ golden in `monada-hashes.txt`.
   the first time a shell landed on one already sinking. `monada-physics`
   gained a public `raycast` — line of fire is a game question, and a map
   must not roll a second ray marcher that rounds differently at the
-  corners. **Not in this slice**: wrecks as physics bodies, turret
-  entities of their own, and the FX bridge (shells and explosions are
-  resolved but not drawn — the render side's transient-geometry path is
-  the same one the debris puffs need, and both want doing together).
+  corners.
+
+  **The FX bridge**, which the slice also owed, turned out to be two
+  things and neither was a new subsystem. A shell is now a real
+  **entity** with a model, moved along its own arc by the simulation
+  (its position is a function of hashed state, not of the frame rate) —
+  so the engine draws it, moves it and forgets it with everything else,
+  and there is no second way for things to exist on screen. Debris moved
+  off the sprite set into an **effects grid**: voxels, cleared and
+  repainted every frame. That fixes the bug playing D-5 exposed — sprite
+  instances appended to the static set are frozen onto the GPU on any
+  map that poses anything — and it is the native idiom besides, since a
+  cell of dust in the colour of the cell that was carved reads exactly
+  right in a voxel game.
+
+  **Not in this slice**: wrecks as physics bodies, and turret entities of
+  their own.
 - **D-7 — shroud and radar.** Two-deck reveal (spike both implementations),
   radar canvas, sensor structures. *Gate:* shroud is frame-rate-independent
-  and a no-op headless.
+  and a no-op headless. **Met**, and the spike has an answer: **the lid**.
+  roxlap's `FogOfWar` already has exactly the state machine an RTS shroud
+  wants — `Unseen`/`Memory`/`Visible`, per cell, with decks — and monada
+  already drives it for the ship demo, but `update` takes **one**
+  observer with a facing cone, LOS occlusion and light gating, because
+  that is a crew member looking down a corridor. An RTS shroud is the
+  opposite: fifty observers, no cone, no LOS, permanent. Reaching it
+  means an N-observer stamp upstream (real work, another crate) or a full
+  LOS pass per unit per frame. The lid needs neither, occludes under a
+  rotating camera because it is geometry, hides units behind it for the
+  same reason, and costs one edit per cell *once per match*. What it
+  cannot express is `Memory` — the dimmed last-seen look — and for this
+  game that is not a loss, because Dune II has no re-fog.
+  Both halves of the gate fall out of *where it lives* rather than out of
+  care taken writing it: the shroud is entirely local, painted through
+  bridge verbs that do nothing without a bridge, and revealing is
+  idempotent and cumulative. **Not in this slice**: the underground deck
+  (a lid is a surface idea; hiding an enemy tunnel under explored ground
+  needs the per-deck mask, which brings the observer question back), the
+  radar canvas (it wants a verb to upload a procedural texture — the HUD
+  can only draw assets today), and sensor structures.
 - **D-8 — worms and air.** Worm behaviour, material aversion, breach
   set-piece, tunnel collapse; carryall, ornithopter, starport frigate.
   *Gate:* a worm eats a scripted harvester at an exact tick and refuses a

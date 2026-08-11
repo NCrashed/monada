@@ -158,12 +158,15 @@ pub struct Fighter {
 pub struct Shell {
     pub weapon: Weapon,
     pub owner: PlayerNo,
+    /// Where it was fired from, so it can be drawn on its way.
+    pub from: (i64, i64, i64),
     /// Where it will land. A shell is committed the moment it is fired —
     /// it flies at a *place*, not at a unit, which is what makes driving
     /// out from under a mortar work.
     pub to: (i64, i64, i64),
-    /// Ticks left in the air.
+    /// Ticks left in the air, and how many it started with.
     pub eta: u32,
+    pub flight: u32,
 }
 
 /// What one tick of fighting did.
@@ -181,9 +184,12 @@ pub struct Report {
 pub struct Battle {
     fighters: BTreeMap<EntityId, Fighter>,
     shells: BTreeMap<EntityId, Shell>,
-    /// The next shell's id, so a shell is an entity like anything else
-    /// and the render side needs no special case.
-    next: u64,
+    /// The archetype and models shells are spawned with — handles,
+    /// re-derived identically on every peer, not hashed state.
+    #[serde(skip)]
+    shell_kind: Option<monada_sim::ArchetypeId>,
+    #[serde(skip)]
+    shell_models: BTreeMap<u8, i64>,
 }
 
 impl Battle {
@@ -232,6 +238,63 @@ impl Battle {
         self.shells.len()
     }
 
+    /// The archetype shells are spawned with, registered on first use.
+    fn kind(&mut self, host: &dyn Host) -> monada_sim::ArchetypeId {
+        *self
+            .shell_kind
+            .get_or_insert_with(|| host.archetype(&["shell"]))
+    }
+
+    /// A shell's model: small, bright, and different per weapon so what
+    /// is in the air is legible at a glance.
+    fn model(&mut self, host: &dyn Host, weapon: Weapon) -> i64 {
+        let key = weapon as u8;
+        if let Some(&m) = self.shell_models.get(&key) {
+            return m;
+        }
+        let (size, color) = match weapon {
+            Weapon::Gun => (3, 0x80f0_e090),
+            Weapon::Cannon => (5, 0x80f0_c060),
+            Weapon::Rocket => (6, 0x80f0_8040),
+            Weapon::Mortar => (7, 0x80e0_6030),
+        };
+        let m = host.model_box(size, size, size, color);
+        self.shell_models.insert(key, m);
+        m
+    }
+
+    /// Move everything in the air to where it is this tick.
+    ///
+    /// Presentation, but presentation the *simulation* drives, because
+    /// where a shell is is a function of hashed state (its endpoints and
+    /// its remaining flight) and not of the frame rate. A peer that draws
+    /// it is drawing the same shell everyone else has.
+    fn fly(&self, host: &dyn Host) {
+        for (&id, shell) in &self.shells {
+            let gone = i64::from(shell.flight.saturating_sub(shell.eta));
+            let total = i64::from(shell.flight.max(1));
+            let lerp = |a: i64, b: i64| a + (b - a) * gone / total;
+            let (x, y, z) = (
+                lerp(shell.from.0, shell.to.0),
+                lerp(shell.from.1, shell.to.1),
+                lerp(shell.from.2, shell.to.2),
+            );
+            // An arc for the lobbed ones: a parabola in cells, peaking a
+            // quarter of the range up. Integer, because a shell's drawn
+            // height is derived from hashed numbers and there is no
+            // reason to leave the domain.
+            let arc = if shell.weapon.is_direct() {
+                0
+            } else {
+                let span = (shell.to.0 - shell.from.0)
+                    .abs()
+                    .max((shell.to.1 - shell.from.1).abs());
+                span * gone * (total - gone) / (total * total)
+            };
+            host.entity_set_position(id, at_cell((x, y, z + MUZZLE + arc)));
+        }
+    }
+
     /// One tick: shells land, then everybody who can shoot does.
     ///
     /// Landing first, deliberately. A shell fired last tick belongs to
@@ -243,6 +306,7 @@ impl Battle {
         let mut report = Report::default();
         self.land(host, yards, &mut report);
         self.shoot(host, &mut report);
+        self.fly(host);
         for f in self.fighters.values_mut() {
             f.cooldown = f.cooldown.saturating_sub(1);
         }
@@ -320,18 +384,28 @@ impl Battle {
             let Some(target) = self.pick_target(host, shooter, f) else {
                 continue;
             };
+            let from = cell_of(host, shooter);
             let to = cell_of(host, target);
-            let shell = EntityId(SHELL_BASE + self.next);
-            self.next += 1;
-            let range = distance(cell_of(host, shooter), to);
+            let range = distance(from, to);
             let eta = u32::try_from((range / f.weapon.speed()).max(1)).unwrap_or(1);
+
+            // A shell is a real entity, so the engine draws it, moves it
+            // and forgets it with everything else. The alternative — a
+            // render-side effect list — would be a second way for things
+            // to exist on screen, and the one thing this slice does not
+            // need is a second way.
+            let shell = host.entity_create(self.kind(host));
+            host.entity_set_model(shell, self.model(host, f.weapon));
+            host.entity_set_position(shell, at_cell(from));
             self.shells.insert(
                 shell,
                 Shell {
                     weapon: f.weapon,
                     owner: f.owner,
-                    to: (to.0, to.1, to.2),
+                    from,
+                    to,
                     eta,
+                    flight: eta,
                 },
             );
             if let Some(g) = self.fighters.get_mut(&shooter) {
@@ -377,11 +451,16 @@ impl Battle {
     }
 }
 
-/// Shell entity ids start well above anything a map spawns, so a shell
-/// and a unit can never collide in the table.
-const SHELL_BASE: u64 = 1 << 40;
+/// A cell as a position: its own coordinates, seated on top of it.
+fn at_cell(c: (i64, i64, i64)) -> monada_fixed::FixedVec3 {
+    monada_fixed::FixedVec3::new(
+        monada_fixed::Fixed::from_int(i32::try_from(c.0).unwrap_or(0)),
+        monada_fixed::Fixed::from_int(i32::try_from(c.1).unwrap_or(0)),
+        monada_fixed::Fixed::from_int(i32::try_from(c.2).unwrap_or(0)),
+    )
+}
 
-/// An entity's cell.
+/// An entity.s cell.
 fn cell_of(host: &dyn Host, e: EntityId) -> (i64, i64, i64) {
     let p = host.entity_position(e);
     (

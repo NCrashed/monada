@@ -335,6 +335,14 @@ impl NativeLocalBackend {
     pub fn set_volume(&mut self, phys: &SharedPhysics) {
         self.host.set_volume(phys);
     }
+
+    /// The local host this layer calls — the counterpart of
+    /// [`NativeBackend::host`], for tests and for a host that wants to
+    /// read the client's view without going through the rules.
+    #[must_use]
+    pub fn host(&self) -> &RuntimeHost {
+        &self.host
+    }
 }
 
 impl LocalLayer for NativeLocalBackend {

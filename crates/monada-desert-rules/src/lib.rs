@@ -31,6 +31,7 @@ pub mod combat;
 pub mod economy;
 pub mod gen;
 pub mod harvest;
+pub mod shroud;
 pub mod mover;
 pub mod terraform;
 
@@ -40,6 +41,7 @@ pub use economy::{Building, Economy, Player, PlayerNo, Structure};
 pub use gen::{Desert, DesertParams, Surface};
 pub use harvest::{Fleet, Yield};
 pub use mover::Router;
+pub use shroud::Shroud;
 pub use terraform::{JobId, Spent, Terraform, Work};
 
 /// What a player starts a skirmish with. Dune II's number.
@@ -875,6 +877,10 @@ pub struct DesertLocal {
     following: Option<EntityId>,
     /// The dashboard entity, once found (see [`dash`]).
     board: Option<EntityId>,
+    /// What this client has explored (§4f). Local, per-client, and
+    /// never in the digest — two players see different shrouds and are
+    /// not desynced.
+    shroud: Shroud,
     /// The overlay grid the placement ghost is painted into, and the
     /// footprint painted last frame so it can be rubbed out.
     ghost: Option<i64>,
@@ -915,6 +921,7 @@ impl Default for DesertLocal {
             look: None,
             following: None,
             board: None,
+            shroud: Shroud::new(),
             ghost: None,
             ghost_at: None,
         }
@@ -998,6 +1005,7 @@ impl LocalRules for DesertLocal {
         }
 
         self.find_board(host);
+        self.lift_shroud(host);
         self.place_ghost(host);
         self.sidebar(host);
     }
@@ -1147,6 +1155,39 @@ impl DesertLocal {
             .entities()
             .into_iter()
             .find(|&e| host.entity_field(e, dash::MARK).floor_to_int() == 1);
+    }
+
+    /// Push the shroud back around everything this client owns.
+    ///
+    /// Walks the world rather than being told: the local layer has no
+    /// list of "my units", and building one would be a second account of
+    /// something the world already knows. Ownership comes off the same
+    /// `owner` field the simulation set.
+    ///
+    /// Hotseat — `local_player()` of `None` — reveals for everybody,
+    /// which is the right answer for one window driving every side.
+    fn lift_shroud(&mut self, host: &dyn LocalHost) {
+        self.shroud.lay(host);
+        let mine = host.local_player();
+        for e in host.entities() {
+            let owner = i64::from(host.entity_field(e, "owner").floor_to_int());
+            if mine.is_some_and(|me| me != owner) {
+                continue;
+            }
+            let p = host.entity_position(e);
+            let at = (
+                i64::from(p.x.floor_to_int()),
+                i64::from(p.y.floor_to_int()),
+            );
+            // A structure watches further than a unit; it is taller and
+            // it is not going anywhere.
+            let reach = if host.entity_field(e, "health").floor_to_int() > 0 {
+                shroud::BASE_SIGHT
+            } else {
+                shroud::UNIT_SIGHT
+            };
+            self.shroud.reveal(host, at, reach);
+        }
     }
 
     /// Show where the finished structure would go, on the ground.
