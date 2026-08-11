@@ -13,6 +13,16 @@ players = 2
 # (`local_tick`) assembles one per-tick input command per local player from
 # the declared actions below.
 sim_hz = "30hz"
+# The physics gate, not a digging one (docs/plans/ship-physics.md, D1): a
+# `terrain = "volume"` map gets a `PhysicsWorld` embedded beside its entity
+# world, stepped after each tick and folded into the same digest — which is
+# what the ship needs to become a rigid body it can bolt engines onto. The
+# ship paints NO world terrain (every voxel it has lives in its own hull
+# grid), so the isotropic world grid this declares stays empty. One dividend
+# beyond physics: the world frame's z now scales like the cubic hull's, so an
+# entity released into space off an upper deck is drawn at the height it was
+# let go from rather than 16× lower.
+terrain = "volume"
 script_runtime = "rhai"
 entry = "scripts/main.rhai"
 

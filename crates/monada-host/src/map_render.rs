@@ -2589,14 +2589,21 @@ impl MapRender {
             cam.down = turn(cam.down);
             cam.pos = (orbit.center - DVec3::from_array(cam.forward) * orbit.dist).to_array();
         }
-        // Volume maps: third-person camera collision (the keyhole cutout
-        // is gone, so nothing else keeps the eye out of rock — a flipped
+        // Volume maps WITH TERRAIN: third-person camera collision (the keyhole
+        // cutout is gone, so nothing else keeps the eye out of rock — a flipped
         // vehicle by the mountain face was a full-screen sandstone wall).
+        //
+        // The world-grid condition is the whole point of the pass, not a
+        // shortcut: this exists to keep the eye out of TERRAIN, and a map that
+        // declares volume for the physics alone (the ship — every voxel it has
+        // is its own hull) has none. Left ungated, the ray would find the hull
+        // the player is deliberately looking into and yank the camera in every
+        // time it grazed a rim wall.
         // Walk the focus→eye ray through the CLIPPED scene (the same cut
         // the player sees; a 1-frame-old clip is fine) and pull the eye
         // just short of the first hit. Render-side only — the orbit
         // distance the wheel owns is untouched.
-        if self.volume {
+        if self.volume && self.world_grid.is_some() {
             let center = orbit.center;
             let eye = DVec3::from_array(cam.pos);
             let back = eye - center;

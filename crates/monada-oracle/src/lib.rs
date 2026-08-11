@@ -381,6 +381,10 @@ const SHIP_SCRIPT: &str = include_str!("../../monada-ship/map/scripts/main.rhai"
 /// Hash the ship run at these tick counts (`ship@0` = post-init, hull painted
 /// but no crew yet — the crew spawns on the first input).
 const SHIP_CHECKPOINTS: &[usize] = &[0, 1, 30, 150, 600];
+/// The ship's fixed tick rate, from its manifest. The physics `dt` is folded
+/// into the digest, so a rate that disagreed with the shipped map would gate a
+/// run nobody plays.
+const SHIP_HZ: u32 = 30;
 
 /// A fixed, deterministic per-tick input for the ship golden (verb 0,
 /// `arg.xy` = the move axis, values in `-1..=1` like the real `action_axis2`;
@@ -433,8 +437,14 @@ fn ship_input(t: usize) -> Command {
 #[must_use]
 pub fn ship_checkpoints() -> Vec<Checkpoint> {
     let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
-    let mut driver =
-        RhaiDriver::with_bridge(shared_world(SEED), SHIP_SCRIPT, &bridge).expect("compile ship");
+    // The ship declares `terrain = "volume"` for the physics it is about to
+    // grow (docs/plans/ship-physics.md D1), so the golden runs the map the way
+    // the host does: a `PhysicsWorld` stepped after each tick and folded into
+    // the combined digest. It carries no bodies yet — this slice is the seam,
+    // not the dynamics — so what moved in `ship@` is the digest's SHAPE.
+    let phys = shared_physics(SHIP_HZ);
+    let mut driver = RhaiDriver::with_physics(shared_world(SEED), SHIP_SCRIPT, &bridge, &phys)
+        .expect("compile ship");
 
     let mut out = Vec::new();
     let mut record = |driver: &RhaiDriver, n: usize| {

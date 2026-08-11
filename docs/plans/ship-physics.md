@@ -1,7 +1,8 @@
 # Plan: the ship is a rigid body — a hull that flies, and riders that don't judder
 
-Status: **S-0 shipped 2026-08-11** (render-rate pose smoothing — §4 and §8's
-first slice); S-1 onward designed. Requested by the people extending the ship demo
+Status: **S-0 and S-1 shipped 2026-08-11** — render-rate pose smoothing (§4) and
+the ship map on the physics gate; S-2 onward designed. Requested by the people
+extending the ship demo
 (`crates/monada-ship`), who are stuck at the first step: making the hull itself
 a physics body, with everything standing on it inheriting the pose smoothly.
 Engines that push and turn the ship come after — and fall out of it almost for
@@ -341,10 +342,31 @@ Each step is a headless test; nothing needs a display until S-5.
     per frame — while still writing the tick-exact world centre, because
     `camera_pan`, `camera_center_sim` and the cursor path read that one and want
     it tick-exact rather than eased.
-- **S-1 — the ship map goes volume.** Manifest `terrain = "volume"`, oracle
-  switched to `with_physics`, `ship@` re-blessed (the hash gains the physics and
-  terrain digests even with zero bodies). No script changes yet. This is the
-  slice that proves D1 is boring.
+- **S-1 — the ship map goes volume. DONE (2026-08-11).** Manifest
+  `terrain = "volume"`, oracle switched to `with_physics` at `SHIP_HZ = 30`
+  (the physics `dt` is folded into the digest, so the rate has to be the
+  shipped map's), `ship@` re-blessed. No script changes. D1 is boring as
+  advertised — with three things worth recording:
+  - **Only the digest's SHAPE moved.** A throwaway run of the same 600 ticks
+    with and without the physics embed had bit-identical *entity world* hashes
+    at every single tick; what changed is `state_hash` going from the bare world
+    digest to `FNV(world, physics, terrain, tools, granular)`. The check is
+    recorded here rather than committed because it cannot survive S-2: once
+    `main.rhai` calls a `phys_*` verb, the physics-less half of the comparison
+    stops compiling at all.
+  - **The camera-collision pass had to learn what it is for.** It fires on
+    `volume` alone, and its job is keeping the eye out of *terrain* — so a map
+    that declares volume for the physics and paints no world terrain got its own
+    hull treated as rock, and the camera would have been yanked in every time
+    the ray grazed a rim wall. Now gated on a world grid existing.
+  - **The ship's LOOK changed and is owed an eyeball.** Volume maps light
+    through roxlap's `LightRig` (sun + baked ambient + stylized shadows) where
+    column maps use `side_shades`; that switch is keyed off the same flag. The
+    numbers are gentle (ambient 0.62, shadow strength 0.42) and it is the newer
+    path every other 3D demo uses, but nobody has seen the hull under it.
+  - Note for S-2: `crates/monada-ship/tests/smoke.rs` builds a bare
+    `RhaiBackend` with no physics. The first `phys_*` call in `main.rhai` will
+    need `set_physics` there, or the canary fails on an unknown function.
 - **S-2 — shapes and `phys_body`.** The `phys_shape_*` family + the shape table;
   a headless test that a hollow 20×20×6 shell's derived CoM sits at its centre
   and its inertia is not a solid block's.
