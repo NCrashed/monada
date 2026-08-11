@@ -146,8 +146,18 @@ pub use volume::VolumeStore;
 /// the map's own for things that are shown rather than simulated — a
 /// build ghost, a range ring, a rally marker — real geometry rather
 /// than HUD pixels, because "where will this go" is a question about
-/// the ground. Additive: the reads gained a caller, not a meaning.
-pub const HOST_API_VERSION: u32 = 20;
+/// the ground. Additive: the reads gained a caller, not a meaning; 21 =
+/// freeform body shapes (docs/plans/ship-physics.md S-2). `phys_box`
+/// spawns the one body a map could describe in a call — a solid block —
+/// and a hull is a shell, whose inertia tensor is not a block's at all.
+/// `phys_shape` / `phys_shape_fill` / `phys_shape_clear` / `phys_body`
+/// let a map author a body out of the same cell boxes it paints the
+/// hull's voxels with, so mass, centre of mass, inertia and collision
+/// skin all derive from the geometry the player can see; `phys_mass`
+/// reads the result back. Additive: the shape table is authoring
+/// scratch outside the sim, and a map that never opens one is
+/// bit-unaffected.
+pub const HOST_API_VERSION: u32 = 21;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a

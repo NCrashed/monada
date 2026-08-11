@@ -23,6 +23,8 @@
     clippy::cast_sign_loss
 )]
 
+use std::sync::{Arc, Mutex};
+
 use monada_fixed::{Fixed, FixedQuat, FixedVec3};
 use monada_physics::{
     BodyId, DrillTool, Material, MaterialId, VoxelBodyDef, VoxelShape, WheelDef,
@@ -37,6 +39,57 @@ use crate::{DrillToolDef, PhysicsSim, SharedBridge, SharedPhysics};
 /// world lock in `register_host_api`.
 fn lock(phys: &SharedPhysics) -> std::sync::MutexGuard<'_, PhysicsSim> {
     phys.lock().expect("physics mutex")
+}
+
+/// Shapes opened by `phys_shape`, awaiting the `phys_body` that spawns
+/// one (docs/plans/ship-physics.md D5). The handle is the index; a
+/// spawned slot is tombstoned rather than compacted, so a handle is
+/// never reused and a stale one can never hit somebody else's hull.
+///
+/// Deliberately NOT a field of [`PhysicsSim`]: a shape is *authoring
+/// scratch*, alive between the call that opens it and the call that
+/// consumes it — usually two lines of the same `init`. It is therefore
+/// neither snapshotted nor hashed. What it produces IS: the body's
+/// mass, centre of mass, inertia tensor and collision skin all derive
+/// from it and all ride the physics digest, and two peers running the
+/// same script author the same shape by construction.
+type ShapeTable = Arc<Mutex<Vec<Option<VoxelShape>>>>;
+
+/// Borrow an open shape by handle, or die naming the caller. A map is a
+/// fixed asset (DESIGN.md §8): a handle that does not resolve is a bug
+/// in the map, and the same stance `phys_wheel` takes on an unknown
+/// body — surfaced loudly rather than silently painting nothing.
+fn with_shape<R>(
+    shapes: &ShapeTable,
+    handle: i64,
+    who: &str,
+    f: impl FnOnce(&mut VoxelShape) -> R,
+) -> R {
+    let mut table = shapes.lock().expect("shape table mutex");
+    let shape = usize::try_from(handle)
+        .ok()
+        .and_then(|i| table.get_mut(i))
+        .and_then(Option::as_mut)
+        .unwrap_or_else(|| {
+            panic!("{who}: shape {handle} is unknown or already spawned")
+        });
+    f(shape)
+}
+
+/// A script-authored cell box, ordered — a map may name either corner
+/// first, exactly as the `voxel_fill*` verbs allow.
+fn shape_box(
+    x0: i64,
+    y0: i64,
+    z0: i64,
+    x1: i64,
+    y1: i64,
+    z1: i64,
+) -> ((i32, i32, i32), (i32, i32, i32)) {
+    (
+        (x0.min(x1) as i32, y0.min(y1) as i32, z0.min(z1) as i32),
+        (x0.max(x1) as i32, y0.max(y1) as i32, z0.max(z1) as i32),
+    )
 }
 
 /// Register the `phys_*` sim verbs (plan §1c) and re-register the
@@ -64,6 +117,11 @@ pub(crate) fn register_physics_api(
     phys: &SharedPhysics,
     bridge: Option<&SharedBridge>,
 ) {
+    // Authoring scratch, owned by these closures rather than by the sim
+    // (see [`ShapeTable`]). One table per registration, so a re-registered
+    // engine starts with no open shapes.
+    let shapes: ShapeTable = Arc::new(Mutex::new(Vec::new()));
+
     // --- the drive-train verbs (plan §1c, 1:1 onto the crate) ---------
 
     let p = phys.clone();
@@ -114,6 +172,74 @@ pub(crate) fn register_physics_api(
                 .0 as i64
         },
     );
+
+    // --- freeform shapes (ship-physics S-2) ---------------------------
+    // `phys_box` spawns the one shape a map could describe in a call: a
+    // solid block. A hull is a SHELL, and the difference is not
+    // cosmetic — a shell's inertia tensor is not a block's, which is
+    // exactly what an engine mounted off the centreline feels. So a map
+    // opens a shape, writes into it with the same cell boxes it paints
+    // the hull's voxels with, and spawns a body from the result: mass,
+    // centre of mass, inertia and collision skin all derive from the
+    // geometry the player can see.
+
+    let s = shapes.clone();
+    engine.register_fn("phys_shape", move |sx: i64, sy: i64, sz: i64| -> i64 {
+        let mut table = s.lock().expect("shape table mutex");
+        table.push(Some(VoxelShape::new(sx as i32, sy as i32, sz as i32)));
+        table.len() as i64 - 1
+    });
+
+    let s = shapes.clone();
+    engine.register_fn(
+        "phys_shape_fill",
+        move |shape: i64, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, mat: i64| {
+            let (lo, hi) = shape_box(x0, y0, z0, x1, y1, z1);
+            with_shape(&s, shape, "phys_shape_fill", |sh| {
+                sh.fill_box(lo, hi, MaterialId(mat as u16));
+            });
+        },
+    );
+
+    let s = shapes.clone();
+    engine.register_fn(
+        "phys_shape_clear",
+        move |shape: i64, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64| {
+            let (lo, hi) = shape_box(x0, y0, z0, x1, y1, z1);
+            with_shape(&s, shape, "phys_shape_clear", |sh| {
+                sh.clear_box(lo, hi);
+            });
+        },
+    );
+
+    // Spawning CONSUMES the shape: a body owns its voxels from here on
+    // (destruction carves them), so leaving the authoring copy addressable
+    // would be two truths about one hull. `point` places the DERIVED centre
+    // of mass, the same convention `phys_box` documents.
+    let p = phys.clone();
+    let s = shapes.clone();
+    engine.register_fn("phys_body", move |shape: i64, point: FixedVec3| -> i64 {
+        let taken = {
+            let mut table = s.lock().expect("shape table mutex");
+            usize::try_from(shape)
+                .ok()
+                .and_then(|i| table.get_mut(i))
+                .and_then(Option::take)
+        };
+        let shape = taken.unwrap_or_else(|| {
+            panic!("phys_body: shape {shape} is unknown or already spawned")
+        });
+        lock(&p)
+            .world
+            .spawn_voxels(&VoxelBodyDef {
+                shape,
+                position: point,
+                orientation: FixedQuat::IDENTITY,
+                linear_velocity: FixedVec3::ZERO,
+                angular_velocity: FixedVec3::ZERO,
+            })
+            .0 as i64
+    });
 
     // Wheel anchors are authored in SHAPE coordinates (the box the map
     // just built); the engine rebases into the body frame via the
@@ -190,6 +316,17 @@ pub(crate) fn register_physics_api(
             .world
             .body(BodyId(body as u64))
             .map_or(FixedVec3::ZERO, monada_physics::RigidBody::position)
+    });
+
+    // The body's DERIVED mass — the sum of its cells' densities, so a
+    // shell weighs a shell. A map sizes thrust and reads a HUD off it;
+    // ZERO for an unknown id, like `phys_pos`.
+    let p = phys.clone();
+    engine.register_fn("phys_mass", move |body: i64| -> Fixed {
+        lock(&p)
+            .world
+            .body(BodyId(body as u64))
+            .map_or(Fixed::ZERO, monada_physics::RigidBody::mass)
     });
 
     let p = phys.clone();

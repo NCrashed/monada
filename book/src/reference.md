@@ -203,6 +203,11 @@ vocabulary stays the same, with deeper semantics:
 | `phys_gravity(gx, gy, gz)` | set gravity (the crate default is ZERO — set it in `init`) |
 | `phys_material(density, friction, restitution, hardness)` | register a material; returns its id (first call = the ground material) |
 | `phys_box(sx, sy, sz, mat, x, y, z)` | spawn a solid box body; CoM placed at `(x, y, z)`; returns a body id |
+| `phys_shape(sx, sy, sz)` | open an empty body shape of `sx × sy × sz` cells; returns a shape handle (requires `host_api` 21) |
+| `phys_shape_fill(shape, x0, y0, z0, x1, y1, z1, mat)` | fill an inclusive cell box of an open shape with a material (either corner first) |
+| `phys_shape_clear(shape, x0, y0, z0, x1, y1, z1)` | empty a cell box — `phys_shape_fill`'s inverse, and how a shell is written: fill the block, clear the inside |
+| `phys_body(shape, point)` | spawn a body from an open shape, its derived CoM placed at sim `point`; returns a body id. CONSUMES the shape — the handle is spent, and writing through it afterwards is a map bug |
+| `phys_mass(body)` | the body's derived mass — the sum of its cells' densities, so a shell weighs its walls (ZERO for an unknown id) |
 | `phys_wheel(body, ax, ay, az, rest, radius, k, c, mu)` | attach a wheel at SHAPE coords `(ax, ay, az)`; returns a wheel id |
 | `phys_wheel_input(body, wheel, steer, drive, brake)` | set a wheel's retained steering/drive/brake |
 | `phys_impulse(body, jx, jy, jz)` | apply an impulse at the CoM |

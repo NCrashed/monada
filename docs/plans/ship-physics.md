@@ -1,8 +1,8 @@
 # Plan: the ship is a rigid body — a hull that flies, and riders that don't judder
 
-Status: **S-0 and S-1 shipped 2026-08-11** — render-rate pose smoothing (§4) and
-the ship map on the physics gate; S-2 onward designed. Requested by the people
-extending the ship demo
+Status: **S-0 – S-2 shipped 2026-08-11** — render-rate pose smoothing (§4), the
+ship map on the physics gate, and freeform body shapes (`host_api` 21); S-3
+onward designed. Requested by the people extending the ship demo
 (`crates/monada-ship`), who are stuck at the first step: making the hull itself
 a physics body, with everything standing on it inheriting the pose smoothly.
 Engines that push and turn the ship come after — and fall out of it almost for
@@ -251,8 +251,8 @@ Init — the hull, once, in the same loop that paints it:
 
 ```rhai
 fn init() {
-    phys_gravity(vec3(fixed(0), fixed(0), fixed(0)));   // space
-    let steel = phys_material(ratio(1,1), ratio(6,10), ratio(1,10), fixed(4));
+    phys_gravity(fixed(0), fixed(0), fixed(0));         // space
+    let steel = phys_material(fixed(1), ratio(6,10), ratio(1,10), fixed(4));
 
     let grid  = grid_spawn_cubic(0, 0, 0);
     let shape = phys_shape(20, 20, 6);
@@ -367,9 +367,29 @@ Each step is a headless test; nothing needs a display until S-5.
   - Note for S-2: `crates/monada-ship/tests/smoke.rs` builds a bare
     `RhaiBackend` with no physics. The first `phys_*` call in `main.rhai` will
     need `set_physics` there, or the canary fails on an unknown function.
-- **S-2 — shapes and `phys_body`.** The `phys_shape_*` family + the shape table;
-  a headless test that a hollow 20×20×6 shell's derived CoM sits at its centre
-  and its inertia is not a solid block's.
+- **S-2 — shapes and `phys_body`. DONE (2026-08-11).** `phys_shape` /
+  `phys_shape_fill` / `phys_shape_clear` / `phys_body` / `phys_mass`,
+  `VoxelShape::clear_box` (the public counterpart to `fill_box`, and the shell
+  primitive), `HOST_API_VERSION` 21, six book rows, six tests in
+  `monada-script/tests/body_shapes.rs`. The decisive one authors the ship's own
+  20×20×6 as a shell and as the block `phys_box` would have given: 1104 wall
+  cells against 2400, and — the number engines will feel — the shell resists yaw
+  more than 20% harder *per unit mass*, because its mass lives at the skin.
+  Goldens unmoved: the verbs exist, nobody calls them yet. Two findings:
+  - **The shape table is not sim state, and that was a decision.** It lives in
+    the closures `register_physics_api` builds, not in `PhysicsSim`: a shape is
+    authoring scratch alive between the call that opens it and the call that
+    spawns from it, so it is neither snapshotted nor hashed. What it *produces*
+    is hashed — mass, CoM, inertia and skin all ride the physics digest — and a
+    test pins that a hollow hull and a solid one hash differently.
+  - **A raise inside a Rhai host function aborts the process.** Rhai catches the
+    panic and re-raises it in a non-unwinding context (`rhai/src/func/call.rs`),
+    so `catch_unwind` cannot see it and a map bug takes the whole game down with
+    it. That is the existing house behaviour — `phys_wheel` and
+    `phys_drill_tool` have always `expect`ed on an unknown body — and the new
+    verbs match it. Worth knowing before writing the next verb: a handle that
+    should degrade gracefully must return `-1` (the `grid_*` family's stance),
+    because there is no middle ground between that and killing the process.
 - **S-3 — `grid_body`.** The binding, the after-step sync, the auto-mirror skip,
   the CoM pivot. Test: step a body with a known angular velocity, then require
   the grid's `GridStore` frame *and* the drawn transform to agree with the body

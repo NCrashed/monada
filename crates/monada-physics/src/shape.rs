@@ -112,6 +112,32 @@ impl VoxelShape {
         }
     }
 
+    /// Empty the inclusive box `[min, max]` — [`fill_box`](Self::fill_box)'s
+    /// inverse, and the shell primitive: fill the block, then clear the
+    /// inside. Authoring, not destruction: this is how a *shape* is written
+    /// before it becomes a body ([`PhysicsWorld::spawn_voxels`]), which is why
+    /// it holds the same in-bounds contract `fill_box` does rather than the
+    /// tolerant one [`clear`](Self::clear) gives the destruction intake.
+    ///
+    /// [`PhysicsWorld::spawn_voxels`]: crate::PhysicsWorld::spawn_voxels
+    ///
+    /// # Panics
+    /// Panics if any corner is out of bounds or `min > max` on an axis.
+    pub fn clear_box(&mut self, min: (i32, i32, i32), max: (i32, i32, i32)) {
+        assert!(
+            min.0 <= max.0 && min.1 <= max.1 && min.2 <= max.2,
+            "VoxelShape::clear_box: min {min:?} > max {max:?}"
+        );
+        for z in min.2..=max.2 {
+            for y in min.1..=max.1 {
+                for x in min.0..=max.0 {
+                    let i = self.index(x, y, z);
+                    self.cells[i] = EMPTY;
+                }
+            }
+        }
+    }
+
     /// Clear one cell, returning its material if it was occupied.
     /// Out-of-bounds is a no-op returning `None` (destruction intake
     /// silently skips cells that miss the grid).
