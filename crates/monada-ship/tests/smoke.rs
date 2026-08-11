@@ -18,13 +18,15 @@
 use std::sync::{Arc, Mutex};
 
 use monada_fixed::{Fixed, FixedVec3};
+use monada_net::SimDriver;
 use monada_script::{
-    shared_world, RhaiBackend, ScriptBackend, SharedBridge, SharedWorld, NullBridge,
+    shared_physics, shared_world, NullBridge, RhaiDriver, SharedBridge, SharedWorld,
 };
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 
 const SEED: u64 = 0x4D4F_4E41_4441_5F30;
 const CREW: ArchetypeId = ArchetypeId(0);
+const SHIP: ArchetypeId = ArchetypeId(1);
 const VERB_INPUT: u32 = 0;
 const P0: PlayerId = PlayerId(0);
 
@@ -39,16 +41,20 @@ fn script() -> String {
         .to_string()
 }
 
-fn fresh() -> (SharedWorld, RhaiBackend) {
+/// The map under a headless driver. `RhaiDriver`, not a bare backend: the
+/// hull's pose comes from the dynamics now (docs/plans/ship-physics.md), and
+/// the tick order that produces it — script `tick`, physics step, then the
+/// grid-frame sync — lives in the driver. A canary that drove the backend
+/// directly would be testing a ship whose engines never fired.
+fn fresh() -> (SharedWorld, RhaiDriver) {
     let world = shared_world(SEED);
-    let mut backend = RhaiBackend::new(world.clone());
     // NullBridge: `init`'s voxel paints fill a real collision store; the
     // actor / anim / camera / sky calls are no-ops headlessly.
     let bridge: SharedBridge = Arc::new(Mutex::new(NullBridge));
-    backend.set_bridge(&bridge);
-    backend.load(&script()).expect("compile main.rhai");
-    backend.on_init().expect("init runs");
-    (world, backend)
+    let phys = shared_physics(30);
+    let driver = RhaiDriver::with_physics(world.clone(), &script(), &bridge, &phys)
+        .expect("compile main.rhai");
+    (world, driver)
 }
 
 /// One real-time input command: a move axis (buttons unused in S-B).
@@ -60,13 +66,13 @@ fn input(mx: i32, my: i32) -> Command {
     )
 }
 
-fn step(b: &mut RhaiBackend, cmd: &Command) {
-    b.on_command(P0, cmd).expect("input command");
-    b.on_tick().expect("tick");
+fn step(b: &mut RhaiDriver, cmd: &Command) {
+    b.apply_command(P0, cmd);
+    b.step();
 }
 
 /// Drive one held input for `n` ticks.
-fn hold(b: &mut RhaiBackend, mx: i32, my: i32, n: usize) {
+fn hold(b: &mut RhaiDriver, mx: i32, my: i32, n: usize) {
     for _ in 0..n {
         step(b, &input(mx, my));
     }
@@ -75,7 +81,7 @@ fn hold(b: &mut RhaiBackend, mx: i32, my: i32, n: usize) {
 /// Walk the crew east from spawn onto the fore staircase and up its steps to the
 /// upper deck (the stairs climb east: `input(1, -1)` ≈ east under the default
 /// `cam_yaw`). Leaves the crew on deck 1 at the top of the stairs (cx ≈ 18).
-fn climb_to_upper(b: &mut RhaiBackend) {
+fn climb_to_upper(b: &mut RhaiDriver) {
     hold(b, 1, -1, 120);
 }
 
@@ -87,6 +93,14 @@ fn crew_pos(world: &SharedWorld) -> FixedVec3 {
     let w = world.lock().unwrap();
     let e = w.entities(CREW)[0];
     w.position(e).expect("crew has a position")
+}
+
+/// Where the crew member actually IS — its hull-local seat composed through
+/// the hull's frame. The number that moves when the ship flies while
+/// `crew_pos` (the seat) stays put.
+fn crew_world(world: &SharedWorld, b: &RhaiDriver) -> FixedVec3 {
+    let p = crew_pos(world);
+    b.grids().lock().unwrap().to_world(0, p)
 }
 
 fn crew_deck(world: &SharedWorld) -> i64 {
@@ -268,6 +282,15 @@ fn input_btn(mx: i32, my: i32, btn: i32) -> Command {
     )
 }
 
+/// Hold the main drive (input bit 4) for `n` ticks. The hull no longer moves
+/// on its own — its pose is an outcome of the dynamics now, so a test that
+/// wants the ship to go somewhere has to fly it.
+fn burn(b: &mut RhaiDriver, n: usize) {
+    for _ in 0..n {
+        step(b, &input_btn(0, 0, 4));
+    }
+}
+
 fn crate_of(world: &SharedWorld, i: usize) -> EntityId {
     world.lock().unwrap().entities(CRATE)[i]
 }
@@ -279,14 +302,14 @@ fn crate_local(world: &SharedWorld, i: usize) -> FixedVec3 {
     world.lock().unwrap().position(k).expect("crate exists")
 }
 
-fn crate_grid(world: &SharedWorld, b: &RhaiBackend, i: usize) -> i64 {
+fn crate_grid(world: &SharedWorld, b: &RhaiDriver, i: usize) -> i64 {
     let k = crate_of(world, i);
     b.grids().lock().unwrap().grid_of(k)
 }
 
 /// A crate in WORLD coordinates, composed through whatever frame it rides —
 /// exactly what the map's `grid_world` computes.
-fn crate_world(world: &SharedWorld, b: &RhaiBackend, i: usize) -> FixedVec3 {
+fn crate_world(world: &SharedWorld, b: &RhaiDriver, i: usize) -> FixedVec3 {
     let k = crate_of(world, i);
     let p = { world.lock().unwrap().position(k).expect("crate exists") };
     let grids = b.grids().lock().unwrap();
@@ -307,7 +330,7 @@ fn moved(a: FixedVec3, b: FixedVec3) -> f64 {
 
 /// Walk the crew to the starboard airlock at hull cell (19, 9): north until the
 /// y=10 divider parks it in the door's row, then east into the doorway.
-fn walk_to_airlock(b: &mut RhaiBackend) {
+fn walk_to_airlock(b: &mut RhaiDriver) {
     hold(b, 1, 1, 80); // north until the y=10 divider parks it
     hold(b, 1, -1, 140); // east along the divider to the starboard rim
                          // The east run drifts a third of a cell south (the input is not exactly
@@ -324,7 +347,7 @@ fn a_stowed_crate_rides_the_hull() {
     let local_before = crate_local(&world, 0);
     let world_before = crate_world(&world, &b, 0);
 
-    hold(&mut b, 0, 0, 60); // the hull turns and sways under it
+    burn(&mut b, 60); // fly the ship out from under it
 
     assert_eq!(crate_grid(&world, &b, 0), 0, "still aboard the hull");
     assert!(
@@ -386,7 +409,7 @@ fn a_crate_released_through_the_airlock_stays_in_space() {
     let released_at = crate_world(&world, &b, 0);
     let crew_before = crew_pos(&world);
 
-    hold(&mut b, 0, 0, 90); // the ship turns and sways away from it
+    burn(&mut b, 90); // the ship flies away from it under power
 
     assert!(
         moved(crate_world(&world, &b, 0), released_at) < 1e-9,
@@ -428,4 +451,101 @@ fn the_airlock_gates_its_doorway() {
     walk_to_airlock(&mut b);
     let open = crew_pos(&world).x.to_f64();
     assert!(open > 18.6, "an open airlock lets the crew in (x = {open})");
+}
+
+// --- the ship flies (docs/plans/ship-physics.md S-5) ---------------------
+// The hull is a rigid body with engines bolted to it. What these pin is not
+// that physics works — `monada-physics` has its own goldens — but that the
+// SHIP is the body: that the map's engines move the frame the crew stand in,
+// and that standing in a frame under acceleration is still just standing.
+
+/// The headline of the whole slice: burning moves the ship through the world
+/// while changing NOTHING about being aboard it. The crew member's own
+/// position is hull-local and untouched; where it is in the world is entirely
+/// the hull's doing.
+#[test]
+fn the_main_drive_moves_the_ship_and_everyone_in_it() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0));
+    let local_before = crew_pos(&world);
+    let world_before = crew_world(&world, &b);
+
+    burn(&mut b, 60);
+
+    assert!(
+        moved(crew_pos(&world), local_before) < 1e-9,
+        "the crew member did not walk anywhere — it is standing still aboard"
+    );
+    assert!(
+        moved(crew_world(&world, &b), world_before) > 1.0,
+        "yet the ship carried it somewhere else entirely"
+    );
+}
+
+/// Turning is a reaction wheel, and letting go is a stabiliser: the map's own
+/// `τ = −k·ω` bleeds off the tumble it is not being asked for. A ship that
+/// kept spinning after the key came up would be unflyable, and there is no
+/// engine knob for it — those three lines are in `main.rhai`.
+#[test]
+fn the_ship_turns_and_then_stops_turning() {
+    let (_world, mut b) = fresh();
+    step(&mut b, &input(0, 0));
+    let heading = |b: &RhaiDriver| {
+        let grids = b.grids().lock().unwrap();
+        let o = grids.to_world(0, FixedVec3::ZERO);
+        let p = grids.to_world(
+            0,
+            FixedVec3::new(Fixed::from_int(1), Fixed::ZERO, Fixed::ZERO),
+        );
+        (p.y - o.y).to_f64()
+    };
+    let straight = heading(&b);
+
+    for _ in 0..40 {
+        step(&mut b, &input_btn(0, 0, 8)); // hold the turn
+    }
+    let turned = heading(&b);
+    assert!(
+        (turned - straight).abs() > 0.05,
+        "the hull came round ({straight} → {turned})"
+    );
+
+    // Key up: the stabiliser has a couple of seconds to settle it.
+    hold(&mut b, 0, 0, 60);
+    let settled = heading(&b);
+    hold(&mut b, 0, 0, 30);
+    assert!(
+        (heading(&b) - settled).abs() < 0.02,
+        "and the stabiliser stopped the tumble instead of leaving it spinning"
+    );
+}
+
+/// The hull weighs its own geometry — the shell `build_hull` paints, not the
+/// 20×20×6 block that bounds it. This is what makes `engine_force` mean
+/// something: tune the drive against a brick and it would be three times too
+/// weak the day the map stopped lying.
+#[test]
+fn the_hull_weighs_the_shell_it_is() {
+    let (world, _b) = fresh();
+    let mass = {
+        let w = world.lock().unwrap();
+        w.field(w.entities(SHIP)[0], "body")
+    };
+    assert!(mass.is_some(), "the ship entity records its body");
+    // The block would be 2400 cells at density 1; the shell is well under it
+    // and well over nothing.
+    let (_world2, b2) = fresh();
+    let hull = {
+        let phys = b2.physics().expect("the ship map embeds physics");
+        let sim = phys.lock().unwrap();
+        sim.world
+            .body(monada_physics::BodyId(0))
+            .expect("the hull body")
+            .mass()
+            .to_f64()
+    };
+    assert!(
+        hull > 400.0 && hull < 2000.0,
+        "a shell, not the block that bounds it (2400): {hull}"
+    );
 }

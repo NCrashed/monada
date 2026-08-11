@@ -410,11 +410,25 @@ fn ship_input(t: usize) -> Command {
     // beside the spawn to the crew's hull, tick 240 cycles the airlock (which
     // changes what the crew can walk through), and tick 320 sets the crate down
     // wherever the walk has taken it.
-    let btn = match t {
+    let mut btn = match t {
         2 | 320 => 1,
         240 => 2,
         _ => 0,
     };
+    // …and the flight controls (docs/plans/ship-physics.md S-5), which are
+    // HELD rather than tapped: a burn amidships, then a turn each way. This is
+    // what puts the hull's own motion under the golden — its pose is no longer
+    // a hashed angle the map advances but an outcome of the physics, so the
+    // only way to gate it is to fly the ship and hash where it ends up.
+    if (100..=160).contains(&t) {
+        btn |= 4; // main drive
+    }
+    if (400..=430).contains(&t) {
+        btn |= 8; // turn one way
+    }
+    if (500..=520).contains(&t) {
+        btn |= 16; // …and back
+    }
     Command::on(
         0,
         EntityId(0),
@@ -967,8 +981,10 @@ pub fn render_goldens(checkpoints: &[Checkpoint]) -> String {
         "# scenarios: walk (scripted circle), kernel (pure-Rust anchor), \
          lockstep (two-session command demo), chess (turn-based rules), \
          rpg (real-time action-RPG: per-tick input + voxel-query + wave \
-         RNG), ship (two-deck crew sim: deck-relative collision + stairwell \
-         deck-flip), rts (1v1 strategy: nav-routed orders + economy + \
+         RNG), ship (two-deck crew sim aboard a rigid-body hull: \
+         deck-relative collision, stairwell deck-flip, grid membership, and \
+         a ship flown under its own engines), rts (1v1 strategy: nav-routed \
+         orders + economy + \
          combat + voxel_clear tree felling), phys (pure-Rust physics-crate \
          anchor: PhysicsWorld fixed-timestep shell), digger (volume-terrain \
          demo: physics-in-sim drive-train + chunk-hashed VolumeStore + \

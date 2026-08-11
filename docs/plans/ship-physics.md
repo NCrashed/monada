@@ -1,10 +1,11 @@
 # Plan: the ship is a rigid body — a hull that flies, and riders that don't judder
 
-Status: **S-0 – S-4 shipped 2026-08-11** — render-rate pose smoothing (§4), the
-ship map on the physics gate, freeform body shapes, a grid driven by a body, and
-engines that push and turn it (`host_api` 23). Everything the demo needs now
-exists; S-5 (the demo uses it) is what remains. Requested by the people
-extending the ship demo
+Status: **DONE, S-0 – S-5, 2026-08-11** — render-rate pose smoothing (§4), the
+ship map on the physics gate, freeform body shapes, a grid driven by a body,
+engines that push and turn it (`host_api` 23), and a demo that flies. What
+remains is §8's optional S-6 (interpolating riders' own motion), the live
+display pass §9 owes, and whatever the open questions in §10 turn into.
+Requested by the people extending the ship demo
 (`crates/monada-ship`), who are stuck at the first step: making the hull itself
 a physics body, with everything standing on it inheriting the pose smoothly.
 Engines that push and turn the ship come after — and fall out of it almost for
@@ -446,10 +447,32 @@ Each step is a headless test; nothing needs a display until S-5.
   - D7 stands: the map writes its own stabiliser. `a_map_can_write_its_own_rcs`
     is three lines of Rhai (`τ = −k·ω`) killing a tumble to a tenth in three
     seconds, with no damping knob anywhere in the engine.
-- **S-5 — the demo flies.** Engines on the hull, a throttle on the input mask,
-  the HUD reading speed / spin / mass, the tumble now an outcome the player can
-  cancel. `ship@` re-blessed; the oracle's `ship_input` presses the throttle on
-  fixed ticks so thrust is *under* the golden, not beside it.
+- **S-5 — the demo flies. DONE (2026-08-11).** `build_hull` dual-writes paint
+  and shape through one `hull_box`, `init` spawns the body and binds the grid,
+  `step_ship` stops posing the hull and starts flying it (two main engines, a
+  reaction wheel on Q/E, and the map's own `τ = −k·ω` stabiliser), the HUD reads
+  speed / spin / hull mass, and the hashed `spin` field is gone — the ship's
+  pose is nobody's state now. Manifest `host_api = 23` plus two actions; three
+  new canaries (15 in total, all green) and `ship@` re-blessed with the oracle
+  pressing burn and both turns on fixed ticks. Four findings:
+  - **The canaries were testing a ship whose engines never fired.** They drove
+    `RhaiBackend` directly, and the physics step — plus the grid-frame sync
+    after it — lives in `RhaiDriver`. Everything passed while the hull sat
+    still. They now run through the driver, which is also the tick order the
+    host uses.
+  - **Torque constants are sized against INERTIA, not mass.** The first tuning
+    (`rcs_force` 9000, `damp` 6000) was ~50× too weak: the hull's `I_zz` is
+    ~90 000, so the stabiliser bled off 0.2% of the spin per tick and the ship
+    span on for fifteen seconds after the key came up. Sized properly the gain
+    gives back a tenth of the remaining spin per tick and the wheel's top rate
+    is `rcs_force / damp`.
+  - **There is no `Vec3 * Fixed` in the script surface** — only `Fixed * Fixed`.
+    The map carries a three-line `scaled(v, s)`. Worth registering the operator
+    the next time the number types are touched; not worth a `host_api` bump on
+    its own.
+  - **The key layout moved:** Q/E is the natural pair for turning a ship, and E
+    was the crate verb, so crate went to F and the airlock to G. Defaults only —
+    every one of them is rebindable by declaration.
 - **S-6 (optional, separate) — rider interpolation.** §4.3: pass
   `(prev_pos, curr_pos, alpha)` into `build_instances` and lerp a rider's local
   position. The host already keeps both vectors for circle scenes

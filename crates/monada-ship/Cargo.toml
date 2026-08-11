@@ -31,12 +31,19 @@ audio = ["monada-host/audio"]
 monada-format = { workspace = true }
 
 [dev-dependencies]
-# Headless smoke / determinism tests drive the Rhai backend directly (no host,
-# no window) under a TerrainBridge, mirroring monada-rpg.
+# Headless smoke / determinism tests drive the Rhai DRIVER (no host, no window)
+# under a NullBridge. The driver rather than the bare backend because the hull
+# is a rigid body: its pose comes out of the physics step and the grid-frame
+# sync that follows it, both of which live in the driver's tick order
+# (docs/plans/ship-physics.md).
 monada-format = { workspace = true }
 monada-script = { workspace = true }
+# For the `SimDriver` trait the driver is stepped through.
+monada-net = { workspace = true }
 monada-sim = { workspace = true }
 monada-fixed = { workspace = true }
+# The canary that checks the hull weighs its shell reads the body directly.
+monada-physics = { workspace = true }
 # `examples/gen_sky.rs` writes the committed starfield panorama PNG.
 image = { version = "0.25", default-features = false, features = ["png"] }
 

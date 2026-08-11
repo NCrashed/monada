@@ -14,11 +14,19 @@
 //! walls are a script-side predicate, not `voxel_solid` — monada's heightmap
 //! collision store can't represent air below a floor (see `blocked`).
 //!
-//! Later slices bolt the roxlap-0.30 view/visibility seams onto this frame:
-//! wall cutout, deck clip, fog of war (docs/plans/ship-visibility.md).
+//! The hull is a RIGID BODY (docs/plans/ship-physics.md): `init` authors it
+//! once, into the voxels the player sees and the cells the dynamics weigh, and
+//! `grid_body` makes the body's pose the grid's frame. So the ship's motion is
+//! not something this map computes any more — it fires engines and the physics
+//! decides. Nothing about walking around inside it changed: the crew's
+//! positions are hull-local, and `blocked` / `reachable` / the stairs are the
+//! same cells they always were, at any attitude and under any acceleration.
 //!
-//! Archetypes register in order, so ids are fixed: CREW = 0, SHIP = 1.
-//! Model ids by `model_actor` order: crew = 0.
+//! The view/visibility seams ride the same frame: wall cutout, deck clip, fog
+//! of war (docs/plans/ship-visibility.md).
+//!
+//! Archetypes register in order, so ids are fixed: CREW = 0, SHIP = 1,
+//! CRATE = 2, ENGINE = 3. Model ids by `model_actor` order: crew = 0.
 
 // --- tuning (all fixed-point; no_float Rhai forbids IEEE) ---------------
 // NB: Rhai functions are pure — they do NOT see top-level `const`s — so the
@@ -238,20 +246,26 @@ fn init() {
     // press, not on every tick the key is held).
     archetype(["ix", "iy", "face", "deck", "carry", "btn", "prev"]);
 
-    // Ship: the hull's 3D orientation as a spin angle (radians) about a fixed
-    // tumble axis, plus the airlock state. HASHED sim state, so every peer turns
-    // the hull identically — the crew ride it via grid-local coords, so the
-    // hull's motion is real shared gameplay, not decoration. Archetype id 1
-    // (after CREW = 0); one ship entity, created here and advanced each tick by
-    // `step_ship`.
-    archetype(["spin", "door"]);
+    // Ship: the airlock state, and the physics body the hull IS. The hull's
+    // pose is no longer state this map keeps — it is an outcome of the
+    // dynamics, carried into the grid's frame by `grid_body` after every step
+    // (docs/plans/ship-physics.md). What stays hashed here is what the map
+    // decides: whether the airlock is open, and which body is the ship.
+    // Archetype id 1 (after CREW = 0).
+    archetype(["door", "body"]);
     let ship = entity_create(1);
-    entity_set_field(ship, "spin", fixed(0));
 
     // Cargo crates: no fields of their own beyond "is someone holding me". What
     // makes them interesting is WHICH FRAME they are in — riding the hull, or
     // released into the world (see `step_use`). Archetype id 2.
     archetype(["held"]);
+
+    // Engines: a thruster is an ENTITY on the hull, at a hull cell, pointing
+    // along a hull direction, with a throttle. Nothing about it is engine-side
+    // — `phys_thrust` takes a place, a direction and a force, and everything
+    // that makes this one a main drive rather than a tractor beam is the four
+    // fields below. Archetype id 3.
+    archetype(["dx", "dy", "dz", "throttle"]);
 
     set_light(vec3(ratio(-4, 10), ratio(-3, 10), ratio(8, 10)), ratio(8, 10));
     // Space outside the hull: a starfield panorama behind the scene. Unpainted
@@ -272,12 +286,41 @@ fn init() {
         status("this host lacks cubic grids (host_api 15+ required)");
         return;
     }
-    build_hull(ship_grid);
-    // Turn the hull about its own middle, not the corner its local origin sits
-    // on. `build_hull` spans sim cells 0..=19 in x/y and 0..=5 in z, so the
-    // centre is (9.5, 9.5, 2) — without this the whole ship swings through an
-    // arc wider than itself every time `step_ship` re-orients it.
-    grid_pivot(ship_grid, vec3(ratio(19, 2), ratio(19, 2), fixed(2)));
+
+    // Space: nothing falls. The map owns feel constants, so gravity is a map
+    // decision like any other — a station under spin gravity would say
+    // something else here and change nothing about the code below.
+    phys_gravity(fixed(0), fixed(0), fixed(0));
+    // Hull steel. FIRST material registered, so it is id 0 — the id every
+    // un-materialed paint writes (the material-0 contract). This map paints no
+    // world terrain at all, so id 0 is simply what the ship is made of.
+    let steel = phys_material(fixed(1), ratio(6, 10), ratio(1, 10), fixed(4));
+
+    // The hull, authored ONCE into two places: the voxels the player sees and
+    // the cells the dynamics weigh. `build_hull` writes both through
+    // `hull_box`, so the ship's mass, centre of mass and inertia are the real
+    // geometry's — a shell's, not the solid block that bounds it. The two can
+    // no longer drift apart, which is the same contract `blocked()` still owes
+    // the paint by hand.
+    let shape = phys_shape(20, 20, 6);
+    build_hull(ship_grid, shape, steel);
+    let body = phys_body(shape, vec3(fixed(0), fixed(0), fixed(0)));
+    entity_set_field(ship, "body", fixed(body));
+    // From here the map does not pose the hull at all: the body's pose becomes
+    // the grid's frame after every physics step, and the grid's pivot becomes
+    // the body's centre of mass — so the ship turns about the point it really
+    // turns about, and no hand-authored pivot can drift from it. Crew, crates,
+    // the fog cone, the deck cutaway and the camera all ride the frame exactly
+    // as they did when a hashed `spin` field drove it.
+    grid_body(ship_grid, body);
+
+    // The drive: two main engines low and aft, thrusting along the hull's +x,
+    // mounted symmetrically about the centreline so full throttle pushes
+    // straight rather than yawing. Manoeuvring is `phys_torque` in `step_ship`
+    // — a reaction wheel rather than nozzles, because a hull this size wants to
+    // turn on the spot, not fly a burn to rotate.
+    mount_engine(0, 7, 1, 1, 0, 0);
+    mount_engine(0, 12, 1, 1, 0, 0);
 
     // The animated billboard crew actor (id 0 by call order). The 3rd arg is
     // the rendered height in cells; the host scales the art to it. Reuses the
@@ -325,7 +368,7 @@ fn init() {
     // (per-client — each peer sees its own line of sight). Render-side.
     vision_config(110, 9, 3);
 
-    status("ship demo — WASD walk, E crate, F airlock; the fore-starboard stairwell climbs between decks");
+    status("ship demo — WASD walk, F crate, G airlock, SPACE burn, Q/E turn; the hull is a rigid body and you are standing in it");
 }
 
 /// Paint the two-deck hull into `grid`, for the EYE. Collision is the `blocked`
@@ -336,46 +379,69 @@ fn init() {
 /// perpendicular dividers so they read distinct, and sit `DECK_STRIDE = 3`
 /// cells apart. Every z here is a CELL of the cubic grid (16 world voxels), so
 /// a "one cell" wall is as tall as the crew is wide.
-fn build_hull(grid) {
+fn build_hull(grid, shape, mat) {
     let plate = 0x8055_5f6b; // steel floor plating
     let wall = 0x8079_8592; // hull wall
     let step = 0x80b8_9850; // brass stair steps
 
     // --- deck 0 (lower): floor plate cell 0, walls cells 1..2 ---
-    voxel_fill_in(grid, 0, 0, 0, 19, 19, 0, plate);
-    rim_walls(grid, 1, 2, wall);
+    hull_box(grid, shape, 0, 0, 0, 19, 19, 0, plate, mat);
+    rim_walls(grid, shape, 1, 2, wall, mat);
     // Full divider along y=10 splitting fore (y<10) / aft (y>10), doorway gap
     // x 9..10 (the stairwell is off this row, so no other opening is needed).
-    voxel_fill_in(grid, 1, 10, 1, 8, 10, 2, wall);
-    voxel_fill_in(grid, 11, 10, 1, 18, 10, 2, wall);
+    hull_box(grid, shape, 1, 10, 1, 8, 10, 2, wall, mat);
+    hull_box(grid, shape, 11, 10, 1, 18, 10, 2, wall, mat);
 
     // --- deck 1 (upper): floor plate cell 3 with a HOLE over the staircase
     // (cx 15..18 × cy 1..2, so the crew climbs up through it), walls cells 4..5 ---
-    voxel_fill_in(grid, 0, 0, 3, 14, 19, 3, plate); // west of the stair hole
-    voxel_fill_in(grid, 19, 0, 3, 19, 19, 3, plate); // east sliver (under the rim)
-    voxel_fill_in(grid, 15, 3, 3, 18, 19, 3, plate); // north of the hole (cy 3..19)
-    rim_walls(grid, 4, 5, wall);
+    hull_box(grid, shape, 0, 0, 3, 14, 19, 3, plate, mat); // west of the stair hole
+    hull_box(grid, shape, 19, 0, 3, 19, 19, 3, plate, mat); // east sliver (under the rim)
+    hull_box(grid, shape, 15, 3, 3, 18, 19, 3, plate, mat); // north of the hole (cy 3..19)
+    rim_walls(grid, shape, 4, 5, wall, mat);
     // Divider along x=10 splitting port (x<10) / starboard (x>10), gap y 9..10.
-    voxel_fill_in(grid, 10, 1, 4, 10, 8, 5, wall);
-    voxel_fill_in(grid, 10, 11, 4, 10, 18, 5, wall);
+    hull_box(grid, shape, 10, 1, 4, 10, 8, 5, wall, mat);
+    hull_box(grid, shape, 10, 11, 4, 10, 18, 5, wall, mat);
 
     // The staircase (fore-starboard corner, cy 1..2) climbs EAST: solid step
     // blocks at cx 15..18, each a column from cell 0 up to `stair_z(cx)` — 0 at
     // cx 15 (flush with the lower floor) to 3 (the upper floor) at cx 18, one
     // cell per step. No surrounding wall: the blocks' own risers do the
     // containment (see `reachable`). Keep in sync with `on_stairs` / `stair_z`.
-    voxel_fill_in(grid, 15, 1, 0, 15, 2, 0, step); // cx 15 → z 0 (lower floor)
-    voxel_fill_in(grid, 16, 1, 0, 16, 2, 1, step);
-    voxel_fill_in(grid, 17, 1, 0, 17, 2, 2, step);
-    voxel_fill_in(grid, 18, 1, 0, 18, 2, 3, step); // cx 18 → z 3 (upper floor)
+    hull_box(grid, shape, 15, 1, 0, 15, 2, 0, step, mat); // cx 15 → z 0 (lower floor)
+    hull_box(grid, shape, 16, 1, 0, 16, 2, 1, step, mat);
+    hull_box(grid, shape, 17, 1, 0, 17, 2, 2, step, mat);
+    hull_box(grid, shape, 18, 1, 0, 18, 2, 3, step, mat); // cx 18 → z 3 (upper floor)
 }
 
-/// A rim wall band (z `lo`..`hi`) around the 20×20 hull edge, painted into `grid`.
-fn rim_walls(grid, lo, hi, col) {
-    voxel_fill_in(grid, 0, 0, lo, 19, 0, hi, col); // south
-    voxel_fill_in(grid, 0, 19, lo, 19, 19, hi, col); // north
-    voxel_fill_in(grid, 0, 0, lo, 0, 19, hi, col); // west
-    voxel_fill_in(grid, 19, 0, lo, 19, 19, hi, col); // east
+/// One authored cell box of hull: painted for the eye AND filled into the body
+/// shape for the dynamics, in one call so the two cannot drift apart. The
+/// ship's mass, centre of mass and inertia are whatever this paints — which is
+/// why the hull flies like a shell rather than like the brick that bounds it.
+fn hull_box(grid, shape, x0, y0, z0, x1, y1, z1, col, mat) {
+    voxel_fill_in(grid, x0, y0, z0, x1, y1, z1, col);
+    phys_shape_fill(shape, x0, y0, z0, x1, y1, z1, mat);
+}
+
+/// A rim wall band (z `lo`..`hi`) around the 20×20 hull edge.
+fn rim_walls(grid, shape, lo, hi, col, mat) {
+    hull_box(grid, shape, 0, 0, lo, 19, 0, hi, col, mat); // south
+    hull_box(grid, shape, 0, 19, lo, 19, 19, hi, col, mat); // north
+    hull_box(grid, shape, 0, 0, lo, 0, 19, hi, col, mat); // west
+    hull_box(grid, shape, 19, 0, lo, 19, 19, hi, col, mat); // east
+}
+
+/// Bolt a thruster to hull cell `(cx, cy, cz)` pointing along hull direction
+/// `(dx, dy, dz)`. It rides the hull grid like the crew do, so its anchor is
+/// authored in the same cells the hull is painted in — and `phys_thrust` reads
+/// exactly that, in the shape coordinates `build_hull` filled.
+fn mount_engine(cx, cy, cz, dx, dy, dz) {
+    let e = entity_create(3);
+    entity_set_position(e, vec3(fixed(cx), fixed(cy), fixed(cz)));
+    entity_set_grid(e, hull_grid());
+    entity_set_field(e, "dx", fixed(dx));
+    entity_set_field(e, "dy", fixed(dy));
+    entity_set_field(e, "dz", fixed(dz));
+    entity_set_field(e, "throttle", fixed(0));
 }
 
 // --- cargo + airlock -----------------------------------------------------
@@ -457,7 +523,10 @@ fn step_use(c) {
     let btn = to_int(entity_field(c, "btn"));
     let prev = to_int(entity_field(c, "prev"));
     entity_set_field(c, "prev", fixed(btn));
-    let pressed = btn & (15 - prev); // bits that went 0 -> 1 this tick
+    // Bits that went 0 -> 1 this tick, over the EDGE bits only (1 = use,
+    // 2 = airlock). The flight controls above them (4 = burn, 8/16 = turn) are
+    // held states, read as they are — an engine fires while the key is down.
+    let pressed = btn & (3 - (prev & 3));
 
     if (pressed & 2) == 2 {
         toggle_door();
@@ -526,12 +595,18 @@ fn ensure_crew(player) {
 // named action.
 fn local_tick(dt) {
     let mv = action_axis2("move");
-    // Buttons ride the command's spare z as a bit mask (1 = use, 2 = door): one
-    // command per tick either way, and the sim takes the rising edge — the
-    // local layer is stateless and cannot debounce anything itself.
+    // Buttons ride the command's spare z as a bit mask: one command per tick
+    // either way. The low two are VERBS the sim takes on the rising edge (the
+    // local layer is stateless and cannot debounce anything itself); the flight
+    // controls above them are HELD states — an engine burns while the key is
+    // down, so there is nothing to debounce.
     let btn = 0;
     if action_down("use") { btn = btn + 1; }
     if action_down("door") { btn = btn + 2; }
+    if action_down("burn") { btn = btn + 4; }
+    let turn = action_axis("turn");
+    if turn > fixed(0) { btn = btn + 8; }
+    if turn < fixed(0) { btn = btn + 16; }
     submit_command(0, 0, vec3(mv.x, mv.y, fixed(btn)));
 }
 
@@ -558,28 +633,97 @@ fn tick() {
     build_deck_hud();
 }
 
-/// Advance and apply the hull's 3D rotation. The spin angle is HASHED sim state
-/// (an entity field), so every peer turns the hull identically; the crew ride it
-/// via grid-local coords, so this is real shared motion, not decoration. The
-/// hull tumbles slowly about a TILTED axis (not pure yaw) to exercise full 3D
-/// orientation — pitch/roll, not merely a flat spin. It turns in place about
-/// the hull's centre, the pivot `init` names via `grid_pivot`.
+/// Fly the ship. Nothing here poses the hull: the map fires engines, the
+/// dynamics decide where the ship ends up, and `grid_body` carries the answer
+/// into the frame the crew stand in. That inversion is the whole slice — the
+/// hull's motion used to be a hashed angle this function advanced, and is now
+/// an outcome nobody stores.
+///
+/// Controls (any crew member; the ship has no console yet): SPACE burns the
+/// main drive, Q/E turn. Fixed-point throughout, so every peer flies the same
+/// ship.
 fn step_ship() {
-    let ship = ship_entity();
-    let spin = entity_field(ship, "spin") + ratio(2, 100); // rad / tick (30 Hz)
-    // Wrap so the fixed-point angle never grows without bound.
-    if spin > tau() {
-        spin = spin - tau();
+    let body = ship_body();
+    let cmd = ship_controls();
+
+    // Main drive: one throttle across both engines, so the pair pushes along
+    // the centreline. Each engine applies its own force at its own anchor —
+    // lose one to a hull breach some day and the ship yaws, for free.
+    let throttle = if (cmd & 4) == 4 { fixed(1) } else { fixed(0) };
+    for e in entities_of(3) {
+        entity_set_field(e, "throttle", throttle);
+        if throttle > fixed(0) {
+            phys_thrust(
+                body,
+                entity_position(e),
+                vec3(entity_field(e, "dx"), entity_field(e, "dy"), entity_field(e, "dz")),
+                engine_force(),
+            );
+        }
     }
-    entity_set_field(ship, "spin", spin);
-    // Tilted tumble axis (host normalises it): mostly +z (yaw) with a +x lean,
-    // so the hull visibly rolls in 3D rather than spinning flat. The whole pose
-    // is replaced each tick from the hashed angle — no render-side accumulation.
-    grid_orient(hull_grid(), vec3(ratio(3, 10), fixed(0), fixed(1)), spin);
-    // …and the hull TRAVELS while it turns: a slow sway along the ship's x, so
-    // the frame under the crew translates as well as rotates. Same discipline —
-    // derived from the hashed angle, so it is shared motion, not decoration.
-    grid_move(hull_grid(), vec3(sin(spin) * fixed(4), fixed(0), fixed(0)));
+
+    // Attitude: a reaction wheel about the hull's own up axis, so Q/E turn the
+    // ship on the spot rather than flying an arc. `grid_world` maps the hull's
+    // +z into the world, which is what a torque wants — the hull may be at any
+    // attitude by the time the player presses the key.
+    let up = hull_axis(fixed(0), fixed(0), fixed(1));
+    if (cmd & 8) == 8 {
+        phys_torque(body, scaled(up, rcs_force()));
+    }
+    if (cmd & 16) == 16 {
+        phys_torque(body, scaled(up, -rcs_force()));
+    }
+
+    // …and the stabiliser that makes it flyable: bleed off whatever tumble the
+    // player is not asking for (`τ = −k·ω`). Three lines and no engine knob —
+    // how hard a ship fights its own inertia is a property of the SHIP, so it
+    // belongs here (DESIGN.md §3.2).
+    let w = phys_angvel(body);
+    phys_torque(body, vec3(-w.x * damp(), -w.y * damp(), -w.z * damp()));
+}
+
+/// A hull-local direction in world coordinates: the difference between two
+/// points of the hull's frame, so the hull's translation cancels and only its
+/// rotation remains. What a world-frame torque needs from a ship that may be
+/// at any attitude.
+fn hull_axis(dx, dy, dz) {
+    let o = grid_world(hull_grid(), vec3(fixed(0), fixed(0), fixed(0)));
+    let p = grid_world(hull_grid(), vec3(dx, dy, dz));
+    vec3(p.x - o.x, p.y - o.y, p.z - o.z)
+}
+
+/// A vector times a scalar (no `Vec3 * Fixed` operator in the host API).
+fn scaled(v, s) { vec3(v.x * s, v.y * s, v.z * s) }
+
+/// The body the hull IS, stored on the ship entity by `init` rather than
+/// written as a literal: which id `phys_body` hands out is an ordering detail
+/// of setup, exactly like the entity id `ship_entity` looks up.
+fn ship_body() { to_int(entity_field(ship_entity(), "body")) }
+
+/// Main-drive force, in mass·cells/s². The hull weighs ~1500 (its cells at
+/// density 1), so this is about 1 cell/s² per engine — a freighter, not a
+/// fighter.
+fn engine_force() { fixed(750) }
+
+/// Reaction-wheel torque, and the stabiliser gain that bleeds off any tumble
+/// the player did not ask for. Both are torques, so they are sized against the
+/// hull's INERTIA (~90 000 for a 20-cell shell of this mass), not its mass: the
+/// gain gives roughly a tenth of the remaining spin back per tick, so a turn
+/// settles in about a third of a second, and the wheel's torque against that
+/// gain sets the top turn rate at `rcs_force / damp` ≈ 0.6 rad/s.
+fn rcs_force() { fixed(170000) }
+fn damp() { fixed(280000) }
+
+/// The ship-control bits of the local crew's input mask (4 = burn, 8/16 =
+/// turn). Read from crew 0 rather than summed: a two-player hull has one
+/// helm, and the alternative — every crew member's keys adding up — would make
+/// the ship fly twice as fast in co-op.
+fn ship_controls() {
+    let crew = entities_of(0);
+    if crew.len() == 0 {
+        return 0;
+    }
+    to_int(entity_field(crew[0], "btn"))
 }
 
 /// Always-on HUD readout of the LOCAL crew's current deck, so climbing the
@@ -601,15 +745,41 @@ fn build_deck_hud() {
     // 12pt first line (≈24px scaled) with room to spare.
     ui_text(8, 8, label, 12);
     let hands = if to_int(entity_field(c, "carry")) == 0 {
-        "E: pick up a crate"
+        "F: pick up a crate"
     } else if in_airlock(c) {
-        "E: release into space"
+        "F: release into space"
     } else {
-        "E: set the crate down"
+        "F: set the crate down"
     };
     ui_text(8, 42, hands, 8);
-    let lock = if door_open() { "F: airlock OPEN (starboard, deck 1)" } else { "F: airlock closed" };
+    let lock = if door_open() { "G: airlock OPEN (starboard, deck 1)" } else { "G: airlock closed" };
     ui_text(8, 60, lock, 8);
+
+    // The flight readout. Speed and spin are the two numbers that tell a
+    // player whether the ship is doing what they asked, and mass is what makes
+    // the drive feel the size it does — all three read straight off the body,
+    // so a hull that loses cells some day reports its new self without this
+    // line changing.
+    let body = ship_body();
+    let v = phys_vel(body);
+    let w = phys_angvel(body);
+    ui_text(8, 78, "SPACE burn  Q/E turn", 8);
+    ui_text(8, 96, "speed " + to_int(mag(v) * fixed(10)) + " dm/s", 8);
+    ui_text(8, 114, "spin " + to_int(mag(w) * fixed(100)) + " crad/s", 8);
+    ui_text(8, 132, "hull mass " + to_int(phys_mass(body)), 8);
+}
+
+/// Length of a vector, octagonally approximated — the HUD wants a number to
+/// read, not a square root the fixed-point library does not have.
+fn mag(v) {
+    let ax = absf(v.x);
+    let ay = absf(v.y);
+    let az = absf(v.z);
+    let hi = if ax > ay { ax } else { ay };
+    let lo = if ax > ay { ay } else { ax };
+    let top = if hi > az { hi } else { az };
+    let rest = (hi + lo + az - top) * ratio(1, 2);
+    top + rest
 }
 
 /// Advance one crew member: turn its stored input into a view-relative,
