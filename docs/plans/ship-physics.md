@@ -473,6 +473,30 @@ Each step is a headless test; nothing needs a display until S-5.
   - **The key layout moved:** Q/E is the natural pair for turning a ship, and E
     was the crate verb, so crate went to F and the airlock to G. Defaults only —
     every one of them is rebindable by declaration.
+
+### 8a. The live pass, and what it found instead
+
+`cargo run -p monada-ship` **aborts on this box before drawing a frame**, and
+the crash is not this plan's: it reproduces bit-identically at `e88ab9c`, the
+commit before S-0. wgpu 29 rejects a buffer as invalid and roxlap maps it
+anyway:
+
+```
+Buffer with 'roxlap-gpu scene.occupancy.page0' label is invalid
+  <roxlap_gpu::scene::GpuSceneResident>::upload
+  <roxlap_render::gpu::GpuBackend>::render
+```
+
+Scope, measured rather than guessed: **ship** and **digger** abort (the digger
+on a different buffer, `sprite_reg.instances` — same shape of failure, same
+first upload); **rpg** and **desert** run for as long as you leave them. So it
+is neither the volume terrain mode nor physics — the desert has both. The
+device is Mesa's NVK on an RTX 3070 under Vulkan.
+
+`ROXLAP_GPU=0` forces roxlap's CPU backend, and the ship demo then runs
+happily. That is how to look at this work today, and it is what the live pass
+§9 owes should use until the GPU path is fixed upstream — where it belongs,
+since nothing monada does can make a buffer roxlap created valid.
 - **S-6 (optional, separate) — rider interpolation.** §4.3: pass
   `(prev_pos, curr_pos, alpha)` into `build_instances` and lerp a rider's local
   position. The host already keeps both vectors for circle scenes
