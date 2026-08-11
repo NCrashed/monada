@@ -43,7 +43,7 @@ use roxlap_render::{
     SpriteSet, ViewCutout, VoxelClipId,
 };
 use roxlap_scene::fow::{DeckBand, FogOfWar, FowObserver, FowTwin, VisionConfig};
-use roxlap_scene::{GridId, GridTransform, Scene};
+use roxlap_scene::{addr, GridId, GridTransform, RayHit, Scene};
 
 /// World voxels per sim unit (x/y). The board's 8 squares span 8·SCALE.
 const SCALE: f64 = 16.0;
@@ -62,6 +62,23 @@ const PICK_RADIUS: f64 = 12.0;
 /// brightness reference). Kept gentle so the board reads bright — only
 /// shadowed faces darken (see `set_light`), not perpendicular ones.
 const MAX_SIDE_SHADE: f32 = 18.0;
+/// The twelve edges of a `gizmo_box`, as index pairs into the eight
+/// corners [`MapRender::cell_box_corners`] returns: the near face, the far
+/// face, and the four struts between them.
+const BOX_EDGES: [(usize, usize); 12] = [
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+];
 /// Outward normals of a grid cube's six faces, in voxlap side-shade order
 /// (top/bottom/left/right/up/down). Used to shade the board by sun angle.
 const CUBE_FACE_NORMALS: [[f64; 3]; 6] = [
@@ -1419,6 +1436,21 @@ pub struct MapRender {
     /// The cursor's ground point in sim coords (`pick_ground`), refreshed
     /// by the host each frame; `None` while the ray misses.
     cursor_ground: Option<(f64, f64)>,
+    /// This frame's view ray under the cursor, kept RAW (`origin, dir`)
+    /// beside the points derived from it: the grid picks
+    /// (`pick_grid` / `pick_cell` / `pick_face`) march the scene
+    /// themselves, and a ray is the only form that question has an answer
+    /// in. `None` before the first refresh, or with no window.
+    cursor_ray: Option<(DVec3, DVec3)>,
+    /// Overlay outlines the local layer queued (`gizmo_*`), drawn over
+    /// the composited frame and RETAINED until the map calls
+    /// `gizmo_clear` — the same contract the HUD canvas has, and for the
+    /// same reason: a map draws them on its own clock (a tick, a frame),
+    /// which is slower than the renderer's.
+    gizmos: Vec<Line3>,
+    /// Current `gizmo_style`: line width in pixels, and whether segments
+    /// ignore the depth buffer. State, like `ui_scale`.
+    gizmo_style: (f32, bool),
     /// Sim-space aim yaw toward the cursor (`aim_yaw`), holding its last
     /// value while the ray misses — the twin-stick aim convention.
     cursor_aim: f64,
@@ -1574,6 +1606,9 @@ impl MapRender {
             action_states: MapActionStates::new(actions),
             ui_click_bits: 0,
             cursor_ground: None,
+            cursor_ray: None,
+            gizmos: Vec::new(),
+            gizmo_style: (2.0, false),
             cursor_aim: 0.0,
             cursor_entity: -1,
             cutout: None,
@@ -1903,6 +1938,7 @@ impl MapRender {
     /// `aim_yaw`) from this frame's view ray. Aim holds its last value on
     /// a miss.
     pub fn set_cursor_ray(&mut self, world: &World, origin: DVec3, dir: DVec3) {
+        self.cursor_ray = Some((origin, dir));
         self.cursor_ground = self.ground_sim(origin, dir);
         self.cursor_entity = self.pick(world, origin, dir).1;
         if let Some((mx, my)) = self.cursor_ground {
@@ -2836,6 +2872,176 @@ impl MapRender {
         Some((sim.x, sim.y))
     }
 
+    // --- the grid cursor (`host_api` 24) -----------------------------------
+    //
+    // The two picks above answer "where does the cursor meet the ground",
+    // which presumes a ground: a plane on a column map, the world grid on
+    // a volume one. A map whose entire world is a moving hull has
+    // neither — `volume_ground_sim` bails at its first `?` — and even
+    // with a plane, a plane cannot name a cell of a two-deck ship at
+    // attitude. So this asks the scene instead: which voxel of which grid
+    // does the ray actually hit, and which cell of that grid's own
+    // convention is it.
+
+    /// How far the cursor ray is marched, in world voxels. The camera's
+    /// own orbit tops out at 2000 and a hull is ~300 across, so this
+    /// clears any framing of any map without being unbounded — an
+    /// unbounded march off the edge of a world is a hang, not a miss.
+    const CURSOR_RANGE: f64 = 4096.0;
+
+    /// The cursor ray's first solid voxel across the scene's *queryable*
+    /// grids (so a fog twin, which is presentation-only, is not in the
+    /// way), or `None` while it meets nothing.
+    ///
+    /// **Clipped** on purpose: `raycast_clipped` reads each grid's
+    /// `z_clip`, which `apply_deck_clip` has already set to the local
+    /// crew's deck band — so the cursor lands on the deck the player is
+    /// looking into rather than on the roof that was cut away to let them
+    /// look. Gameplay traces would want the unclipped `raycast`; a cursor
+    /// wants what is on screen.
+    fn cursor_hit(&self) -> Option<RayHit> {
+        let (origin, dir) = self.cursor_ray?;
+        self.scene
+            .raycast_clipped(origin, dir, MapRender::CURSOR_RANGE)
+    }
+
+    /// The scene grid a `pick_*`/`gizmo_*` handle names: a script grid by
+    /// its handle, or the world/terrain grid for `-1`. `None` when the
+    /// handle is stale or the map has painted no world grid yet.
+    fn addressed_grid(&self, handle: i64) -> Option<GridId> {
+        if handle < 0 {
+            self.world_grid
+        } else {
+            self.grid_id(handle)
+        }
+    }
+
+    /// The script handle of a scene grid, or `-1` (the world grid, and
+    /// any grid the engine spawned for itself, are not script grids).
+    fn grid_handle(&self, id: GridId) -> i64 {
+        self.grids
+            .iter()
+            .position(|g| *g == Some(id))
+            .map_or(-1, |i| i as i64)
+    }
+
+    /// The sim cell a grid-local voxel belongs to: the inverse of the
+    /// three box transforms this file paints with, chosen by the same
+    /// three-way rule `deck_clip_z` uses — the isotropic volume world
+    /// grid addresses cells directly, a cubic script grid scales z like
+    /// x/y, and a column grid gives a cell one voxel row.
+    #[allow(clippy::cast_possible_truncation)]
+    fn cell_of_voxel(&self, id: GridId, v: IVec3) -> (i64, i64, i64) {
+        let (vx, vy, vz) = (i64::from(v.x), i64::from(v.y), i64::from(v.z));
+        if self.volume && Some(id) == self.world_grid {
+            // `cell_box_to_volume_grid` inverted.
+            return (-vx - 1, vy, -vz - 1);
+        }
+        let s = SCALE as i64;
+        let gz = GROUND_Z as i64;
+        // `sim_box_to_world` / `cell_box_to_cubic` inverted: world X is
+        // mirrored (cell x owns voxels `[-(x+1)·S, -x·S)`), world z grows
+        // down from `GROUND_Z`, and only a cubic grid scales z.
+        (
+            (-vx - 1).div_euclid(s),
+            vy.div_euclid(s),
+            if self.grid_is_cubic(id) {
+                (gz + s - 1 - vz).div_euclid(s)
+            } else {
+                gz - vz
+            },
+        )
+    }
+
+    /// A sim cell as the script's fixed-point vector.
+    #[allow(clippy::cast_possible_truncation)]
+    fn cell_vec(cell: (i64, i64, i64)) -> FixedVec3 {
+        let int = |v: i64| Fixed::from_int(i32::try_from(v).unwrap_or(0));
+        FixedVec3::new(int(cell.0), int(cell.1), int(cell.2))
+    }
+
+    /// The eight world-space corners of an inclusive sim-cell box in
+    /// `handle`'s frame, in the order `draw_gizmo_box` walks its edges.
+    ///
+    /// One place where all three cell conventions and the grid's pose
+    /// meet, so a gizmo lands exactly on the voxels `voxel_fill_in`
+    /// painted with the same numbers — including on a hull that is
+    /// somewhere else entirely by the time it is drawn.
+    fn cell_box_corners(&self, handle: i64, a: (i64, i64, i64), b: (i64, i64, i64)) -> [DVec3; 8] {
+        let id = self.addressed_grid(handle);
+        let (lo, hi, vws) = match id {
+            Some(id) if self.volume && Some(id) == self.world_grid => {
+                let (lo, hi) = cell_box_to_volume_grid(a.0, a.1, a.2, b.0, b.1, b.2);
+                (lo, hi, SCALE)
+            }
+            Some(id) if self.grid_is_cubic(id) => {
+                let (lo, hi) = cell_box_to_cubic(a.0, a.1, a.2, b.0, b.1, b.2);
+                (lo, hi, 1.0)
+            }
+            _ => {
+                let (lo, hi) = sim_box_to_world(
+                    a.0.min(b.0),
+                    a.1.min(b.1),
+                    a.2.min(b.2),
+                    a.0.max(b.0),
+                    a.1.max(b.1),
+                    a.2.max(b.2),
+                );
+                (lo, hi, 1.0)
+            }
+        };
+        // A voxel box is inclusive, so the far corner is one voxel past
+        // `hi` — the outside of the last cell rather than its near edge.
+        let mn = DVec3::new(f64::from(lo.x), f64::from(lo.y), f64::from(lo.z)) * vws;
+        let mx = DVec3::new(
+            f64::from(hi.x) + 1.0,
+            f64::from(hi.y) + 1.0,
+            f64::from(hi.z) + 1.0,
+        ) * vws;
+        // The grid's pose, if it has one: an unbound world frame is the
+        // identity, which is what a map with no grids expects.
+        let pose = id.and_then(|id| self.scene.grid(id)).map(|g| g.transform);
+        let place = |p: DVec3| match pose {
+            Some(t) => t.rotation * p + t.origin,
+            None => p,
+        };
+        [
+            place(DVec3::new(mn.x, mn.y, mn.z)),
+            place(DVec3::new(mx.x, mn.y, mn.z)),
+            place(DVec3::new(mx.x, mx.y, mn.z)),
+            place(DVec3::new(mn.x, mx.y, mn.z)),
+            place(DVec3::new(mn.x, mn.y, mx.z)),
+            place(DVec3::new(mx.x, mn.y, mx.z)),
+            place(DVec3::new(mx.x, mx.y, mx.z)),
+            place(DVec3::new(mn.x, mx.y, mx.z)),
+        ]
+    }
+
+    /// A sim-space point of `handle`'s frame, in world space — the
+    /// `gizmo_line` endpoint transform. Uses the same seat convention as
+    /// an entity's (`entity_world_of_in`, cell centres), because a map
+    /// draws a line between things it can also stand on.
+    fn gizmo_point(&self, handle: i64, p: FixedVec3) -> DVec3 {
+        let id = self.addressed_grid(handle);
+        let cubic = id.is_some_and(|id| self.grid_is_cubic(id));
+        // A script grid's own z convention; the world frame keeps the
+        // map's (`self.volume`), exactly as `place_in` splits them.
+        let local = entity_world_of_in(if handle < 0 { self.volume } else { cubic }, p);
+        match id.and_then(|id| self.scene.grid(id)) {
+            Some(g) => g.transform.rotation * local + g.transform.origin,
+            None => local,
+        }
+    }
+
+    /// Draw this frame's queued overlay outlines. Retained state, so a
+    /// map that draws on the tick clock keeps its ghost on screen through
+    /// the frames between ticks; `gizmo_clear` is the map's to call.
+    fn draw_gizmos(&self, renderer: &mut SceneRenderer, camera: &Camera) {
+        if !self.gizmos.is_empty() {
+            renderer.draw_lines(camera, &self.gizmos);
+        }
+    }
+
     /// The camera's focus point in the same sim convention as
     /// [`ground_sim`](Self::ground_sim). Maps follow the local player with
     /// `camera_focus`, so this is effectively the local player's position —
@@ -3184,6 +3390,7 @@ impl MapRender {
         renderer.render(&mut self.scene, camera, &frame);
 
         self.draw_drag_rect(renderer, camera);
+        self.draw_gizmos(renderer, camera);
         if debug {
             self.draw_debug_footprints(renderer, camera);
         }
@@ -4576,6 +4783,118 @@ impl HostBridge for MapRender {
         self.cursor_entity
     }
 
+    fn pick_grid(&self) -> i64 {
+        self.cursor_hit()
+            .map_or(-1, |hit| self.grid_handle(hit.grid))
+    }
+
+    fn pick_cell(&self, grid: i64) -> Option<FixedVec3> {
+        let hit = self.cursor_hit()?;
+        let want = self.addressed_grid(grid)?;
+        // A map asks about the hull it cares about: a hit on some other
+        // grid is a miss, not a cell in the wrong frame.
+        (hit.grid == want).then(|| MapRender::cell_vec(self.cell_of_voxel(want, hit.voxel)))
+    }
+
+    fn pick_face(&self, grid: i64) -> Option<FixedVec3> {
+        let (_, dir) = self.cursor_ray?;
+        let hit = self.cursor_hit()?;
+        let want = self.addressed_grid(grid)?;
+        if hit.grid != want {
+            return None;
+        }
+        let g = self.scene.grid(want)?;
+        let len = dir.length();
+        if len < 1e-9 {
+            return None;
+        }
+        let dirn = dir / len;
+        // Step back half a voxel along the ray: out of the solid cell it
+        // hit, into the air the surface faces. The same nudge
+        // `Scene::resolve_voxel` uses to get *in*, run the other way.
+        let out = hit.world - dirn * (0.5 * g.transform.voxel_world_size);
+        let glp = addr::world_to_grid_local(out, &g.transform);
+        let d = addr::voxel_global(glp.chunk, glp.voxel) - hit.voxel;
+        // One axis, even if a corner graze moved two: a face is one face.
+        // A degenerate step (the ray nearly parallel to the surface)
+        // falls back to the axis the ray came down, which is the face it
+        // must have crossed.
+        let local_dir = g.transform.rotation.inverse() * dirn;
+        let (dx, dy, dz) = (d.x, d.y, d.z);
+        let axis = if dx == 0 && dy == 0 && dz == 0 {
+            let (ax, ay, az) = (
+                local_dir.x.abs(),
+                local_dir.y.abs(),
+                local_dir.z.abs(),
+            );
+            if ax >= ay && ax >= az {
+                (-local_dir.x.signum() as i32, 0, 0)
+            } else if ay >= az {
+                (0, -local_dir.y.signum() as i32, 0)
+            } else {
+                (0, 0, -local_dir.z.signum() as i32)
+            }
+        } else if dx.abs() >= dy.abs() && dx.abs() >= dz.abs() {
+            (dx.signum(), 0, 0)
+        } else if dy.abs() >= dz.abs() {
+            (0, dy.signum(), 0)
+        } else {
+            (0, 0, dz.signum())
+        };
+        // Voxel axes → SIM axes: world X is mirrored and world z grows
+        // down, so a normal along voxel +x points at sim −x, and the top
+        // face of a floor (voxel −z) is sim +z, which is up.
+        Some(FixedVec3::new(
+            Fixed::from_int(-axis.0),
+            Fixed::from_int(axis.1),
+            Fixed::from_int(-axis.2),
+        ))
+    }
+
+    fn gizmo_clear(&mut self) {
+        self.gizmos.clear();
+        self.gizmo_style = (2.0, false);
+    }
+
+    fn gizmo_style(&mut self, width_px: i64, on_top: bool) {
+        self.gizmo_style = (width_px.clamp(1, 32) as f32, on_top);
+    }
+
+    fn gizmo_box(
+        &mut self,
+        grid: i64,
+        x0: i64,
+        y0: i64,
+        z0: i64,
+        x1: i64,
+        y1: i64,
+        z1: i64,
+        color: i64,
+    ) {
+        let c = self.cell_box_corners(grid, (x0, y0, z0), (x1, y1, z1));
+        let (width_px, on_top) = self.gizmo_style;
+        for (a, b) in BOX_EDGES {
+            self.gizmos.push(Line3 {
+                a: c[a].to_array(),
+                b: c[b].to_array(),
+                color: OverlayColor(color as u32),
+                width_px,
+                depth_test: !on_top,
+            });
+        }
+    }
+
+    fn gizmo_line(&mut self, grid: i64, a: FixedVec3, b: FixedVec3, color: i64) {
+        let (width_px, on_top) = self.gizmo_style;
+        self.gizmos.push(Line3 {
+            a: self.gizmo_point(grid, a).to_array(),
+            b: self.gizmo_point(grid, b).to_array(),
+            color: OverlayColor(color as u32),
+            width_px,
+            depth_test: !on_top,
+        });
+    }
+
     fn aim_yaw(&self) -> Fixed {
         Fixed::from_f64(self.cursor_aim)
     }
@@ -4928,6 +5247,168 @@ mod tests {
             Some(GROUND_Z as i32 - 4),
             "top band cuts nothing"
         );
+    }
+
+    /// The cursor reads back the cell the map painted — the whole point
+    /// of `pick_cell` (`host_api` 24, docs/plans/ship-building.md).
+    ///
+    /// A ray down a known cell of a cubic grid must answer that cell's
+    /// own coordinates, in the numbers `voxel_fill_in` was called with,
+    /// and name the top face as up. A map addressing some *other* grid
+    /// gets a miss rather than a cell in the wrong frame.
+    #[test]
+    fn the_cursor_names_the_cell_the_map_painted() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let world = World::new(0);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        let other = r.grid_spawn_cubic(0, 0, 0);
+        let (cx, cy) = (2_i64, 3_i64);
+        r.voxel_fill_in(g, cx, cy, 0, cx, cy, 0, 0x8055_5f6b);
+
+        // Straight down the mirrored cell centre, from above the deck.
+        let col = DVec3::new(-(cx as f64 + 0.5) * SCALE, (cy as f64 + 0.5) * SCALE, 0.0);
+        r.set_cursor_ray(&world, col, DVec3::new(0.0, 0.0, 1.0));
+
+        assert_eq!(r.pick_grid(), g, "the cursor names the grid it hit");
+        assert_eq!(
+            r.pick_cell(g),
+            Some(FixedVec3::new(
+                Fixed::from_int(cx as i32),
+                Fixed::from_int(cy as i32),
+                Fixed::ZERO
+            )),
+            "the cell read back is the cell painted"
+        );
+        assert_eq!(
+            r.pick_face(g),
+            Some(FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ONE)),
+            "a floor's exposed face points up, in SIM axes"
+        );
+        assert_eq!(r.pick_cell(other), None, "another grid is a miss");
+        assert_eq!(r.pick_cell(-1), None, "so is a world grid nobody painted");
+
+        // Off the deck entirely: no hit, no cell.
+        r.set_cursor_ray(&world, DVec3::new(500.0, 500.0, 0.0), DVec3::Z);
+        assert_eq!(r.pick_grid(), -1);
+        assert_eq!(r.pick_cell(g), None);
+    }
+
+    /// The cursor rides the hull. A cell of a grid at some arbitrary
+    /// attitude — the ship under thrust — must still read back as itself:
+    /// the ray is aimed at where the gizmo path says that cell IS, and
+    /// the pick path must agree. The two are inverses, and a placement
+    /// ghost is only honest while they are.
+    #[test]
+    fn the_cursor_and_the_gizmo_agree_on_a_turned_hull() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let world = World::new(0);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        let cell = (4_i64, 1_i64, 2_i64);
+        r.voxel_fill_in(g, cell.0, cell.1, cell.2, cell.0, cell.1, cell.2, 0x80b8_9850);
+        // A tilted tumble, pivoted about the middle of the block — the
+        // pose `grid_body` writes every tick on the ship.
+        r.grid_pivot(
+            g,
+            FixedVec3::new(Fixed::from_int(4), Fixed::from_int(1), Fixed::from_int(2)),
+        );
+        r.grid_orient(
+            g,
+            FixedVec3::new(
+                Fixed::from_ratio(3, 10),
+                Fixed::from_ratio(-2, 10),
+                Fixed::ONE,
+            ),
+            Fixed::from_ratio(7, 10),
+        );
+
+        // Where that cell now is, per the gizmo path.
+        let corners = r.cell_box_corners(g, cell, cell);
+        let centre = corners.iter().fold(DVec3::ZERO, |a, c| a + *c) / 8.0;
+        assert!(
+            (corners[0] - corners[6]).length() > SCALE,
+            "a cell of a cubic grid is a cube {SCALE} across, not a point"
+        );
+
+        // Aim at it from far away, down an axis nothing is aligned with.
+        let dir = DVec3::new(1.0, 2.0, -3.0).normalize();
+        r.set_cursor_ray(&world, centre - dir * 400.0, dir);
+
+        assert_eq!(r.pick_grid(), g);
+        assert_eq!(
+            r.pick_cell(g),
+            Some(MapRender::cell_vec(cell)),
+            "a cell at attitude reads back as itself"
+        );
+        let face = r.pick_face(g).expect("a hit has a face");
+        let axes = [face.x, face.y, face.z].map(|c| i64::from(c.floor_to_int()).abs());
+        assert_eq!(axes.iter().sum::<i64>(), 1, "a face is one unit axis: {face:?}");
+    }
+
+    /// The deck cutaway moves the cursor with it: pointing at a hull
+    /// whose upper deck is cut away lands on the deck the player can
+    /// see. Free, because the pick marches the CLIPPED scene — and it is
+    /// the whole reason it does.
+    #[test]
+    fn the_deck_cutaway_moves_the_cursor_down_a_deck() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let world = World::new(0);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        let (cx, cy) = (2_i64, 2_i64);
+        r.voxel_fill_in(g, cx, cy, 0, cx, cy, 0, 0x8055_5f6b); // lower deck plate
+        r.voxel_fill_in(g, cx, cy, 3, cx, cy, 3, 0x8055_5f6b); // upper deck plate
+        // The fog observer is what names the grid a deck band clips.
+        r.vision_observer_in(-1, g);
+
+        let col = DVec3::new(-(cx as f64 + 0.5) * SCALE, (cy as f64 + 0.5) * SCALE, 0.0);
+        let aim = |r: &mut MapRender| {
+            r.apply_deck_clip();
+            r.set_cursor_ray(&world, col, DVec3::new(0.0, 0.0, 1.0));
+            r.pick_cell(g).map(|c| i64::from(c.z.floor_to_int()))
+        };
+
+        assert_eq!(aim(&mut r), Some(3), "uncut, the cursor lands on the roof");
+        r.deck_clip(0, 2); // stand on the lower deck
+        assert_eq!(
+            aim(&mut r),
+            Some(0),
+            "cut away, it lands on the deck being looked into"
+        );
+    }
+
+    /// A gizmo box is drawn in its grid's frame, in the grid's own cells,
+    /// and it is the map that clears it — the `ui_clear` contract, so a
+    /// ghost drawn on the tick clock survives the frames between ticks.
+    #[test]
+    fn a_gizmo_box_rides_its_grid_and_is_the_map_s_to_clear() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        r.gizmo_style(3, true);
+        r.gizmo_box(g, 1, 1, 0, 1, 1, 0, 0x9040_ff70);
+        assert_eq!(r.gizmos.len(), 12, "a box is twelve edges");
+        assert!(
+            r.gizmos
+                .iter()
+                .all(|l| !l.depth_test && (l.width_px - 3.0).abs() < 1e-6),
+            "the style applies to the segments drawn after it"
+        );
+
+        // Turning the grid carries the outline with it.
+        let before = r.gizmos[0].a;
+        r.gizmo_clear();
+        r.grid_orient(
+            g,
+            FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ONE),
+            Fixed::from_ratio(5, 10),
+        );
+        r.gizmo_box(g, 1, 1, 0, 1, 1, 0, 0x9040_ff70);
+        let swing: f64 = (0..3).map(|i| (r.gizmos[0].a[i] - before[i]).abs()).sum();
+        assert!(swing > 1.0, "the ghost stayed behind on a turn");
+
+        // Nothing clears it but the map — `draw_gizmos` takes `&self`, so
+        // a frame *cannot* eat what the map queued on its slower clock.
+        r.gizmo_clear();
+        assert!(r.gizmos.is_empty(), "gizmo_clear starts a fresh set");
+        assert_eq!(r.gizmo_style, (2.0, false), "and resets the style");
     }
 
     /// An off-origin `grid_spawn` composes its offset with the mirror + SCALE +

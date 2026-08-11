@@ -120,8 +120,31 @@ to place in a command payload.
 | `action_axis2(id)` | an `axis2` action's value as a `Vec3` (`x`, `y`, `0`) |
 | `pick_ground()` | the cursor's ground point (`Vec3`), or `()` on a miss |
 | `pick_entity()` | the entity under the cursor, or `-1` |
+| `pick_grid()` | the grid whose voxels the cursor ray meets first, or `-1` (requires `host_api` 24) |
+| `pick_cell(grid)` | the sim cell of that hit in `grid`'s own cells (`-1` = the world grid), or `()` on a miss |
+| `pick_face(grid)` | the hit's outward face normal in `grid`'s sim axes, so `pick_cell + pick_face` is the empty cell in front of it |
 | `aim_yaw()` | the sim-space angle from the local player toward the cursor |
 | `ui_clicks()` | the HUD button bits clicked since the last call (take-and-clear) |
+
+## Overlay gizmos — *local*
+
+World-space outlines drawn over the frame, in a grid's own frame and cells:
+a placement ghost, a snap lattice, a range ring. Alpha-blended, which
+nothing else a map draws can be — `ui_*` is flat HUD pixels, and a voxel is
+opaque and a whole cell across. Immediate mode with the HUD's contract: the
+map calls `gizmo_clear` and redraws; what it drew last stays on screen
+through the frames between its ticks. Local layer only, and never hashed
+(requires `host_api` 24).
+
+| Function | Result |
+|---|---|
+| `gizmo_clear()` | start a fresh set; resets the style |
+| `gizmo_style(width_px, on_top)` | line width, and whether segments ignore the depth buffer |
+| `gizmo_box(grid, x0, y0, z0, x1, y1, z1, color)` | outline an inclusive cell box in `grid`'s frame (`-1` = the world frame) |
+| `gizmo_line(grid, a, b, color)` | one segment between two sim points of `grid`'s frame |
+
+`color` is `0xAA_RR_GG_BB` — here the high byte really is **alpha**, unlike
+a voxel colour's (which is brightness).
 
 ## Models and sprites — *presentation*
 

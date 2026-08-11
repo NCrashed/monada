@@ -175,8 +175,20 @@ pub use volume::VolumeStore;
 /// `phys_angvel` reads the tumble back so a map can write its own
 /// stabiliser as `τ = −k·ω`. No new hashed state and no engine-side
 /// notion of a thruster: fuel, throttle, gimbal and which key fires it
-/// stay in the map.
-pub const HOST_API_VERSION: u32 = 23;
+/// stay in the map; 24 = the cursor learns about grids, and a map learns
+/// to draw a line (docs/plans/ship-building.md). `pick_grid` /
+/// `pick_cell` / `pick_face` resolve the cursor ray against the SCENE's
+/// voxels rather than a ground plane, and answer in the cells of the
+/// grid that was hit — so a map whose whole world is a moving hull can
+/// name the deck cell under the pointer at any attitude, and the deck
+/// cutaway redirects the hit to the deck the player can actually see.
+/// `gizmo_style` / `gizmo_box` / `gizmo_line` draw alpha-blended
+/// world-space outlines in a grid's frame: a placement ghost, a snap
+/// lattice, a range ring — things that are shown rather than simulated,
+/// in three dimensions, where `ui_*` is flat and a voxel is opaque and
+/// cell-sized. Additive and local-layer only: the simulation is never
+/// offered any of it, and a headless peer no-ops the lot.
+pub const HOST_API_VERSION: u32 = 24;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -734,6 +746,81 @@ pub trait HostBridge: Send {
     fn pick_entity(&self) -> i64 {
         -1
     }
+    /// The script handle of the grid whose voxels the cursor ray meets
+    /// first, or `-1` for a miss (`grid_spawn` handles; the world grid a
+    /// map paints terrain into answers `-1` — ask for it as `-1` below).
+    ///
+    /// Unlike [`pick_ground`](Self::pick_ground) this is a question about
+    /// the geometry that exists rather than about a plane: a map whose
+    /// world is one moving hull has no ground plane to speak of.
+    fn pick_grid(&self) -> i64 {
+        -1
+    }
+    /// The **sim cell** of the cursor's first solid hit inside `grid`, in
+    /// that grid's own cells (cube or column, whichever it was spawned
+    /// with); `-1` names the world grid. `None` when the cursor misses,
+    /// or hits some other grid — a map asks about the hull it cares
+    /// about and gets a straight answer about that hull.
+    ///
+    /// Clip-aware: voxels the grid's deck cutaway
+    /// ([`deck_clip`](Self::deck_clip)) hides read as air, so the cursor
+    /// lands on the deck the player is looking into rather than on the
+    /// roof that was cut away.
+    fn pick_cell(&self, _grid: i64) -> Option<FixedVec3> {
+        None
+    }
+    /// The outward face normal of that same hit, in `grid`'s sim axes: a
+    /// unit vector along one axis, so `pick_cell + pick_face` is the
+    /// empty cell in front of the surface — the difference between
+    /// putting a crate ON the floor and INTO the wall.
+    fn pick_face(&self, _grid: i64) -> Option<FixedVec3> {
+        None
+    }
+
+    // --- overlay gizmos ---------------------------------------------------
+    //
+    // World-space outlines drawn over the frame, in a grid's own frame
+    // and its own cells: a placement ghost, a snap lattice, a range ring.
+    // Immediate mode — `gizmo_clear`, then a fresh set, exactly like the
+    // HUD canvas — and alpha-blended, which neither of the map's other
+    // drawing surfaces can be: `ui_*` is flat HUD pixels, and a voxel is
+    // opaque (its high byte is brightness) and a whole cell across.
+    //
+    // Belong to the local layer in practice, like `ui_*`, and are
+    // registered only there; they live on the bridge with the rest of
+    // the presentation verbs because they are no-ops without one.
+
+    /// Start a fresh set of gizmos: everything drawn before this is
+    /// gone, and the style resets. The map's to call — what it drew last
+    /// stays on screen through the frames between its ticks, which is
+    /// the same contract [`ui_clear`](Self::ui_clear) has.
+    fn gizmo_clear(&mut self) {}
+    /// Line width in pixels and depth behaviour for the gizmos drawn
+    /// after it: `on_top` segments ignore the depth buffer (a highlight
+    /// that shows through the hull), the rest are occluded by nearer
+    /// geometry. State, like `ui_scale`.
+    fn gizmo_style(&mut self, _width_px: i64, _on_top: bool) {}
+    /// Outline the inclusive cell box `(x0,y0,z0)..=(x1,y1,z1)` of
+    /// `grid` (`-1` = the world frame). `color` is `0xAA_RR_GG_BB` —
+    /// here the high byte really is **alpha**, unlike a voxel's.
+    #[allow(clippy::too_many_arguments)] // a cell box is six numbers
+    fn gizmo_box(
+        &mut self,
+        _grid: i64,
+        _x0: i64,
+        _y0: i64,
+        _z0: i64,
+        _x1: i64,
+        _y1: i64,
+        _z1: i64,
+        _color: i64,
+    ) {
+    }
+    /// One segment between two sim-space points of `grid`'s frame
+    /// (`-1` = the world frame), same colour packing as
+    /// [`gizmo_box`](Self::gizmo_box).
+    fn gizmo_line(&mut self, _grid: i64, _a: FixedVec3, _b: FixedVec3, _color: i64) {}
+
     /// The sim-space yaw (radians, fixed-point) from the local player /
     /// camera focus toward the cursor's ground point. Holds its last
     /// value while the ray misses (matches the classic twin-stick aim).

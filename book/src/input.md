@@ -89,11 +89,48 @@ command payload without any float leaking across the wall:
 |---|---|
 | `pick_ground()` | the ground point under the cursor (`Vec3`), or `()` on a miss |
 | `pick_entity()` | the entity under the cursor, or `-1` |
+| `pick_grid()` | the grid the cursor ray meets first, or `-1` |
+| `pick_cell(grid)` | the sim cell of that hit, in `grid`'s own cells, or `()` |
+| `pick_face(grid)` | that hit's outward face normal, in `grid`'s sim axes |
 | `aim_yaw()` | the sim-space angle from the local player toward the cursor |
 
 Hover highlighting and tooltips build on `pick_entity` in the local layer;
 `aim_yaw` gives a twin-stick attack direction (feed it as a command's
 `arg.z`, as the action-RPG does) — all without ever touching the simulation.
+
+### Ground, or geometry
+
+`pick_ground` answers about a *plane*: the ground under the cursor, in world
+coordinates, at `z = 0`. That is the right question for a board or an arena,
+and the wrong one as soon as a map's world has a shape — a two-deck ship
+has two floors at different heights, and it is a rigid body, so there is no
+world plane its cells can be named in at all.
+
+`pick_cell` asks the scene instead: which voxel of which grid does the ray
+actually hit, and which cell of *that grid's own* convention is it. The
+answer comes back in the same numbers the map painted with, so a hull
+authored in hull cells is addressed in hull cells at any attitude:
+
+```rhai
+let cell = pick_cell(hull_grid());
+if cell != () {
+    // `cell` is a hull cell — the same coordinates `voxel_fill_in` took.
+    // `cell + pick_face(hull_grid())` is the empty cell in front of the
+    // surface, which is where a crate goes rather than into the wall.
+}
+```
+
+Two properties worth knowing:
+
+- It is **clip-aware**. Voxels the deck cutaway (`deck_clip`) hides read as
+  air, so the cursor lands on the deck the player is looking into rather
+  than on the roof that was cut away to let them look.
+- It resolves against the pose on screen this frame, while the simulation
+  acts on the tick-exact one — up to a tick of cursor offset on a hard-
+  accelerating hull, the same asymmetry the camera already lives with.
+
+To *show* where that lands, see the overlay gizmos in the
+[reference](reference.md): outlines in a grid's frame, with real alpha.
 
 ## Into the simulation
 

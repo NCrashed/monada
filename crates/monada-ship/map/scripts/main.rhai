@@ -4,9 +4,10 @@
 //! defines an animated billboard "crew" actor (reusing the RPG hero GIFs), and
 //! walks it around each deck on the deterministic fixed-point sim, crossing
 //! decks by climbing a fore-starboard stairwell. The host injects one real-time input
-//! command per tick (verb 0): `arg = vec3(move_x, move_y, 0)`. Render calls
-//! (`entity_set_anim`, `entity_set_facing`, `camera_focus`) never touch the
-//! hashed world, so they can't desync a peer.
+//! command per tick (verb 0): `arg = vec3(move_x, move_y, buttons)`, and a
+//! client with a pointer adds a second (verb 1): the hull CELL its cursor is
+//! on. Render calls (`entity_set_anim`, `entity_set_facing`, `camera_focus`,
+//! `gizmo_*`) never touch the hashed world, so they can't desync a peer.
 //!
 //! Collision is DECK-RELATIVE (see the `decks` section): the crew tracks which
 //! deck it stands on and tests only that deck's walls, so the stacked floor
@@ -25,8 +26,17 @@
 //! The view/visibility seams ride the same frame: wall cutout, deck clip, fog
 //! of war (docs/plans/ship-visibility.md).
 //!
+//! Cargo is CURSOR-DIRECTED (docs/plans/ship-building.md): `pick_cell` resolves
+//! this client's pointer against the hull's own geometry and answers in the
+//! hull's own cells, so the crew picks up what you point at and puts it down on
+//! the cell you point at — snapped, rotatable, refused where it will not fit,
+//! and previewed by a ghost the local layer draws with `gizmo_*` and colours
+//! with the very predicate the tick decides by (`can_place`). A stowed prop
+//! blocks, so where things go is a decision.
+//!
 //! Archetypes register in order, so ids are fixed: CREW = 0, SHIP = 1,
-//! CRATE = 2, ENGINE = 3. Model ids by `model_actor` order: crew = 0.
+//! CRATE = 2, ENGINE = 3. Model ids by registration order: crew actor = 0,
+//! crate = 1, locker = 2.
 
 // --- tuning (all fixed-point; no_float Rhai forbids IEEE) ---------------
 // NB: Rhai functions are pure — they do NOT see top-level `const`s — so the
@@ -53,10 +63,10 @@ fn absf(x) { if x < fixed(0) { -x } else { x } }
 
 fn nonzero(x) { x > fixed(0) || x < fixed(0) }
 
-/// 8-way facing yaw (radians, sim space: +x east, +y north, CCW) from a
-/// direction vector — the renderer bins to 8 sprites, so exact atan2 isn't
-/// needed. Sector k → yaw = k·tau/8: 0=E,1=NE,2=N,3=NW,4=W,5=SW,6=S,7=SE.
-fn dir_yaw(dx, dy) {
+/// The 8-way sector a direction falls in: 0=E,1=NE,2=N,3=NW,4=W,5=SW,6=S,7=SE
+/// (sim space: +x east, +y north, CCW). The renderer bins to 8 sprites, so
+/// exact atan2 isn't needed.
+fn dir_octant(dx, dy) {
     let ax = absf(dx);
     let ay = absf(dy);
     let t = ratio(414, 1000); // tan 22.5°
@@ -76,7 +86,21 @@ fn dir_yaw(dx, dy) {
     } else {
         k = if dy > fixed(0) { 3 } else { 5 };
     }
-    ratio(k, 8) * tau()
+    k
+}
+
+/// 8-way facing yaw (radians) from a direction vector: sector k → k·tau/8.
+fn dir_yaw(dx, dy) { ratio(dir_octant(dx, dy), 8) * tau() }
+
+/// The unit cell step of sector `k` — which cell a crew member is facing.
+/// Kept as sim state (`fdx`/`fdy`) because it is what a placement aims at
+/// when this peer has no cursor to aim with (see `aim_cell`).
+fn octant_dx(k) {
+    if k == 0 || k == 1 || k == 7 { 1 } else if k >= 3 && k <= 5 { -1 } else { 0 }
+}
+
+fn octant_dy(k) {
+    if k >= 1 && k <= 3 { 1 } else if k >= 5 && k <= 7 { -1 } else { 0 }
 }
 
 /// A speed-`sp` velocity toward `(dx, dy)`, octagonally normalized (so
@@ -151,6 +175,14 @@ fn deck_top(deck) { deck_floor(deck) + 2 }
 /// Until then the map owns its wall layout as this predicate, kept in sync
 /// with what `build_hull` paints for the eye.
 fn blocked(cx, cy, deck) {
+    // Cargo is as solid as a bulkhead. A placement system whose output you
+    // walk straight through decides nothing, so a prop somebody put down
+    // blocks — which is what makes a crate in a doorway a barricade and
+    // where you leave a locker a choice (docs/plans/ship-building.md).
+    // Only STOWED props: the one in your hands is inside your own cell.
+    if occupied(cx, cy, deck) {
+        return true;
+    }
     // The airlock: two rim cells on the lower deck's starboard side. Open, they
     // are the one walkable cell OUTSIDE the walkable box — you stand IN the
     // doorway with the void at your back. `paint_door` keeps the voxels in sync
@@ -240,11 +272,20 @@ fn try_move(e, vx, vy, cz) {
 // Archetype id by registration order: CREW = 0, SHIP = 1. Model id by
 // `model_actor` order: crew = 0.
 fn init() {
-    // Crew: movement intent (ix/iy), last facing yaw, current deck (0 lower /
-    // 1 upper — follows z on the stairwell ramp), the carried crate (its id + 1,
-    // 0 = hands free) and last tick's button mask (so `use` / `door` act on the
-    // press, not on every tick the key is held).
-    archetype(["ix", "iy", "face", "deck", "carry", "btn", "prev"]);
+    // Crew: movement intent (ix/iy), last facing yaw and its cell step
+    // (fdx/fdy — where "in front of me" is), current deck (0 lower / 1 upper
+    // — follows z on the stairwell ramp), the carried prop (its id + 1,
+    // 0 = hands free), last tick's button mask (so `use` / `door` / `rotate`
+    // act on the press, not on every tick the key is held), and the
+    // PLACEMENT AIM: the hull cell this player's cursor named this tick
+    // (aimx/aimy/aimz, valid while `aim` is 1) and the rotation they have
+    // turned what they hold to (`rot`, 0..3). The aim is hashed like any
+    // other command payload — where a cursor IS stays per-client, but what
+    // it asked for is a decision every peer has to agree about.
+    archetype([
+        "ix", "iy", "face", "fdx", "fdy", "deck", "carry", "btn", "prev",
+        "aimx", "aimy", "aimz", "aim", "rot",
+    ]);
 
     // Ship: the airlock state, and the physics body the hull IS. The hull's
     // pose is no longer state this map keeps — it is an outcome of the
@@ -255,10 +296,13 @@ fn init() {
     archetype(["door", "body"]);
     let ship = entity_create(1);
 
-    // Cargo crates: no fields of their own beyond "is someone holding me". What
-    // makes them interesting is WHICH FRAME they are in — riding the hull, or
-    // released into the world (see `step_use`). Archetype id 2.
-    archetype(["held"]);
+    // Cargo: "is someone holding me", what KIND of thing it is (0 = a
+    // one-cell crate, 1 = a two-cell floor locker) and which way it lies
+    // (`rot`, 0..3). What makes a prop interesting is still WHICH FRAME it
+    // is in — riding the hull, or released into the world (see `step_use`)
+    // — but now also WHERE on the deck, because a placed prop blocks.
+    // Archetype id 2.
+    archetype(["held", "kind", "rot"]);
 
     // Engines: a thruster is an ENTITY on the hull, at a hull cell, pointing
     // along a hull direction, with a throttle. Nothing about it is engine-side
@@ -328,14 +372,23 @@ fn init() {
     model_actor("assets/char/crew", ["idle", "run"], ratio(14, 10));
     // The crate: a procedural box, model id 1 (the call after the actor).
     model_box(9, 9, 9, 0x80a8_7a3c);
+    // The floor locker, model id 2: two cells long, so which way it lies is
+    // a fact about the deck rather than a decoration — which is what makes
+    // rotation worth having a key for.
+    model_box(26, 11, 13, 0x8074_8c96);
 
-    // Two crates stowed on the lower deck, authored in HULL coordinates — so
+    // Cargo stowed on the lower deck, authored in HULL coordinates — so
     // `entity_set_grid` (the raw bind) is right here: nothing should move, the
     // numbers already mean "this cell of the ship". `entity_attach` is for
     // later, when a crate that is somewhere in the WORLD has to come aboard
     // without jumping.
-    stow_crate(6, 2); // beside the crew's spawn, within arm's reach
-    stow_crate(12, 14); // aft, across the divider's doorway
+    //
+    // NB none of them sits in a walking line the crew uses: a stowed prop
+    // blocks now (see `blocked`), so where the demo parks its cargo is a
+    // level-design decision and not just dressing.
+    stow_prop(0, 4, 3, 0); // a crate beside the crew's spawn, within arm's reach
+    stow_prop(1, 2, 3, 0); // a locker beside it, lying east-west (two cells)
+    stow_prop(0, 12, 14, 0); // another crate aft, across the divider's doorway
     // No model_drop: the crew pivot already grounds on the deck's solid voxel
     // floor (world_of seats sim-z N at grid-z GROUND_Z-N, the same z the floor
     // voxel sits at). The RPG's `model_drop(0.35)` is `0.35·SCALE ≈ 5.6` WORLD
@@ -368,7 +421,7 @@ fn init() {
     // (per-client — each peer sees its own line of sight). Render-side.
     vision_config(110, 9, 3);
 
-    status("ship demo — WASD walk, F crate, G airlock, SPACE burn, Q/E turn; the hull is a rigid body and you are standing in it");
+    status("ship demo — WASD walk, point + F/click to move cargo, R turn it, G airlock, SPACE burn, Q/E turn ship; the hull is a rigid body and you are standing in it");
 }
 
 /// Paint the two-deck hull into `grid`, for the EYE. Collision is the `blocked`
@@ -451,12 +504,158 @@ fn mount_engine(cx, cy, cz, dx, dy, dz) {
 // world frame and stays exactly where it was let go, while the ship turns away
 // from it. `entity_attach` / `entity_detach` are what make those two the same
 // crate rather than a teleport.
+//
+// Where on the deck a prop stands is the other half (docs/plans/ship-building.md):
+// it snaps to a cell, it blocks, and it goes where the CURSOR points rather
+// than where the crew happens to stand.
 
-/// Put a fresh crate on the lower deck at hull cell `(cx, cy)`.
-fn stow_crate(cx, cy) {
+/// The kinds of prop the ship stows, as a footprint LENGTH in cells: a crate
+/// is one cell, a floor locker two. Rhai has no enum, so a map writes one as
+/// a function over an int (see the book's "an enum in a map").
+fn kind_cells(kind) { if kind == 1 { 2 } else { 1 } }
+
+/// The render model each kind binds (`init` registers them in this order).
+fn kind_model(kind) { if kind == 1 { 2 } else { 1 } }
+
+fn kind_name(kind) { if kind == 1 { "locker" } else { "crate" } }
+
+/// The unit cell step of rotation `r` — 0 = +x, 1 = +y, 2 = -x, 3 = -y —
+/// i.e. which way a multi-cell prop lies from its first cell.
+fn rot_dx(r) { if r == 0 { 1 } else if r == 2 { -1 } else { 0 } }
+
+fn rot_dy(r) { if r == 1 { 1 } else if r == 3 { -1 } else { 0 } }
+
+/// The facing yaw that draws a prop lying along rotation `r`.
+fn rot_yaw(r) { ratio(r, 4) * tau() }
+
+/// Where a prop of `n` cells STANDS when its first cell is `(cx, cy)` on
+/// `deck`: the centre of its footprint, because the model is drawn centred on
+/// the entity. A one-cell prop lands on the cell centre exactly as crates
+/// always have; a two-cell one sits on the half-cell between its two.
+fn prop_seat(cx, cy, deck, r, n) {
+    let half = ratio(n - 1, 2);
+    vec3(
+        fixed(cx) + fixed(rot_dx(r)) * half,
+        fixed(cy) + fixed(rot_dy(r)) * half,
+        fixed(deck_floor(deck)),
+    )
+}
+
+/// A prop's FIRST footprint cell — `prop_seat` read backwards.
+fn prop_base_x(k) {
+    let n = kind_cells(to_int(entity_field(k, "kind")));
+    let r = to_int(entity_field(k, "rot"));
+    cell(entity_position(k).x - fixed(rot_dx(r)) * ratio(n - 1, 2))
+}
+
+fn prop_base_y(k) {
+    let n = kind_cells(to_int(entity_field(k, "kind")));
+    let r = to_int(entity_field(k, "rot"));
+    cell(entity_position(k).y - fixed(rot_dy(r)) * ratio(n - 1, 2))
+}
+
+/// Does STOWED prop `k` stand on hull cell `(cx, cy)` of `deck`? A carried
+/// prop covers nothing — it is inside its carrier's own cell, and a crew
+/// member is not an obstacle to themselves.
+fn prop_covers(k, cx, cy, deck) {
+    if to_int(entity_field(k, "held")) == 1 {
+        return false;
+    }
+    let p = entity_position(k);
+    if deck_of(to_int(p.z)) != deck {
+        return false;
+    }
+    let r = to_int(entity_field(k, "rot"));
+    let n = kind_cells(to_int(entity_field(k, "kind")));
+    let bx = prop_base_x(k);
+    let by = prop_base_y(k);
+    let i = 0;
+    while i < n {
+        if bx + rot_dx(r) * i == cx && by + rot_dy(r) * i == cy {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Is a prop standing on this cell? The cargo half of `blocked`.
+fn occupied(cx, cy, deck) {
+    for k in entities_of(2) {
+        if prop_covers(k, cx, cy, deck) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Is a crew member standing on this cell? Placement's one rule that is about
+/// people rather than architecture: a prop blocks, so dropping one on somebody
+/// would wall them in.
+///
+/// The CELL somebody is in, not the cells their footprint grazes. A crew
+/// member is 0.8 of a cell wide, so it almost always overlaps a neighbour by
+/// a hair, and refusing those cells would refuse the cell right in front of
+/// you half the time. The graze is what ordinary collision is for: a prop put
+/// down against you blocks the step INTO it and nothing else, so you can
+/// always back off — which is exactly what walking into a crate should feel
+/// like.
+fn crew_at(cx, cy, deck) {
+    for c in entities_of(0) {
+        if to_int(entity_field(c, "deck")) == deck {
+            let p = entity_position(c);
+            if cell(p.x) == cx && cell(p.y) == cy {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Is cell `(cx, cy)` within arm's reach of a crew member at `(px, py)`?
+/// The same 1.5 cells `use` has always had — you stow cargo, you do not
+/// build across the room.
+fn in_reach(cx, cy, px, py) {
+    let dx = fixed(cx) - px;
+    let dy = fixed(cy) - py;
+    dx * dx + dy * dy <= ratio(9, 4)
+}
+
+/// Can a prop `n` cells long go down with its first cell at `(cx, cy)`,
+/// lying along `r`, for a crew member at `(px, py)` on `deck`?
+///
+/// **THE predicate.** The ghost colours itself with it and `step_use`
+/// accepts or refuses with it — one function, called from both sides of the
+/// sync wall, because the local layer compiles this same script. So a green
+/// ghost cannot lie about what the tick will do, and the tick still does not
+/// trust the ghost: it runs the rule again on the command.
+fn can_place(cx, cy, deck, r, n, px, py) {
+    if !in_reach(cx, cy, px, py) {
+        return false;
+    }
+    let i = 0;
+    while i < n {
+        let x = cx + rot_dx(r) * i;
+        let y = cy + rot_dy(r) * i;
+        // `blocked` already covers walls, the rim, a shut airlock — and
+        // other props, since cargo blocks.
+        if blocked(x, y, deck) || on_stairs(x, y) || crew_at(x, y, deck) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Put a fresh prop of `kind` on the lower deck, first cell `(cx, cy)`,
+/// lying along `r`.
+fn stow_prop(kind, cx, cy, r) {
     let k = entity_create(2);
-    entity_set_position(k, vec3(fixed(cx), fixed(cy), fixed(0)));
-    entity_set_model(k, 1);
+    entity_set_field(k, "kind", fixed(kind));
+    entity_set_field(k, "rot", fixed(r));
+    entity_set_position(k, prop_seat(cx, cy, 0, r, kind_cells(kind)));
+    entity_set_model(k, kind_model(kind));
+    entity_set_facing(k, rot_yaw(r));
     entity_set_grid(k, hull_grid());
 }
 
@@ -492,12 +691,84 @@ fn in_airlock(c) {
     door_open() && cell(p.x) == 19 && (cy == 9 || cy == 10) && to_int(entity_field(c, "deck")) == 0
 }
 
-/// The nearest un-held crate within arm's reach of crew `c`, or -1. Distances
+// --- aiming ---------------------------------------------------------------
+// Where a player is pointing is a fact about their CLIENT — the sim is never
+// offered a cursor (`monada-runtime`'s `Host` has no input at all). So the
+// local layer resolves the cursor against the hull's own geometry
+// (`pick_cell`) and submits the CELL it named as an ordinary command, and the
+// simulation acts on that cell like any other player intent. What each peer
+// sees stays local; what it asked for is agreed by everybody.
+
+/// This crew member's placement target: the hull cell their client's cursor
+/// named this tick, or — for a peer with no cursor at all (the oracle, a
+/// dedicated server, a keyboard-only session with the pointer off the ship)
+/// — the cell they are facing. Always a cell; `aim_on_deck` says whether it
+/// is one this crew member may act on.
+fn aim_cell(c) {
+    if to_int(entity_field(c, "aim")) == 1 {
+        return vec3(
+            entity_field(c, "aimx"),
+            entity_field(c, "aimy"),
+            entity_field(c, "aimz"),
+        );
+    }
+    let p = entity_position(c);
+    let deck = to_int(entity_field(c, "deck"));
+    vec3(
+        fixed(cell(p.x) + to_int(entity_field(c, "fdx"))),
+        fixed(cell(p.y) + to_int(entity_field(c, "fdy"))),
+        fixed(deck_floor(deck)),
+    )
+}
+
+/// Is the aim on the crew member's OWN deck? The cursor can perfectly well
+/// land on the deck below through the stairwell hole, or on the far side of
+/// the hull once the fog lifts — you can see it, you cannot reach it.
+fn aim_on_deck(c, a) {
+    if to_int(entity_field(c, "aim")) != 1 {
+        return true; // the facing fallback is always this deck
+    }
+    deck_of(to_int(a.z)) == to_int(entity_field(c, "deck"))
+}
+
+/// The prop standing on cell `(cx, cy)` within reach of `(px, py)`, or -1 —
+/// "the one under the cursor", which is what the players asked for.
+fn prop_at(cx, cy, deck, px, py) {
+    if !in_reach(cx, cy, px, py) {
+        return -1;
+    }
+    for k in entities_of(2) {
+        if prop_covers(k, cx, cy, deck) {
+            return k;
+        }
+    }
+    -1
+}
+
+/// What this crew member's `use` picks up: the prop under their own cursor,
+/// or the nearest one within arm's reach when this peer has no cursor to
+/// point with. The cursor answer is the one the demo is played with; the
+/// fallback is what a headless peer and a keyboard-only session run on, and
+/// it is the behaviour the demo shipped with.
+fn prop_to_take(c) {
+    let p = entity_position(c);
+    let deck = to_int(entity_field(c, "deck"));
+    if to_int(entity_field(c, "aim")) == 1 {
+        let a = aim_cell(c);
+        if !aim_on_deck(c, a) {
+            return -1;
+        }
+        return prop_at(to_int(a.x), to_int(a.y), deck, p.x, p.y);
+    }
+    nearest_prop(c)
+}
+
+/// The nearest un-held prop within arm's reach of crew `c`, or -1. Distances
 /// are compared in WORLD coordinates — `grid_world` composes each entity
 /// through whatever frame it currently rides — so a crate floating in space
 /// next to the hull is as reachable as one on the deck, without the map caring
 /// which of them is which.
-fn nearest_crate(c) {
+fn nearest_prop(c) {
     let cw = grid_world(entity_grid(c), entity_position(c));
     let best = -1;
     let bestd = fixed(0);
@@ -517,24 +788,33 @@ fn nearest_crate(c) {
     if best >= 0 && bestd <= ratio(9, 4) { best } else { -1 } // 1.5 cells
 }
 
-/// One crew member's `use` / `door` presses (rising edges only, so holding the
-/// key does not machine-gun the verb).
+/// One crew member's `use` / `door` / `rotate` presses (rising edges only, so
+/// holding the key does not machine-gun the verb).
 fn step_use(c) {
     let btn = to_int(entity_field(c, "btn"));
     let prev = to_int(entity_field(c, "prev"));
     entity_set_field(c, "prev", fixed(btn));
     // Bits that went 0 -> 1 this tick, over the EDGE bits only (1 = use,
-    // 2 = airlock). The flight controls above them (4 = burn, 8/16 = turn) are
-    // held states, read as they are — an engine fires while the key is down.
-    let pressed = btn & (3 - (prev & 3));
+    // 2 = airlock, 32 = rotate). Subtracting from the mask complements it over
+    // exactly those bits. The flight controls between them (4 = burn,
+    // 8/16 = turn) are held states, read as they are — an engine fires while
+    // the key is down.
+    let pressed = btn & (35 - (prev & 35));
 
+    if (pressed & 32) == 32 {
+        // Which way the next thing you set down will lie. Hashed on the crew
+        // member, not kept by the local layer, because the ghost and the
+        // placement have to mean the same rotation — and the local layer is
+        // stateless by design (it cannot even debounce a key).
+        entity_set_field(c, "rot", fixed((to_int(entity_field(c, "rot")) + 1) % 4));
+    }
     if (pressed & 2) == 2 {
         toggle_door();
     }
     if (pressed & 1) == 1 {
         let carried = to_int(entity_field(c, "carry"));
         if carried == 0 {
-            let k = nearest_crate(c);
+            let k = prop_to_take(c);
             if k >= 0 {
                 // Aboard, keeping its world spot: a crate lying in space is
                 // picked up without jumping, and one already on the deck does
@@ -544,26 +824,56 @@ fn step_use(c) {
                 entity_set_field(c, "carry", fixed(k + 1));
             }
         } else {
-            let k = carried - 1;
-            entity_set_field(k, "held", fixed(0));
-            entity_set_field(c, "carry", fixed(0));
-            if in_airlock(c) {
-                // Released through the airlock: it leaves the ship's frame and
-                // stays where it was let go while the hull turns away from it.
-                entity_detach(k);
-            }
+            set_down(c, carried - 1);
         }
     }
 }
 
-/// A carried crate sits on its crew member's cell, in whatever frame that crew
+/// Set prop `k` down — through the airlock into space, or onto the deck cell
+/// the crew member is aiming at.
+///
+/// A refused placement does nothing at all: you keep holding the thing, and
+/// the ghost has already been red for as long as you have been pointing
+/// there. That is the whole contract between the preview and the rule.
+fn set_down(c, k) {
+    if in_airlock(c) {
+        // Released through the airlock: it leaves the ship's frame and stays
+        // where it was let go while the hull turns away from it.
+        entity_set_field(k, "held", fixed(0));
+        entity_set_field(c, "carry", fixed(0));
+        entity_detach(k);
+        return;
+    }
+    let a = aim_cell(c);
+    if !aim_on_deck(c, a) {
+        return;
+    }
+    let p = entity_position(c);
+    let deck = to_int(entity_field(c, "deck"));
+    let r = to_int(entity_field(c, "rot"));
+    let n = kind_cells(to_int(entity_field(k, "kind")));
+    let cx = to_int(a.x);
+    let cy = to_int(a.y);
+    if !can_place(cx, cy, deck, r, n, p.x, p.y) {
+        return;
+    }
+    entity_set_field(k, "held", fixed(0));
+    entity_set_field(k, "rot", fixed(r));
+    entity_set_field(c, "carry", fixed(0));
+    entity_set_position(k, prop_seat(cx, cy, deck, r, n));
+    entity_set_facing(k, rot_yaw(r));
+}
+
+/// A carried prop sits on its crew member's cell, in whatever frame that crew
 /// member is in — one assignment, because both are in the same frame by
-/// construction (the pick-up attached it there).
+/// construction (the pick-up attached it there) — and turns as they rotate it,
+/// so `R` is visible in your hands before it is visible on the deck.
 fn carry_crate(c) {
     let carried = to_int(entity_field(c, "carry"));
     if carried != 0 {
         let p = entity_position(c);
         entity_set_position(carried - 1, vec3(p.x, p.y, p.z));
+        entity_set_facing(carried - 1, rot_yaw(to_int(entity_field(c, "rot"))));
     }
 }
 
@@ -577,6 +887,10 @@ fn ensure_crew(player) {
         // east leads straight onto the steps; spread so co-op crew don't stack.
         entity_set_position(c, vec3(fixed(5 + idx * 2), fixed(2), fixed(0)));
         entity_set_field(c, "deck", fixed(0));
+        // Facing east on spawn: `fdx`/`fdy` are where "in front of me" is, and
+        // a crew member who has never taken a step still has a front.
+        entity_set_field(c, "fdx", fixed(1));
+        entity_set_field(c, "fdy", fixed(0));
         entity_set_model(c, 0); // crew actor model
         // Ride the hull grid: the crew's sim position is grid-local, composed
         // through the hull's transform when drawn, so they stay seated as the
@@ -612,7 +926,98 @@ fn local_tick(dt) {
     let turn = action_axis("turn");
     if turn > 0 { btn = btn + 8; }
     if turn < 0 { btn = btn + 16; }
+    if action_down("rotate") { btn = btn + 32; }
     submit_command(0, 0, vec3(mv.x, mv.y, fixed(btn)));
+
+    // Verb 1 — where this client's cursor is, as a HULL CELL. `pick_cell`
+    // marches the cursor ray through the scene's geometry and answers in the
+    // grid's own cells (host_api 24), so the ship gets the same numbers
+    // `build_hull` painted with, at any attitude, and the deck cutaway means
+    // the hit lands on the deck being looked into rather than the roof over
+    // it. Sent only while the cursor is on the ship: the sim clears the aim
+    // every tick, so silence IS "no cursor" and a peer without a window
+    // simply never sends one.
+    let cell = pick_cell(hull_grid());
+    if type_of(cell) == "Vec3" {
+        submit_command(1, 0, cell);
+    }
+}
+
+/// This client's placement preview, drawn every FRAME rather than every tick:
+/// a cursor moves between ticks, and a ghost that lags the pointer by 33 ms
+/// feels broken in a way a walking crew member does not.
+///
+/// Nothing here is hashed and nothing here is trusted. The gizmos are overlay
+/// lines this client queues and its own frame draws; the verdict they are
+/// coloured by comes from `can_place` — the very function `step_use` refuses
+/// with, because the local layer compiles this same script.
+fn local_frame(dt) {
+    gizmo_clear();
+    let crew = entities_of(0);
+    let lp = local_player();
+    let idx = if lp < 0 { 0 } else { lp };
+    if idx >= crew.len() {
+        return;
+    }
+    let c = crew[idx];
+    let deck = to_int(entity_field(c, "deck"));
+    let z = deck_floor(deck);
+    let p = entity_position(c);
+
+    // The snap lattice: every cell within arm's reach, outlined on the deck
+    // plate itself. Depth-tested, so the buried half of each cell cube is
+    // occluded by the floor and what is left reads as a square painted on it.
+    gizmo_style(1, false);
+    let dy = -2;
+    while dy <= 2 {
+        let dx = -2;
+        while dx <= 2 {
+            let x = cell(p.x) + dx;
+            let y = cell(p.y) + dy;
+            if in_reach(x, y, p.x, p.y) && !blocked(x, y, deck) {
+                gizmo_box(hull_grid(), x, y, z, x, y, z, 0x3078_b4ff);
+            }
+            dx += 1;
+        }
+        dy += 1;
+    }
+
+    // What the cursor is on. The ghost sits in the cell ABOVE the deck plate
+    // — where the thing itself would stand — and shows through the hull, so
+    // it is never hidden by the crate you are standing behind.
+    let a = aim_cell(c);
+    let ax = to_int(a.x);
+    let ay = to_int(a.y);
+    let carried = to_int(entity_field(c, "carry"));
+    gizmo_style(3, true);
+    if carried == 0 {
+        // Hands free: outline what `use` would pick up, so "the one under the
+        // cursor" is something you can see before you press.
+        if aim_on_deck(c, a) {
+            let k = prop_at(ax, ay, deck, p.x, p.y);
+            if k >= 0 {
+                let r = to_int(entity_field(k, "rot"));
+                let n = kind_cells(to_int(entity_field(k, "kind")));
+                let bx = prop_base_x(k);
+                let by = prop_base_y(k);
+                gizmo_box(
+                    hull_grid(), bx, by, z + 1,
+                    bx + rot_dx(r) * (n - 1), by + rot_dy(r) * (n - 1), z + 1,
+                    0xb0ff_e878,
+                );
+            }
+        }
+    } else {
+        let r = to_int(entity_field(c, "rot"));
+        let n = kind_cells(to_int(entity_field(carried - 1, "kind")));
+        let ok = aim_on_deck(c, a) && can_place(ax, ay, deck, r, n, p.x, p.y);
+        let col = if ok { 0xb040_ff70 } else { 0xb0ff_5050 };
+        gizmo_box(
+            hull_grid(), ax, ay, z + 1,
+            ax + rot_dx(r) * (n - 1), ay + rot_dy(r) * (n - 1), z + 1,
+            col,
+        );
+    }
 }
 
 // --- input: store this peer's intent on its crew entity ------------------
@@ -623,6 +1028,16 @@ fn command(player, verb, target, arg) {
         entity_set_field(c, "ix", arg.x);
         entity_set_field(c, "iy", arg.y);
         entity_set_field(c, "btn", arg.z);
+    } else if verb == 1 {
+        // The aim: a hull cell this player's cursor named. `tick` clears the
+        // flag after the verbs that read it, so an aim is only ever one tick
+        // old and a client that stops pointing stops aiming.
+        ensure_crew(player);
+        let c = entities_of(0)[player];
+        entity_set_field(c, "aimx", arg.x);
+        entity_set_field(c, "aimy", arg.y);
+        entity_set_field(c, "aimz", arg.z);
+        entity_set_field(c, "aim", fixed(1));
     }
 }
 
@@ -633,6 +1048,11 @@ fn tick() {
         step_use(c);
         step_crew(c);
         carry_crate(c);
+        // The aim is a per-tick fact, cleared AFTER the verbs that read it:
+        // a client says where it is pointing every tick it has a cursor, so
+        // no stale aim is ever acted on and a peer that stops pointing falls
+        // back to what it faces.
+        entity_set_field(c, "aim", fixed(0));
     }
     follow_camera();
     build_deck_hud();
@@ -749,12 +1169,35 @@ fn build_deck_hud() {
     // `ui_scale(2)` doubles sizes + text height; the second line clears the
     // 12pt first line (≈24px scaled) with room to spare.
     ui_text(8, 8, label, 12);
-    let hands = if to_int(entity_field(c, "carry")) == 0 {
-        "F: pick up a crate"
-    } else if in_airlock(c) {
-        "F: release into space"
+    // Cargo is cursor-directed now, so the prompt says what the CURSOR is on
+    // rather than what the verb is called — the two differ, and which one
+    // differs is the whole feature.
+    let carried = to_int(entity_field(c, "carry"));
+    let a = aim_cell(c);
+    let deck = d;
+    let p = entity_position(c);
+    let hands = if carried != 0 {
+        if in_airlock(c) {
+            "F / click: release into space"
+        } else {
+            let r = to_int(entity_field(c, "rot"));
+            let n = kind_cells(to_int(entity_field(carried - 1, "kind")));
+            if aim_on_deck(c, a)
+                && can_place(to_int(a.x), to_int(a.y), deck, r, n, p.x, p.y)
+            {
+                "F / click: put it there   R: turn it"
+            } else {
+                "no room there   R: turn it"
+            }
+        }
+    } else if aim_on_deck(c, a)
+        && prop_at(to_int(a.x), to_int(a.y), deck, p.x, p.y) >= 0
+    {
+        "F / click: pick up the " + kind_name(
+            to_int(entity_field(prop_at(to_int(a.x), to_int(a.y), deck, p.x, p.y), "kind")),
+        )
     } else {
-        "F: set the crate down"
+        "point at a crate to pick it up"
     };
     ui_text(8, 42, hands, 8);
     let lock = if door_open() { "G: airlock OPEN (starboard, deck 1)" } else { "G: airlock closed" };
@@ -803,8 +1246,13 @@ fn step_crew(c) {
         let m = try_move(c, v.x, v.y, cz);
         nx = m.x;
         ny = m.y;
-        entity_set_field(c, "face", dir_yaw(dir.x, dir.y));
+        let k = dir_octant(dir.x, dir.y);
+        entity_set_field(c, "face", ratio(k, 8) * tau());
         entity_set_facing(c, entity_field(c, "face"));
+        // The same octant as a cell step: what this crew member is facing,
+        // which is what a placement aims at when there is no cursor.
+        entity_set_field(c, "fdx", fixed(octant_dx(k)));
+        entity_set_field(c, "fdy", fixed(octant_dy(k)));
         entity_set_anim(c, "run");
     } else {
         entity_set_anim(c, "idle");
