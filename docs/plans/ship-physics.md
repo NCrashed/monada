@@ -1,9 +1,10 @@
 # Plan: the ship is a rigid body — a hull that flies, and riders that don't judder
 
-Status: **S-0 – S-3 shipped 2026-08-11** — render-rate pose smoothing (§4), the
-ship map on the physics gate, freeform body shapes, and a grid driven by a body
-(`host_api` 22). The engine can now fly a ship; S-4 (thrust) and S-5 (the demo
-uses it) are designed. Requested by the people extending the ship demo
+Status: **S-0 – S-4 shipped 2026-08-11** — render-rate pose smoothing (§4), the
+ship map on the physics gate, freeform body shapes, a grid driven by a body, and
+engines that push and turn it (`host_api` 23). Everything the demo needs now
+exists; S-5 (the demo uses it) is what remains. Requested by the people
+extending the ship demo
 (`crates/monada-ship`), who are stuck at the first step: making the hull itself
 a physics body, with everything standing on it inheriting the pose smoothly.
 Engines that push and turn the ship come after — and fall out of it almost for
@@ -422,10 +423,29 @@ Each step is a headless test; nothing needs a display until S-5.
     `ScriptBackend` trait, so `NativeBackend` keeps its behaviour until a native
     map wants the binding — at which point it writes the same three lines
     `RhaiBackend` does.
-- **S-4 — thrust and torque.** `apply_angular_impulse`, the four verbs. Tests:
-  a centred thrust changes velocity and not spin; the same thrust off-centre
-  changes both, with the sign the right-hand rule says; `phys_torque` on a
-  sleeping body wakes it.
+- **S-4 — thrust and torque. DONE (2026-08-11).**
+  `PhysicsWorld::apply_angular_impulse` (+ two crate tests), and
+  `phys_thrust` / `phys_torque` / `phys_angvel` on top of it and
+  `apply_impulse_at`. `HOST_API_VERSION` 23, three book rows, six script tests.
+  No new hashed state, per D6: a thrust is an impulse of `force · dt` applied
+  the tick it is asked for, so there is no thruster table to serialize, snapshot
+  or digest. Findings:
+  - **The engine multiplies by `dt`, not the map.** A map that forgot would
+    scale its whole drive-train by the tick rate, and the bug would present as
+    "the ship feels wrong on a 60 Hz map" rather than as an error.
+  - **A test that waits for a hull to turn will hang, because the hull falls
+    asleep.** The first cut of `thrust_follows_the_nose_it_pushes_along` spun
+    the body up and stepped until its nose reached +y; at an angular velocity
+    below `SLEEP_ANGULAR` the island slept and the loop never ended. The
+    rewritten test needs no staging at all — the off-centre engine yaws the hull
+    while it burns, so the velocity it piles up leans the same way as the nose,
+    which is the property itself rather than a proxy for it.
+  - **`SLEEP_ANGULAR`/`SLEEP_LINEAR` do not apply to skinless bodies**
+    (`world.rs`: an island with an empty skin never sleeps), so the wake test
+    needs a real voxel body rather than a `BodyDef::default()` ghost.
+  - D7 stands: the map writes its own stabiliser. `a_map_can_write_its_own_rcs`
+    is three lines of Rhai (`τ = −k·ω`) killing a tumble to a tenth in three
+    seconds, with no damping knob anywhere in the engine.
 - **S-5 — the demo flies.** Engines on the hull, a throttle on the input mask,
   the HUD reading speed / spin / mass, the tumble now an outcome the player can
   cancel. `ship@` re-blessed; the oracle's `ship_input` presses the throttle on

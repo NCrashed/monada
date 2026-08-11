@@ -212,6 +212,9 @@ vocabulary stays the same, with deeper semantics:
 | `phys_wheel(body, ax, ay, az, rest, radius, k, c, mu)` | attach a wheel at SHAPE coords `(ax, ay, az)`; returns a wheel id |
 | `phys_wheel_input(body, wheel, steer, drive, brake)` | set a wheel's retained steering/drive/brake |
 | `phys_impulse(body, jx, jy, jz)` | apply an impulse at the CoM |
+| `phys_thrust(body, anchor, dir, force)` | fire `force` for one tick at SHAPE-coordinate `anchor` along BODY-frame `dir` (auto-normalised; a zero-length one fires nothing) — the thruster primitive. Off the centreline it turns the ship as well as pushing it, and it follows the hull round as the hull turns (requires `host_api` 23) |
+| `phys_torque(body, torque)` | apply `torque` for one tick as a pure world-frame couple — a gyro, a reaction wheel, an RCS quad: it turns without pushing, which an off-centre impulse cannot do |
+| `phys_angvel(body)` | the body's angular velocity (rad/s, world frame; ZERO for an unknown id) — what a map's own stabiliser reads to write `phys_torque(body, -k*w)` |
 | `phys_solid(x, y, z)` | whether the VOLUME store holds a solid cell there — the deterministic terrain read on volume maps (the column `voxel_solid` reads an empty world here by design) |
 | `phys_pos(body)` | the body's CoM position (ZERO for an unknown id) |
 | `phys_vel(body)` | the body's linear velocity (ZERO for an unknown id) |

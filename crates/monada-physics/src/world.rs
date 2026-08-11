@@ -237,6 +237,33 @@ impl PhysicsWorld {
         body.angular_velocity += inv_inertia * r.cross(impulse);
     }
 
+    /// Apply a world-frame ANGULAR impulse: `Δω = I⁻¹_world·L`.
+    ///
+    /// The couple that [`apply_impulse_at`](PhysicsWorld::apply_impulse_at)
+    /// cannot express. An off-centre impulse always turns *and* shoves;
+    /// a gyro, a reaction wheel or an attitude thruster pair turns
+    /// without shoving, and expressing that as two opposing impulses at
+    /// ±r would round twice and drift. `L` is `torque · dt` — the same
+    /// impulse convention the linear pair uses (docs/plans/ship-physics.md
+    /// D6).
+    ///
+    /// # Panics
+    /// Panics on an unknown body id.
+    pub fn apply_angular_impulse(&mut self, id: BodyId, angular_impulse: FixedVec3) {
+        let index = self
+            .bodies
+            .binary_search_by_key(&id, RigidBody::id)
+            .unwrap_or_else(|_| panic!("apply_angular_impulse: no body {id:?}"));
+        // The world inertia depends on the CURRENT orientation, so read it
+        // before taking the mutable borrow — the same order `apply_impulse_at`
+        // keeps.
+        let inv_inertia = solver::inv_inertia_world(&self.bodies[index]);
+        let body = &mut self.bodies[index];
+        body.asleep = false;
+        body.sleep_timer = 0;
+        body.angular_velocity += inv_inertia * angular_impulse;
+    }
+
     /// The external mutation surface funnels through here — and every
     /// external mutation wakes (P5): impulses, wheel attach/detach,
     /// wheel input. `remove_voxels` and `set_gravity` wake on their

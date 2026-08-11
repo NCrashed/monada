@@ -166,8 +166,17 @@ pub use volume::VolumeStore;
 /// props, actor facings, fog, the deck cutaway, the camera — follows
 /// with no change at all, which is the whole point: a ship becomes a
 /// rigid body without touching what it means to walk around inside one.
-/// Additive: a grid nobody binds is posed by the map exactly as before.
-pub const HOST_API_VERSION: u32 = 22;
+/// Additive: a grid nobody binds is posed by the map exactly as before;
+/// 23 = engines (docs/plans/ship-physics.md D6/D7). `phys_thrust` fires
+/// a force for one tick at a point in the hull's OWN frame — so an
+/// off-centre mount turns the ship, and a thruster keeps pushing along
+/// the hull as the hull turns — `phys_torque` applies the pure couple
+/// an off-centre impulse cannot express (a gyro, an RCS quad), and
+/// `phys_angvel` reads the tumble back so a map can write its own
+/// stabiliser as `τ = −k·ω`. No new hashed state and no engine-side
+/// notion of a thruster: fuel, throttle, gimbal and which key fires it
+/// stay in the map.
+pub const HOST_API_VERSION: u32 = 23;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a

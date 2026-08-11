@@ -108,6 +108,15 @@ pub(crate) fn pose_bound_grid(
     }
 }
 
+/// A direction as a unit vector, or `None` for one that names no
+/// direction at all. The same contract `grid_orient` gives its axis: a
+/// map may hand over any length, and a zero is ignored rather than
+/// turned into a silent `(1, 0, 0)`.
+fn normalized(v: FixedVec3) -> Option<FixedVec3> {
+    let len = v.length();
+    (len > Fixed::ZERO).then(|| FixedVec3::new(v.x / len, v.y / len, v.z / len))
+}
+
 /// A script-authored cell box, ordered — a map may name either corner
 /// first, exactly as the `voxel_fill*` verbs allow.
 fn shape_box(
@@ -386,6 +395,62 @@ pub(crate) fn register_physics_api(
         },
     );
 
+    // --- engines (ship-physics S-4) ------------------------------------
+    // An engine is not an engine-side concept: it is a force with a
+    // place and a direction on a body, and everything that makes it a
+    // thruster rather than a tractor beam — fuel, throttle, gimbal,
+    // which key fires it — is the map's (DESIGN.md §3.2). What the
+    // engine owes is that an off-centre push TURNS the ship, in the
+    // ship's own frame, deterministically.
+
+    // Force in mass·cells/s², applied for exactly one tick. The engine
+    // multiplies by `dt` rather than making every map do it: a map that
+    // forgot would silently scale its whole drive-train by the tick
+    // rate, and the bug would look like "the ship feels wrong on a
+    // 60 Hz map".
+    //
+    // `anchor` is in SHAPE coordinates (the cells the map filled), like
+    // wheel and drill anchors, rebased through the derived CoM; `dir`
+    // is in the BODY frame (auto-normalised, a zero-length one ignored
+    // like `grid_orient`'s axis), so a thruster keeps pushing along the
+    // hull as the hull turns instead of along a world axis.
+    let p = phys.clone();
+    engine.register_fn(
+        "phys_thrust",
+        move |body: i64, anchor: FixedVec3, dir: FixedVec3, force: Fixed| {
+            let Some(unit) = normalized(dir) else {
+                return;
+            };
+            let mut sim = lock(&p);
+            let id = BodyId(body as u64);
+            let dt = sim.world.dt();
+            let Some(b) = sim.world.body(id) else {
+                return;
+            };
+            let orientation = b.orientation();
+            // Shape → body (the `com_in_shape` seam) → world.
+            let point = b.position() + orientation * (anchor - b.com_in_shape());
+            let impulse = (orientation * unit).scale(force * dt);
+            sim.world.apply_impulse_at(id, impulse, point);
+        },
+    );
+
+    // A pure couple, in the WORLD frame: a gyro, a reaction wheel, an
+    // RCS quad firing in opposition. World rather than body frame
+    // because its one indispensable use — a map cancelling its own
+    // tumble, `τ = −k·ω` — reads `phys_angvel`, which answers in world
+    // coordinates too; making the map rotate that into the hull and
+    // back would be arithmetic in service of nothing.
+    let p = phys.clone();
+    engine.register_fn("phys_torque", move |body: i64, torque: FixedVec3| {
+        let mut sim = lock(&p);
+        let id = BodyId(body as u64);
+        let dt = sim.world.dt();
+        if sim.world.body(id).is_some() {
+            sim.world.apply_angular_impulse(id, torque.scale(dt));
+        }
+    });
+
     // Pose reads for game logic (sensors, HUD): ZERO for an unknown id,
     // matching `entity_position`'s missing-entity convention.
     let p = phys.clone();
@@ -405,6 +470,17 @@ pub(crate) fn register_physics_api(
             .world
             .body(BodyId(body as u64))
             .map_or(Fixed::ZERO, monada_physics::RigidBody::mass)
+    });
+
+    // Angular velocity, world frame, rad/s — the read a stabiliser is
+    // written against (`phys_torque(body, -k·ω)`). ZERO for an unknown
+    // id, like `phys_vel`.
+    let p = phys.clone();
+    engine.register_fn("phys_angvel", move |body: i64| -> FixedVec3 {
+        lock(&p)
+            .world
+            .body(BodyId(body as u64))
+            .map_or(FixedVec3::ZERO, monada_physics::RigidBody::angular_velocity)
     });
 
     let p = phys.clone();

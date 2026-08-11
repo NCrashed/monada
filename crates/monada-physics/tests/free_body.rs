@@ -283,3 +283,69 @@ fn spawn_normalizes_orientation() {
         1 << 12,
     );
 }
+
+/// An angular impulse turns without shoving — the couple an off-centre
+/// linear impulse cannot express (docs/plans/ship-physics.md D6, the gyro
+/// / RCS primitive). On the default unit-inertia body `Δω = L` exactly,
+/// and the centre of mass must not move at all.
+#[test]
+fn an_angular_impulse_turns_without_shoving() {
+    let mut world = PhysicsWorld::new(25);
+    let id = world.spawn(&BodyDef::default());
+    world.apply_angular_impulse(id, vec3(0, 0, 2));
+
+    let body = world.body(id).unwrap();
+    close_vec(body.angular_velocity(), vec3(0, 0, 2), 1 << 12);
+    assert_eq!(
+        body.linear_velocity(),
+        FixedVec3::ZERO,
+        "a couple imparts no linear velocity"
+    );
+
+    // …and it keeps turning: nothing damps a free body in vacuum.
+    for _ in 0..10 {
+        world.step(&EmptyField);
+    }
+    close_vec(
+        world.body(id).unwrap().angular_velocity(),
+        vec3(0, 0, 2),
+        1 << 12,
+    );
+    assert_eq!(
+        world.body(id).unwrap().position(),
+        FixedVec3::ZERO,
+        "and the body never leaves the spot it spun on"
+    );
+}
+
+/// Every external mutation wakes its body (P5). A stabiliser that fired
+/// into a sleeping hull and did nothing would be the worst kind of bug:
+/// correct code, no effect, no error.
+#[test]
+fn an_angular_impulse_wakes_a_sleeping_body() {
+    let mut world = PhysicsWorld::new(25);
+    // A REAL body, not a ghost: sleep needs a collision skin (a skinless
+    // body is the hover-cart case and never sleeps).
+    world.register_material(monada_physics::Material {
+        density: Fixed::ONE,
+        friction: Fixed::from_ratio(1, 2),
+        restitution: Fixed::ZERO,
+        hardness: Fixed::ONE,
+    });
+    let mut shape = monada_physics::VoxelShape::new(2, 2, 2);
+    shape.fill_box((0, 0, 0), (1, 1, 1), monada_physics::MaterialId(0));
+    let id = world.spawn_voxels(&monada_physics::VoxelBodyDef {
+        shape,
+        position: FixedVec3::ZERO,
+        orientation: FixedQuat::IDENTITY,
+        linear_velocity: FixedVec3::ZERO,
+        angular_velocity: FixedVec3::ZERO,
+    });
+    for _ in 0..=monada_physics::SLEEP_TICKS {
+        world.step(&EmptyField);
+    }
+    assert!(world.body(id).unwrap().asleep(), "a still body sleeps");
+
+    world.apply_angular_impulse(id, vec3(0, 0, 1));
+    assert!(!world.body(id).unwrap().asleep(), "and a torque wakes it");
+}
