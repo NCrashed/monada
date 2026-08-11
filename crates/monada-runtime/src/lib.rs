@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use monada_fixed::{Fixed, FixedVec3};
+use monada_fixed::{Fixed, FixedQuat, FixedVec3};
 use monada_sim::{Command, PlayerId, World};
 
 mod granular;
@@ -156,8 +156,18 @@ pub use volume::VolumeStore;
 /// skin all derive from the geometry the player can see; `phys_mass`
 /// reads the result back. Additive: the shape table is authoring
 /// scratch outside the sim, and a map that never opens one is
-/// bit-unaffected.
-pub const HOST_API_VERSION: u32 = 21;
+/// bit-unaffected; 22 = `grid_body` (docs/plans/ship-physics.md D2–D4):
+/// a `grid_spawn` grid can be BOUND to a physics body, after which its
+/// frame is no longer something the map computes — the engine copies
+/// the body's pose into the sim-side frame table and the render mirror
+/// after every physics step, the grid's pivot becomes the body's centre
+/// of mass, and the body stops being auto-mirrored because the painted
+/// grid is already its picture. Everything that rides a frame — riders,
+/// props, actor facings, fog, the deck cutaway, the camera — follows
+/// with no change at all, which is the whole point: a ship becomes a
+/// rigid body without touching what it means to walk around inside one.
+/// Additive: a grid nobody binds is posed by the map exactly as before.
+pub const HOST_API_VERSION: u32 = 22;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -256,6 +266,18 @@ pub trait ScriptBackend {
     fn drain_ui_events(&mut self) -> Vec<UiEvent> {
         Vec::new()
     }
+
+    /// Carry the pose of every body-bound grid (`grid_body`) into the
+    /// frame table and the render mirror (docs/plans/ship-physics.md
+    /// D2). Called by whoever steps physics, immediately AFTER the step
+    /// and before anything reads a frame — a tick order that matters:
+    /// the script's `tick` runs first and may push a hull about, physics
+    /// integrates that, and only then is the frame the drawn world hangs
+    /// off it true.
+    ///
+    /// The default does nothing, which is right for a backend with no
+    /// physics and for one where no grid is bound.
+    fn sync_grid_bodies(&mut self) {}
 }
 
 /// The render / input / command host-API surface (DESIGN.md §3.3) that
@@ -417,6 +439,31 @@ pub trait HostBridge: Send {
     /// out-of-range or despawned handle is ignored (`host_api` 16). The default
     /// ignores it.
     fn grid_move(&mut self, _grid: i64, _origin: FixedVec3) {}
+
+    /// Bind a `grid_spawn` grid to a physics body (`grid_body`,
+    /// docs/plans/ship-physics.md D2/D4), or release it with a negative body.
+    ///
+    /// Two things follow render-side. The grid's pose stops being something
+    /// the map writes and starts arriving from [`grid_pose`](Self::grid_pose)
+    /// after every physics step. And the body stops being mirrored
+    /// automatically: a bound body's picture is the grid the map painted —
+    /// its plating, its doors, its stair brass — not the material-coloured
+    /// block the mirror would draw over it. Render-side, not hashed
+    /// (`host_api` 22); the default ignores it.
+    fn grid_body(&mut self, _grid: i64, _body: i64) {}
+
+    /// Set a `grid_spawn` grid's whole pose at once: `origin` in sim cells
+    /// (like [`grid_move`](Self::grid_move)) and `rot` as a quaternion.
+    ///
+    /// The engine calls this for a [`grid_body`](Self::grid_body)-bound grid
+    /// once per tick, carrying the body's pose. A quaternion rather than
+    /// `grid_orient`'s axis/angle because the pose already IS one: routing a
+    /// solver-exact attitude through `from_axis_angle` and back would round it
+    /// twice every tick, and the sim-side frame table would drift from the
+    /// drawn one. Not part of a map's own vocabulary — a script poses a grid
+    /// with `grid_move` / `grid_orient` (`host_api` 22). The default ignores
+    /// it.
+    fn grid_pose(&mut self, _grid: i64, _origin: FixedVec3, _rot: FixedQuat) {}
 
     /// Retire a `grid_spawn` grid: its voxels leave the scene and its handle
     /// dies. Handles are never reused, so a stale one stays inert rather than

@@ -376,6 +376,11 @@ impl MapSim {
                 let PhysicsSim { world, terrain, .. } = &mut *sim;
                 world.step(terrain);
             }
+            // The frames of body-bound grids, after the step that moved them
+            // (`grid_body`, docs/plans/ship-physics.md D2) — the same order
+            // `RhaiDriver::step` keeps, so a hotseat map and a networked one
+            // see the identical hull pose on the identical tick.
+            self.backend.sync_grid_bodies();
             let commands = self.render.lock().expect("render mutex").drain_commands();
             for command in commands {
                 self.backend

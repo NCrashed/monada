@@ -22,7 +22,7 @@ use image::AnimationDecoder;
 use crate::autotile;
 use crate::bindings::{MapActionStates, MapActionValue, Part};
 use glam::{DQuat, DVec3, IVec2, IVec3, Vec2};
-use monada_fixed::{Fixed, FixedVec3};
+use monada_fixed::{Fixed, FixedQuat, FixedVec3};
 use monada_format::ActionDecl;
 use monada_render::OrbitCamera;
 use monada_script::{HostBridge, VoxelStore};
@@ -956,6 +956,35 @@ struct WheelMirror {
 /// Wheel cylinder half-width along its axle, world voxels.
 const WHEEL_HALF_WIDTH: i32 = 5;
 
+/// Empty every grid one body mirror owns — hull, wheels, deco trim, drill
+/// cone. roxlap skips an empty grid, so this is how a mirror stops being
+/// drawn; shared by the "the body is gone" path and the "somebody else draws
+/// this body now" one ([`MapRender::retire_mirror`]).
+fn clear_mirror(scene: &mut Scene, mirror: &BodyMirror, decos: Option<&Vec<(IVec3, IVec3, u32)>>) {
+    if let Some(grid) = scene.grid_mut(mirror.grid) {
+        grid.set_rect(IVec3::ZERO, mirror.dims - IVec3::ONE, None);
+    }
+    for wm in &mirror.wheels {
+        let (r, hw) = wm.extent;
+        if let Some(grid) = scene.grid_mut(wm.grid) {
+            grid.set_rect(IVec3::new(-r, -hw, -r), IVec3::new(r, hw, r), None);
+        }
+    }
+    if let (Some(gid), Some(boxes)) = (mirror.deco_grid, decos) {
+        if let Some(grid) = scene.grid_mut(gid) {
+            for &(lo, hi, _) in boxes {
+                grid.set_rect(lo, hi, None);
+            }
+        }
+    }
+    if let Some(dm) = &mirror.drill {
+        if let Some(grid) = scene.grid_mut(dm.grid) {
+            let r = dm.base_r + 2;
+            grid.set_rect(IVec3::new(0, -r, -r), IVec3::new(dm.len, r, r), None);
+        }
+    }
+}
+
 /// Render-only wheel inflation: the physics radius (half a cell) reads
 /// tiny against a six-cell hull, so the mirror draws wheels this much
 /// larger and seats them so the enlarged rim still touches the contact
@@ -1179,6 +1208,11 @@ pub struct MapRender {
     /// only), fed by [`sync_physics`](Self::sync_physics). Map scripts never
     /// hand-mirror a body (plan §1d locked decision).
     body_mirrors: BTreeMap<u64, BodyMirror>,
+    /// Body id → the script grid bound to it (`grid_body`, ship-physics D4).
+    /// A body in here is NOT auto-mirrored: the map's own painted grid is its
+    /// picture, and the mirror would draw a second, material-coloured copy of
+    /// the same hull inside it.
+    grid_bodies: BTreeMap<u64, GridId>,
     /// Live debris puffs (plan §1d): every volume-map carve spawns a
     /// short-lived dust sprite at the cell, coloured from the voxel it
     /// replaced. Render-side only — nothing debris-shaped enters the sim
@@ -1482,6 +1516,7 @@ impl MapRender {
             volume: false,
             tick_dt: None,
             body_mirrors: BTreeMap::new(),
+            grid_bodies: BTreeMap::new(),
             puffs: Vec::new(),
             fx_grid: None,
             fx_painted: Vec::new(),
@@ -2337,6 +2372,14 @@ impl MapRender {
     pub fn sync_physics(&mut self, sim: &monada_script::PhysicsSim, dt: f64) {
         self.retire_dead_mirrors(sim);
         for body in sim.world.bodies() {
+            // A body bound to a script grid draws as that grid (`grid_body`,
+            // ship-physics D4) — the hull the map painted, with its plating,
+            // its doors and its stair brass, rather than a palette-coloured
+            // block of the same silhouette. Its pose arrives through
+            // `grid_pose` on the tick, not from here.
+            if self.grid_bodies.contains_key(&body.id().0) {
+                continue;
+            }
             let Some(shape) = body.shape() else { continue };
             let (origin, rot) =
                 body_grid_pose(body.position(), body.orientation(), body.com_in_shape());
@@ -2471,30 +2514,21 @@ impl MapRender {
             if live.contains(id) {
                 return true;
             }
-            if let Some(grid) = self.scene.grid_mut(mirror.grid) {
-                grid.set_rect(IVec3::ZERO, mirror.dims - IVec3::ONE, None);
-            }
-            for wm in &mirror.wheels {
-                let (r, hw) = wm.extent;
-                if let Some(grid) = self.scene.grid_mut(wm.grid) {
-                    grid.set_rect(IVec3::new(-r, -hw, -r), IVec3::new(r, hw, r), None);
-                }
-            }
-            if let (Some(gid), Some(boxes)) = (mirror.deco_grid, self.body_decos.get(id)) {
-                if let Some(grid) = self.scene.grid_mut(gid) {
-                    for &(lo, hi, _) in boxes {
-                        grid.set_rect(lo, hi, None);
-                    }
-                }
-            }
-            if let Some(dm) = &mirror.drill {
-                if let Some(grid) = self.scene.grid_mut(dm.grid) {
-                    let r = dm.base_r + 2;
-                    grid.set_rect(IVec3::new(0, -r, -r), IVec3::new(dm.len, r, r), None);
-                }
-            }
+            clear_mirror(&mut self.scene, mirror, self.body_decos.get(id));
             false
         });
+    }
+
+    /// Retire ONE body's mirror because something else now draws it: a
+    /// `grid_body` binding hands that job to the map's own painted grid
+    /// (ship-physics D4). Without this the hull would be drawn twice — the
+    /// plating the map painted, and a material-coloured block of the same
+    /// shape inside it, agreeing exactly, so the bug reads as "the hull looks
+    /// wrong" rather than "there are two of them".
+    fn retire_mirror(&mut self, body: u64) {
+        if let Some(mirror) = self.body_mirrors.remove(&body) {
+            clear_mirror(&mut self.scene, &mirror, self.body_decos.get(&body));
+        }
     }
 
     /// Pick under a world ray: the sim-space point on the board plane, and
@@ -3841,6 +3875,50 @@ impl HostBridge for MapRender {
             .grid(id)
             .map_or(DQuat::IDENTITY, |g| g.transform.rotation);
         self.apply_grid_pose(id, rotation);
+    }
+
+    fn grid_body(&mut self, grid: i64, body: i64) {
+        // Drop any previous claim on this grid, then record the new one. The
+        // table is keyed by BODY because its one reader — `sync_physics` —
+        // walks bodies and asks "is this one already drawn as somebody's
+        // hull?"; a body with no entry keeps the automatic mirror it has had
+        // since the digger.
+        let id = self.grid_id(grid);
+        self.grid_bodies.retain(|_, &mut g| Some(g) != id);
+        if let (Some(id), Ok(body)) = (id, u64::try_from(body)) {
+            self.grid_bodies.insert(body, id);
+            // A body that WAS auto-mirrored keeps a grid full of voxels
+            // hanging in the scene; retire it now rather than leaving a
+            // material-coloured ghost of the hull inside the hull.
+            self.retire_mirror(body);
+        }
+    }
+
+    fn grid_pose(&mut self, grid: i64, origin: FixedVec3, rot: FixedQuat) {
+        let Some(id) = self.grid_id(grid) else {
+            return;
+        };
+        let Some(anchor) = self.grid_anchors.get_mut(&id) else {
+            return;
+        };
+        // The origin translates the frame, exactly as `grid_move`'s does —
+        // `world_of`'s linear part, z by the grid's own cell height.
+        let cell_z = cell_z_voxels(anchor.cubic) as f64;
+        anchor.spawn_origin = DVec3::new(
+            -origin.x.to_f64() * SCALE,
+            origin.y.to_f64() * SCALE,
+            -origin.z.to_f64() * cell_z,
+        );
+        // The rotation is CONJUGATED into world space, not composed with the
+        // mirror: this grid's voxels were painted through `world_of` already
+        // (`voxel_fill_in`), so its local frame is world-oriented, and a sim
+        // rotation becomes `M q M⁻¹` with `M = R_y(π)` — precisely what
+        // `grid_orient` does to an axis (map by `diag(-1, 1, -1)`, keep the
+        // angle). Composing instead — which is right for a BODY MIRROR grid,
+        // whose voxels are still in shape coordinates (`body_grid_pose`) —
+        // would leave the hull correct only at identity.
+        let m = mirror_half_turn();
+        self.apply_grid_pose(id, m * dquat(rot) * m.inverse());
     }
 
     fn grid_despawn(&mut self, grid: i64) {
@@ -5371,6 +5449,118 @@ mod tests {
                  drawn {drawn:?}, computed {computed:?}"
             );
         }
+    }
+
+    /// The same agreement, for a frame a BODY drives (`grid_pose`,
+    /// docs/plans/ship-physics.md S-3). This is the one that decides whether a
+    /// ship is a rigid body or merely looks like one: feed the identical pose
+    /// to `GridStore` (what the map reads, in fixed point) and to the renderer
+    /// (what the player sees, in `f64`), and require a hull-local point to land
+    /// in the same world place through both.
+    ///
+    /// The trap it exists to catch is the rotation's mapping. A body's attitude
+    /// is a SIM rotation, and a script grid's voxels were painted through
+    /// `world_of` already — so the drawn rotation is the CONJUGATE `M q M⁻¹`,
+    /// not the mirror composed with it (`body_grid_pose`'s `M ∘ q`, which is
+    /// right for a body-mirror grid whose voxels are still shape-local). The
+    /// two agree at identity and nowhere else, so only a tilted pose tells them
+    /// apart.
+    #[test]
+    fn a_body_driven_frame_agrees_with_what_is_drawn() {
+        let pivot = FixedVec3::new(Fixed::from_int(10), Fixed::from_int(10), Fixed::from_int(3));
+        // A tumble about a tilted axis — the ship's own — so a mapping that is
+        // only right about z cannot pass.
+        let axis = FixedVec3::new(Fixed::from_f64(0.3), Fixed::from_f64(-0.2), Fixed::ONE);
+        let rot = monada_fixed::FixedQuat::from_axis_angle(axis, Fixed::from_f64(0.9)).normalize();
+        let origin = FixedVec3::new(
+            Fixed::from_f64(-4.25),
+            Fixed::from_f64(11.5),
+            Fixed::from_f64(2.75),
+        );
+
+        let mut store = monada_script::GridStore::new();
+        let handle = store.spawn(FixedVec3::ZERO, true);
+        store.set_pivot(handle, pivot);
+        store.set_origin(handle, origin);
+        store.set_rotation(handle, rot);
+
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let g = r.grid_spawn_cubic(0, 0, 0);
+        r.grid_pivot(g, pivot);
+        r.grid_pose(g, origin, rot);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let crew = world.spawn(arch);
+        r.entity_set_grid(crew.0 as i64, g);
+
+        for local in [
+            pivot,
+            FixedVec3::ZERO,
+            FixedVec3::new(Fixed::from_int(19), Fixed::from_int(19), Fixed::from_int(5)),
+        ] {
+            let drawn = r.place(crew, local);
+            let computed = entity_world_of_in(true, store.to_world(handle, local));
+            assert!(
+                (drawn - computed).length() < 1e-5,
+                "a body-driven frame disagrees with the drawing at {local:?}: \
+                 drawn {drawn:?}, computed {computed:?}"
+            );
+        }
+    }
+
+    /// A body bound to a script grid is not drawn twice (D4). The map's painted
+    /// hull is its picture; the automatic mirror would put a second,
+    /// material-coloured copy of the same silhouette inside it — which, because
+    /// the two agree exactly, reads as "the hull looks wrong" rather than as a
+    /// duplicate.
+    #[test]
+    fn a_bound_body_is_not_auto_mirrored() {
+        use monada_script::ScriptBackend as _;
+
+        let phys = monada_script::shared_physics(30);
+        let mut backend = monada_script::RhaiBackend::new(monada_script::shared_world(1));
+        let r = std::sync::Arc::new(std::sync::Mutex::new(MapRender::new(
+            BTreeMap::new(),
+            None,
+            &[],
+        )));
+        let bridge: monada_script::SharedBridge = r.clone();
+        backend.set_bridge(&bridge);
+        backend.set_physics(&phys);
+        backend
+            .load(
+                r"
+                fn init() {
+                    phys_material(fixed(1), ratio(6, 10), ratio(1, 10), fixed(4));
+                    let g = grid_spawn_cubic(0, 0, 0);
+                    let s = phys_shape(4, 4, 4);
+                    phys_shape_fill(s, 0, 0, 0, 3, 3, 3, 0);
+                    let b = phys_body(s, vec3(fixed(0), fixed(0), fixed(0)));
+                    grid_body(g, b);
+
+                    // A second body, deliberately unbound: the mirror is not
+                    // switched off globally, only for hulls somebody draws.
+                    let s2 = phys_shape(2, 2, 2);
+                    phys_shape_fill(s2, 0, 0, 0, 1, 1, 1, 0);
+                    phys_body(s2, vec3(fixed(30), fixed(0), fixed(0)));
+                }
+            ",
+            )
+            .expect("compile");
+        monada_script::ScriptBackend::on_init(&mut backend).expect("init");
+
+        let mut render = r.lock().expect("render mutex");
+        render.set_volume_terrain();
+        render.sync_physics(&phys.lock().expect("physics mutex"), 1.0 / 30.0);
+        assert!(
+            !render.body_mirrors.contains_key(&0),
+            "the bound hull draws as its own grid"
+        );
+        assert!(
+            render.body_mirrors.contains_key(&1),
+            "an unbound body still gets the automatic mirror"
+        );
     }
 
     /// Both halves of a billboard actor's orientation are questions about the

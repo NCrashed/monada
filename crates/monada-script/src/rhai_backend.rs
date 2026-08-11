@@ -12,12 +12,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use monada_fixed::{trig, Fixed, FixedVec3};
+use monada_fixed::{trig, Fixed, FixedQuat, FixedVec3};
+use monada_physics::BodyId;
 use monada_sim::{ArchetypeId, Command, EntityId, PlayerId};
 use rhai::{Array, Dynamic, Engine, ImmutableString, Scope, AST};
 
 use crate::grids::{register_grid_api, shared_grids};
-use crate::physics::register_physics_api;
+use crate::physics::{pose_bound_grid, register_physics_api};
 use crate::{
     shared_terrain, ScriptBackend, ScriptError, SharedBridge, SharedGrids, SharedPhysics,
     SharedTerrain, SharedWorld, UiEvent,
@@ -83,6 +84,11 @@ pub struct RhaiBackend {
     /// a drawing one answer "can I walk there?" identically
     /// (docs/plans/desert-game.md §3a).
     terrain: SharedTerrain,
+    /// The embedded physics sim, once [`set_physics`](RhaiBackend::set_physics)
+    /// has run — kept so [`sync_grid_bodies`](ScriptBackend::sync_grid_bodies)
+    /// can read body poses after a step. `None` on a map without physics, where
+    /// that sync is a no-op.
+    phys: Option<SharedPhysics>,
 }
 
 impl RhaiBackend {
@@ -118,6 +124,7 @@ impl RhaiBackend {
             bridge: None,
             grids,
             terrain,
+            phys: None,
         }
     }
 
@@ -173,7 +180,16 @@ impl RhaiBackend {
     /// `voxel_*` registrations shadow the bridge-only ones and forward to
     /// whatever bridge is set at this moment).
     pub fn set_physics(&mut self, phys: &SharedPhysics) {
-        register_physics_api(&mut self.engine, phys, self.bridge.as_ref());
+        register_physics_api(
+            &mut self.engine,
+            phys,
+            self.bridge.as_ref(),
+            &self.grids.clone(),
+        );
+        // Kept so [`sync_grid_bodies`](ScriptBackend::sync_grid_bodies) can
+        // carry body poses into the frame table after each step — the one
+        // place the two halves of a map's simulation meet.
+        self.phys = Some(phys.clone());
     }
 
     fn call<A: rhai::FuncArgs>(&mut self, name: &str, args: A) -> Result<(), ScriptError> {
@@ -271,6 +287,33 @@ impl ScriptBackend for RhaiBackend {
 
     fn drain_ui_events(&mut self) -> Vec<UiEvent> {
         std::mem::take(&mut self.events.lock().expect("events mutex"))
+    }
+
+    fn sync_grid_bodies(&mut self) {
+        let Some(phys) = self.phys.clone() else {
+            return;
+        };
+        let bound = self.grids.lock().expect("grids mutex").bound_grids();
+        if bound.is_empty() {
+            return;
+        }
+        // Read every pose under ONE physics lock, then write: the write path
+        // takes the frame-table and bridge locks, and interleaving the three
+        // would nest them in an order nothing else uses.
+        let poses: Vec<(i64, FixedVec3, FixedQuat)> = {
+            let sim = phys.lock().expect("physics mutex");
+            bound
+                .iter()
+                .filter_map(|&(grid, body)| {
+                    sim.world
+                        .body(BodyId(body))
+                        .map(|b| (grid, b.position(), b.orientation()))
+                })
+                .collect()
+        };
+        for (grid, position, orientation) in poses {
+            pose_bound_grid(&self.grids, self.bridge.as_ref(), grid, position, orientation);
+        }
     }
 }
 

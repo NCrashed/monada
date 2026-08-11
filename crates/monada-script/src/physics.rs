@@ -32,7 +32,7 @@ use monada_physics::{
 };
 use rhai::Engine;
 
-use crate::{DrillToolDef, PhysicsSim, SharedBridge, SharedPhysics};
+use crate::{DrillToolDef, PhysicsSim, SharedBridge, SharedGrids, SharedPhysics};
 
 
 /// Lock helper: every host fn takes the lock for one call, like the
@@ -76,6 +76,38 @@ fn with_shape<R>(
     f(shape)
 }
 
+/// Carry one body's pose into the grid it drives (`grid_body`,
+/// docs/plans/ship-physics.md D2): the sim-side frame table first, then
+/// the render mirror, both from the same fixed-point numbers.
+///
+/// The frame's origin is derived, not copied: `GridStore` composes a
+/// grid-local point as `origin + pivot + rot·(p − pivot)`, so putting
+/// the pivot — which `grid_body` set to the body's CENTRE OF MASS —
+/// exactly on the body's position means `origin = position − pivot`.
+/// Get that wrong and the hull orbits its own centre of mass once per
+/// revolution.
+pub(crate) fn pose_bound_grid(
+    grids: &SharedGrids,
+    bridge: Option<&SharedBridge>,
+    grid: i64,
+    position: FixedVec3,
+    orientation: FixedQuat,
+) {
+    let origin = {
+        let mut store = grids.lock().expect("grids mutex");
+        let origin = position - store.pivot(grid);
+        store.set_origin(grid, origin);
+        store.set_rotation(grid, orientation);
+        origin
+    };
+    if let Some(bridge) = bridge {
+        bridge
+            .lock()
+            .expect("bridge mutex")
+            .grid_pose(grid, origin, orientation);
+    }
+}
+
 /// A script-authored cell box, ordered — a map may name either corner
 /// first, exactly as the `voxel_fill*` verbs allow.
 fn shape_box(
@@ -116,6 +148,7 @@ pub(crate) fn register_physics_api(
     engine: &mut Engine,
     phys: &SharedPhysics,
     bridge: Option<&SharedBridge>,
+    grids: &SharedGrids,
 ) {
     // Authoring scratch, owned by these closures rather than by the sim
     // (see [`ShapeTable`]). One table per registration, so a re-registered
@@ -183,30 +216,30 @@ pub(crate) fn register_physics_api(
     // centre of mass, inertia and collision skin all derive from the
     // geometry the player can see.
 
-    let s = shapes.clone();
+    let tbl = shapes.clone();
     engine.register_fn("phys_shape", move |sx: i64, sy: i64, sz: i64| -> i64 {
-        let mut table = s.lock().expect("shape table mutex");
+        let mut table = tbl.lock().expect("shape table mutex");
         table.push(Some(VoxelShape::new(sx as i32, sy as i32, sz as i32)));
         table.len() as i64 - 1
     });
 
-    let s = shapes.clone();
+    let tbl = shapes.clone();
     engine.register_fn(
         "phys_shape_fill",
         move |shape: i64, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, mat: i64| {
             let (lo, hi) = shape_box(x0, y0, z0, x1, y1, z1);
-            with_shape(&s, shape, "phys_shape_fill", |sh| {
+            with_shape(&tbl, shape, "phys_shape_fill", |sh| {
                 sh.fill_box(lo, hi, MaterialId(mat as u16));
             });
         },
     );
 
-    let s = shapes.clone();
+    let tbl = shapes.clone();
     engine.register_fn(
         "phys_shape_clear",
         move |shape: i64, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64| {
             let (lo, hi) = shape_box(x0, y0, z0, x1, y1, z1);
-            with_shape(&s, shape, "phys_shape_clear", |sh| {
+            with_shape(&tbl, shape, "phys_shape_clear", |sh| {
                 sh.clear_box(lo, hi);
             });
         },
@@ -217,10 +250,10 @@ pub(crate) fn register_physics_api(
     // would be two truths about one hull. `point` places the DERIVED centre
     // of mass, the same convention `phys_box` documents.
     let p = phys.clone();
-    let s = shapes.clone();
+    let tbl = shapes.clone();
     engine.register_fn("phys_body", move |shape: i64, point: FixedVec3| -> i64 {
         let taken = {
-            let mut table = s.lock().expect("shape table mutex");
+            let mut table = tbl.lock().expect("shape table mutex");
             usize::try_from(shape)
                 .ok()
                 .and_then(|i| table.get_mut(i))
@@ -239,6 +272,51 @@ pub(crate) fn register_physics_api(
                 angular_velocity: FixedVec3::ZERO,
             })
             .0 as i64
+    });
+
+    // --- a grid driven by a body (ship-physics S-3) --------------------
+    // The verb that marries the two halves: from here the map does not
+    // pose this grid at all. What rides the grid — crew, crates, actor
+    // facings, the fog cone, the deck cutaway, the camera — follows the
+    // frame exactly as it always has, so a ship becomes a rigid body
+    // without changing one line of what it means to walk around inside
+    // one. Registered here rather than beside the other `grid_*` verbs
+    // because it is the only one that needs to read a body.
+    let p = phys.clone();
+    let frames = grids.clone();
+    let b = bridge.cloned();
+    engine.register_fn("grid_body", move |grid: i64, body: i64| {
+        // The grid turns about the body's centre of mass (D3), so a map
+        // can never let its hand-authored pivot drift from where the
+        // dynamics actually turn — and a hull that loses a wing turns
+        // about its new CoM for free.
+        let pose = u64::try_from(body).ok().and_then(|id| {
+            let sim = lock(&p);
+            sim.world
+                .body(BodyId(id))
+                .map(|body| (body.com_in_shape(), body.position(), body.orientation()))
+        });
+        {
+            let mut store = frames.lock().expect("grids mutex");
+            store.bind_body(grid, body);
+            if let Some((com, _, _)) = pose {
+                store.set_pivot(grid, com);
+            }
+        }
+        if let Some(b) = &b {
+            let mut bridge = b.lock().expect("bridge mutex");
+            bridge.grid_body(grid, body);
+            if let Some((com, _, _)) = pose {
+                bridge.grid_pivot(grid, com);
+            }
+        }
+        // Pose it NOW as well as every tick from here: binding during
+        // `init` otherwise leaves the hull sitting at its spawn origin
+        // until the first step, which is one visible frame of the ship
+        // in the wrong place.
+        if let Some((_, position, orientation)) = pose {
+            pose_bound_grid(&frames, b.as_ref(), grid, position, orientation);
+        }
     });
 
     // Wheel anchors are authored in SHAPE coordinates (the box the map

@@ -1,8 +1,9 @@
 # Plan: the ship is a rigid body — a hull that flies, and riders that don't judder
 
-Status: **S-0 – S-2 shipped 2026-08-11** — render-rate pose smoothing (§4), the
-ship map on the physics gate, and freeform body shapes (`host_api` 21); S-3
-onward designed. Requested by the people extending the ship demo
+Status: **S-0 – S-3 shipped 2026-08-11** — render-rate pose smoothing (§4), the
+ship map on the physics gate, freeform body shapes, and a grid driven by a body
+(`host_api` 22). The engine can now fly a ship; S-4 (thrust) and S-5 (the demo
+uses it) are designed. Requested by the people extending the ship demo
 (`crates/monada-ship`), who are stuck at the first step: making the hull itself
 a physics body, with everything standing on it inheriting the pose smoothly.
 Engines that push and turn the ship come after — and fall out of it almost for
@@ -390,12 +391,37 @@ Each step is a headless test; nothing needs a display until S-5.
     verbs match it. Worth knowing before writing the next verb: a handle that
     should degrade gracefully must return `-1` (the `grid_*` family's stance),
     because there is no middle ground between that and killing the process.
-- **S-3 — `grid_body`.** The binding, the after-step sync, the auto-mirror skip,
-  the CoM pivot. Test: step a body with a known angular velocity, then require
-  the grid's `GridStore` frame *and* the drawn transform to agree with the body
-  pose — the same shape as S-3 of the grid-entities plan
-  (`the_sim_frame_and_the_drawn_frame_agree`). Test: a bound body draws no
-  mirror grid.
+- **S-3 — `grid_body`. DONE (2026-08-11).** The binding
+  (`GridStore::bind_body` + `set_rotation`, the quaternion twin of `orient`),
+  the after-step sync (`ScriptBackend::sync_grid_bodies`, called at both places
+  physics steps — `RhaiDriver::step` and `MapSim::advance`), two defaulted
+  bridge methods (`grid_body`, `grid_pose`), the CoM pivot, and the auto-mirror
+  skip. `HOST_API_VERSION` 22. Five script tests and two host tests, the
+  load-bearing pair being `a_bound_grid_rides_its_body` (a crew member standing
+  on the hull's centre of mass is drawn exactly at the body's position, at every
+  attitude of a 30-tick tumble) and `a_body_driven_frame_agrees_with_what_is_drawn`.
+  Goldens unmoved: nothing binds yet. Three findings:
+  - **The rotation had to be CONJUGATED, not composed — and only a tilted pose
+    tells the two apart.** A script grid's voxels were painted through
+    `world_of` already, so its local frame is world-oriented and a sim attitude
+    `q` becomes `M q M⁻¹` with `M = R_y(π)` — exactly what `grid_orient` does to
+    an *axis* (map by `diag(-1, 1, -1)`, keep the angle). The body MIRROR grid
+    wants the other spelling, `M ∘ q` (`body_grid_pose`), because its voxels are
+    still shape-local. The two agree at identity and diverge everywhere else,
+    which is why the agreement test tumbles about `(0.3, −0.2, 1)` and not
+    about z.
+  - **Binding poses the grid immediately.** Left to the first tick, a hull bound
+    during `init` sits at its spawn origin for one frame — the ship visibly in
+    the wrong place before it snaps into line. One extra call at bind time.
+  - **A body that was already auto-mirrored leaves a ghost.** Binding has to
+    RETIRE the mirror it replaces, not merely stop feeding it: the mirror's grid
+    keeps whatever voxels were blitted into it, so the hull would be drawn
+    inside the hull. `retire_mirror` (extracted with `clear_mirror` out of the
+    existing dead-mirror path) does it at bind time.
+  - Native maps are unaffected: `sync_grid_bodies` defaults to a no-op on the
+    `ScriptBackend` trait, so `NativeBackend` keeps its behaviour until a native
+    map wants the binding — at which point it writes the same three lines
+    `RhaiBackend` does.
 - **S-4 — thrust and torque.** `apply_angular_impulse`, the four verbs. Tests:
   a centred thrust changes velocity and not spin; the same thrust off-centre
   changes both, with the sign the right-hand rule says; `phys_torque` on a

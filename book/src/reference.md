@@ -208,6 +208,7 @@ vocabulary stays the same, with deeper semantics:
 | `phys_shape_clear(shape, x0, y0, z0, x1, y1, z1)` | empty a cell box — `phys_shape_fill`'s inverse, and how a shell is written: fill the block, clear the inside |
 | `phys_body(shape, point)` | spawn a body from an open shape, its derived CoM placed at sim `point`; returns a body id. CONSUMES the shape — the handle is spent, and writing through it afterwards is a map bug |
 | `phys_mass(body)` | the body's derived mass — the sum of its cells' densities, so a shell weighs its walls (ZERO for an unknown id) |
+| `grid_body(grid, body)` | drive a `grid_spawn_cubic` grid's frame from a body: the map stops posing that grid, the grid's pivot becomes the body's centre of mass, and the body stops being auto-mirrored (the painted grid is its picture). `-1` releases it. Riders, props, fog, the deck cutaway and the camera follow the frame with no change (requires `host_api` 22) |
 | `phys_wheel(body, ax, ay, az, rest, radius, k, c, mu)` | attach a wheel at SHAPE coords `(ax, ay, az)`; returns a wheel id |
 | `phys_wheel_input(body, wheel, steer, drive, brake)` | set a wheel's retained steering/drive/brake |
 | `phys_impulse(body, jx, jy, jz)` | apply an impulse at the CoM |

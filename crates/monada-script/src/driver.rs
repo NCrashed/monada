@@ -159,6 +159,11 @@ impl SimDriver for RhaiDriver {
             let PhysicsSim { world, terrain, .. } = &mut *sim;
             world.step(terrain);
         }
+        // …and only then are the frames hung off those bodies true
+        // (`grid_body`, docs/plans/ship-physics.md D2). Nothing reads a
+        // grid frame between the step and here, so a hull's pose is
+        // never observed one tick stale.
+        self.backend.sync_grid_bodies();
     }
 
     fn state_hash(&self) -> u64 {

@@ -83,6 +83,13 @@ pub struct GridStore {
     /// Entity → the handle it rides. `BTreeMap` (never `HashMap`) so every walk
     /// is deterministic (DESIGN.md §3.1).
     riders: BTreeMap<EntityId, u32>,
+    /// Grid handle → the physics body whose pose drives it (`grid_body`,
+    /// docs/plans/ship-physics.md D2). The frame of a bound grid is no longer
+    /// something the map computes: after each physics step the engine copies
+    /// the body's pose in here, and everything riding the grid follows.
+    /// `BTreeMap` for the same reason as `riders` — the sync walks it every
+    /// tick, and a walk order that varied would be a desync.
+    bodies: BTreeMap<u32, u64>,
 }
 
 impl GridStore {
@@ -190,6 +197,13 @@ impl GridStore {
     #[must_use]
     pub fn origin(&self, grid: i64) -> FixedVec3 {
         self.frame(grid).map_or(FixedVec3::ZERO, |f| f.origin)
+    }
+
+    /// The grid-local point it turns about (`ZERO` for an unknown handle, which
+    /// is also the default: the grid's own local origin).
+    #[must_use]
+    pub fn pivot(&self, grid: i64) -> FixedVec3 {
+        self.frame(grid).map_or(FixedVec3::ZERO, |f| f.pivot)
     }
 
     /// A grid-local point in world coordinates: `origin + pivot + rot·(p −
@@ -327,6 +341,66 @@ impl GridStore {
         if let Some(f) = self.frame_mut(grid) {
             f.alive = false;
         }
+        // A dead grid drives nothing: drop the body binding too, or the
+        // per-tick sync would keep posing a frame nobody can see.
+        if let Ok(i) = u32::try_from(grid) {
+            self.bodies.remove(&i);
+        }
+    }
+
+    /// Drive `grid`'s frame from physics `body` (`grid_body`,
+    /// docs/plans/ship-physics.md D2), or release it with a negative `body`.
+    /// From here on the map does not pose this grid — the engine copies the
+    /// body's pose in after each physics step, and riders, props, fog and
+    /// camera follow the frame as they always have.
+    ///
+    /// An unknown or despawned handle is inert, like every other grid verb.
+    pub fn bind_body(&mut self, grid: i64, body: i64) {
+        if !self.alive(grid) {
+            return;
+        }
+        let Ok(handle) = u32::try_from(grid) else {
+            return;
+        };
+        match u64::try_from(body) {
+            Ok(id) => self.bodies.insert(handle, id),
+            Err(_) => self.bodies.remove(&handle),
+        };
+    }
+
+    /// The body driving `grid`, or `-1` — the read a map uses to ask "is this
+    /// hull under power" without keeping its own table.
+    #[must_use]
+    pub fn body_of(&self, grid: i64) -> i64 {
+        u32::try_from(grid)
+            .ok()
+            .and_then(|h| self.bodies.get(&h))
+            .and_then(|&id| i64::try_from(id).ok())
+            .unwrap_or(NO_GRID)
+    }
+
+    /// Every (grid handle, body id) binding, in handle order — what the
+    /// per-tick sync walks. Deterministic by construction: `BTreeMap` order.
+    #[must_use]
+    pub fn bound_grids(&self) -> Vec<(i64, u64)> {
+        self.bodies
+            .iter()
+            .map(|(&h, &b)| (i64::from(h), b))
+            .collect()
+    }
+
+    /// Set `grid`'s orientation from a quaternion, replacing it whole.
+    ///
+    /// The quaternion twin of [`orient`](GridStore::orient), for a frame driven
+    /// by something that already has one — a rigid body's attitude. Going
+    /// through axis/angle instead would round a pose the solver computed
+    /// exactly, twice, every tick. Normalised on the way in for the reason
+    /// `orient` spells out: a nearly-unit quaternion turns every
+    /// world→local→world trip into a small dilation.
+    pub fn set_rotation(&mut self, grid: i64, rot: FixedQuat) {
+        if let Some(f) = self.frame_mut(grid) {
+            f.rot = rot.normalize();
+        }
     }
 
     /// Drop bindings whose entity is gone. Run once per tick (the backend holds
@@ -361,6 +435,11 @@ impl StateHash for GridStore {
         for (e, &g) in &self.riders {
             e.hash(h);
             h.write_u64(u64::from(g));
+        }
+        h.write_u64(self.bodies.len() as u64);
+        for (&g, &b) in &self.bodies {
+            h.write_u64(u64::from(g));
+            h.write_u64(b);
         }
     }
 }
