@@ -72,18 +72,17 @@ kind = "axis"
 default = { pos = "KeyQ", neg = "KeyE" }
 label = { en = "Turn ship" }
 
-# Debug aids for `entity_set_side` (docs on the verb: it snaps a model to one
-# of the 6 grid faces + a quarter-turn roll, rather than a continuous yaw):
-# while carrying a crate, spin/roll it in place so the change is visible on
-# sight instead of only provable by test.
+# A build hotbar: give yourself a fresh engine or console, ready to aim and
+# set down with the same `use` / `rotate` / `set_down` flow a picked-up crate
+# gets. A no-op while your hands are already full.
 [[action]]
-id = "rotate_x"
+id = "select_engine"
 kind = "button"
 default = ["Digit1"]
-label = { en = "Rotate carried crate (debug)" }
+label = { en = "Take an engine in hand" }
 
 [[action]]
-id = "roll_cw"
+id = "select_console"
 kind = "button"
 default = ["Digit2"]
-label = { en = "Roll carried crate CW (debug)" }
+label = { en = "Take a console in hand" }

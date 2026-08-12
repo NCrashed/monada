@@ -403,57 +403,40 @@ fn use_picks_a_crate_up_and_sets_it_down() {
     );
 }
 
+/// A carried entity's cargo `kind` (0 = crate, 1 = locker, 2 = console,
+/// 3 = engine) — for a prop `give_kind` just handed you, not one of the
+/// map's own `crate_of`-indexed stock.
+fn carried_kind(world: &SharedWorld) -> i64 {
+    let carry = crew_carry(world);
+    assert!(carry != 0, "must be carrying something");
+    let id = u64::try_from(carry - 1).expect("carry is a positive entity id + 1");
+    let w = world.lock().unwrap();
+    w.field(EntityId(id), "kind")
+        .expect("carried entity has a kind")
+        .to_f64() as i64
+}
+
 #[test]
-fn keys_1_and_2_turn_a_carried_crate() {
+fn keys_1_and_2_give_an_engine_or_a_console_in_hand() {
     let (world, mut b) = fresh();
-    step(&mut b, &input(0, 0)); // spawn at (5, 2); crate 0 waits at (4, 3)
-    assert_eq!(
-        crate_field(&world, 0, "dir"),
-        2,
-        "stowed facing Direction::Y"
-    );
-    assert_eq!(crate_field(&world, 0, "roll"), 0, "stowed at Roll::Deg0");
+    step(&mut b, &input(0, 0)); // spawn at (5, 2), hands empty
+    assert_eq!(crew_carry(&world), 0, "hands start empty");
 
-    // Bit 64 (key 1) is a no-op with empty hands.
-    step(&mut b, &input_btn(0, 0, 64));
-    assert_eq!(
-        crate_field(&world, 0, "dir"),
-        2,
-        "nobody is carrying it yet"
-    );
+    step(&mut b, &input_btn(0, 0, 64)); // 1: take an engine
+    assert!(crew_carry(&world) != 0, "an engine landed in hand");
+    assert_eq!(carried_kind(&world), 3, "engine is cargo kind 3");
 
-    step(&mut b, &input_btn(0, 0, 1)); // F: pick the crate up
-    assert!(crew_carry(&world) != 0, "carrying it");
+    // Already holding something: 2 is a no-op until the engine is set down.
+    step(&mut b, &input_btn(0, 0, 128));
+    assert_eq!(carried_kind(&world), 3, "hands stay full of the engine");
 
-    step(&mut b, &input_btn(0, 0, 64)); // 1: rotate around sim +x
-    assert_eq!(
-        crate_field(&world, 0, "dir"),
-        4,
-        "Direction::Y rotated 90° around X lands on Direction::Z"
-    );
-    // Holding it does not repeat the turn every tick — only the rising edge
-    // fires, same as `use`/`door`.
-    step(&mut b, &input_btn(0, 0, 64));
-    assert_eq!(crate_field(&world, 0, "dir"), 4, "held, not repeated");
+    hold(&mut b, 1, 1, 20); // clear of the stowed crate/locker before setting down
+    step(&mut b, &input_btn(0, 0, 1)); // F: set the engine down
+    assert_eq!(crew_carry(&world), 0, "hands free again");
 
-    step(&mut b, &input_btn(0, 0, 128)); // 2: roll CW
-    assert_eq!(
-        crate_field(&world, 0, "roll"),
-        1,
-        "Roll::Deg0 CW is Roll::Deg90"
-    );
-    step(&mut b, &input_btn(0, 0, 128)); // held
-    assert_eq!(crate_field(&world, 0, "roll"), 1, "held, not repeated");
-
-    // …and R (bit 32) turns it back to a face the DECK can take: the
-    // placement rotation owns the horizontal direction, the roll survives.
-    step(&mut b, &input_btn(0, 0, 32));
-    assert_eq!(
-        crate_field(&world, 0, "dir"),
-        2,
-        "R faced it along the crew's new placement rotation (+y)"
-    );
-    assert_eq!(crate_field(&world, 0, "roll"), 1, "…keeping the roll");
+    step(&mut b, &input_btn(0, 0, 128)); // 2: take a console
+    assert!(crew_carry(&world) != 0, "a console landed in hand");
+    assert_eq!(carried_kind(&world), 2, "console is cargo kind 2");
 }
 
 #[test]
@@ -498,8 +481,8 @@ fn a_crate_released_through_the_airlock_stays_in_space() {
     );
     assert_eq!(
         count(&world, CRATE),
-        3,
-        "releasing a crate does not destroy it (two crates + a locker)"
+        6,
+        "releasing a crate does not destroy it (two crates, a locker, a console, two engines)"
     );
 }
 
@@ -921,11 +904,15 @@ fn every_control_reaches_the_command() {
         "burning while turning is one command, not a choice"
     );
     assert_eq!(
-        local_mask(&["rotate_x"], &[]),
+        local_mask(&["select_engine"], &[]),
         64,
-        "1: spin a carried crate"
+        "1: take an engine in hand"
     );
-    assert_eq!(local_mask(&["roll_cw"], &[]), 128, "2: roll it CW");
+    assert_eq!(
+        local_mask(&["select_console"], &[]),
+        128,
+        "2: take a console in hand"
+    );
 }
 
 /// The cursor reaches the simulation, and only as a cell.
