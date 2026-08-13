@@ -426,17 +426,41 @@ fn keys_1_and_2_give_an_engine_or_a_console_in_hand() {
     assert!(crew_carry(&world) != 0, "an engine landed in hand");
     assert_eq!(carried_kind(&world), 3, "engine is cargo kind 3");
 
-    // Already holding something: 2 is a no-op until the engine is set down.
+    // Already holding something: 2 discards the engine and hands over a
+    // fresh console instead, rather than refusing.
+    let engine_id = crew_carry(&world);
     step(&mut b, &input_btn(0, 0, 128));
-    assert_eq!(carried_kind(&world), 3, "hands stay full of the engine");
+    assert_eq!(carried_kind(&world), 2, "the hotbar swapped in a console");
+    assert_ne!(
+        crew_carry(&world),
+        engine_id,
+        "the discarded engine is not what is now in hand"
+    );
+    assert_eq!(
+        count(&world, CRATE),
+        7,
+        "the discarded engine is gone, not left lying around \
+         (the demo's 6 stowed/mounted props, plus the fresh console in hand)"
+    );
+}
 
-    hold(&mut b, 1, 1, 20); // clear of the stowed crate/locker before setting down
-    step(&mut b, &input_btn(0, 0, 1)); // F: set the engine down
-    assert_eq!(crew_carry(&world), 0, "hands free again");
+#[test]
+fn pressing_the_same_hotbar_key_again_frees_your_hands() {
+    let (world, mut b) = fresh();
+    step(&mut b, &input(0, 0)); // spawn, hands empty
+    let before = count(&world, CRATE);
 
-    step(&mut b, &input_btn(0, 0, 128)); // 2: take a console
-    assert!(crew_carry(&world) != 0, "a console landed in hand");
-    assert_eq!(carried_kind(&world), 2, "console is cargo kind 2");
+    step(&mut b, &input_btn(0, 0, 64)); // 1: take an engine
+    assert!(crew_carry(&world) != 0, "an engine landed in hand");
+
+    step(&mut b, &input_btn(0, 0, 0)); // release, so the next press is an edge
+    step(&mut b, &input_btn(0, 0, 64)); // 1 again: same kind already in hand
+    assert_eq!(crew_carry(&world), 0, "1 again toggled the engine off");
+    assert_eq!(
+        count(&world, CRATE),
+        before,
+        "the discarded engine is gone, not left lying around"
+    );
 }
 
 #[test]

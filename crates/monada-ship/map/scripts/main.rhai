@@ -832,12 +832,20 @@ fn stow_prop(kind, cx, cy, r, grid) {
 
 /// The build hotbar (`1`/`2`, `select_engine`/`select_console`): give crew
 /// `c` a fresh prop of `kind`, already in hand, bound to `c`'s OWN ship —
-/// whichever hull they happen to be standing on. A no-op with a full hand —
-/// it hands you something to place, it does not swap out what you are
-/// carrying.
+/// whichever hull they happen to be standing on. With a full hand, this
+/// DISCARDS whatever `c` was already carrying and hands over a fresh one —
+/// unless it's already the SAME kind, in which case the key TOGGLES it off
+/// (empty hands) rather than pointlessly swapping an engine for an engine.
 fn give_kind(c, kind) {
-    if to_int(entity_field(c, "carry")) != 0 {
-        return;
+    let carried = to_int(entity_field(c, "carry"));
+    if carried != 0 {
+        let same = to_int(entity_field(carried - 1, "kind")) == kind;
+        entity_detach(carried - 1);
+        entity_despawn(carried - 1);
+        entity_set_field(c, "carry", fixed(0));
+        if same {
+            return;
+        }
     }
     let k = entity_create(2);
     entity_set_field(k, "kind", fixed(kind));
