@@ -35,8 +35,11 @@
 //! blocks, so where things go is a decision.
 //!
 //! Archetypes register in order, so ids are fixed: CREW = 0, SHIP = 1,
-//! CRATE = 2, ENGINE = 3. Model ids by registration order: crew actor = 0,
-//! crate = 1, locker = 2.
+//! CRATE = 2. Model ids by registration order: crew actor = 0, crate = 1,
+//! locker = 2, console = 3, engine = 4. The console (kind 2) and the
+//! engine (kind 3) are CRATE kinds, not fixtures — they ride the same
+//! pick-up/carry/place machinery as cargo, and `1`/`2` give you a fresh one
+//! of each to place.
 
 // --- tuning (all fixed-point; no_float Rhai forbids IEEE) ---------------
 // NB: Rhai functions are pure — they do NOT see top-level `const`s — so the
@@ -45,19 +48,48 @@
 
 fn crew_speed() { ratio(16, 100) } // sim cells / tick (30 Hz)
 
-// The hull's grid_spawn handle. It is the first (and only) grid the map spawns,
-// so its handle is 0 — written as a literal here the same way CREW = 0 is, since
-// pure functions can't see top-level consts. Fog + deck_clip ride this grid.
-fn hull_grid() { 0 }
-
-// The ship entity: the only member of archetype SHIP (1), created by `init`.
-// Looked up rather than written as a literal, unlike `hull_grid()`: which id
-// `entity_create` hands out is an ordering detail of `init`, and id 0 is also
-// the engine's conventional "no target" for `Command::target` — pinning the
-// singleton there invites a collision the day a verb starts reading `target`.
-// One small Array per tick is a fair price for an invariant the engine keeps
-// instead of a comment.
+// The DEFAULT ship: the first member of archetype SHIP (1), created by
+// `init`. Looked up rather than written as a literal, unlike an entity id:
+// which id `entity_create` hands out is an ordering detail of `init`, and id
+// 0 is also the engine's conventional "no target" for `Command::target` —
+// pinning a singleton there invites a collision the day a verb starts reading
+// `target`. SIM-SIDE ONLY: it indexes the entity world, and the local layer's
+// world has no entities in it at all (`LocalBackend` never runs `init`) — use
+// `default_ship_grid()` there instead. Everywhere else, "which ship" is read
+// off the acting entity's own `entity_grid` binding, not assumed.
 fn ship_entity() { entities_of(1)[0] }
+
+// The first grid a map spawns, as a LITERAL — the one place "which ship" is
+// still a hardcoded guess rather than read off an entity, because the local
+// layer's world has no entities to ask at all (see `ship_entity`). Correct
+// for this demo's one ship; a per-client "which ship is my cursor over" for a
+// real second hull needs grid sync, not an entity lookup, to reach the local
+// layer.
+fn default_ship_grid() { 0 }
+
+/// The grid `ship`'s hull rides, stored on the entity by `spawn_ship` rather
+/// than written as a literal the way a single hull's handle used to be: a
+/// second ship's grid id is not 0, so nothing here may guess.
+fn ship_grid(ship) { to_int(entity_field(ship, "grid")) }
+
+/// The SHIP entity whose hull is `grid`, or -1. Walked fresh each call over
+/// however many ships exist (a handful at most) rather than cached on
+/// whatever asked — a cache is one more place a ship-to-grid rebind could go
+/// stale; this can't.
+fn ship_by_grid(grid) {
+    for s in entities_of(1) {
+        if ship_grid(s) == grid {
+            return s;
+        }
+    }
+    -1
+}
+
+/// The ship entity `e` (crew or prop) currently belongs to, found through
+/// whatever grid it rides — the one relation every rider already has, so
+/// nothing needs a second, redundant "which ship" field to drift out of sync
+/// with it.
+fn ship_of(e) { ship_by_grid(entity_grid(e)) }
 
 fn absf(x) { if x < fixed(0) { -x } else { x } }
 
@@ -174,13 +206,13 @@ fn deck_top(deck) { deck_floor(deck) + 2 }
 /// roxlap already models decks via `DeckBand`, monada's collision does not).
 /// Until then the map owns its wall layout as this predicate, kept in sync
 /// with what `build_hull` paints for the eye.
-fn blocked(cx, cy, deck) {
+fn blocked(cx, cy, deck, grid) {
     // Cargo is as solid as a bulkhead. A placement system whose output you
     // walk straight through decides nothing, so a prop somebody put down
     // blocks — which is what makes a crate in a doorway a barricade and
     // where you leave a locker a choice (docs/plans/ship-building.md).
     // Only STOWED props: the one in your hands is inside your own cell.
-    if occupied(cx, cy, deck) {
+    if occupied(cx, cy, deck, grid) {
         return true;
     }
     // The airlock: two rim cells on the lower deck's starboard side. Open, they
@@ -188,7 +220,7 @@ fn blocked(cx, cy, deck) {
     // doorway with the void at your back. `paint_door` keeps the voxels in sync
     // with this predicate (the same hand-sync contract the walls have).
     if deck == 0 && cx == 19 && (cy == 9 || cy == 10) {
-        return !door_open();
+        return !door_open(ship_by_grid(grid));
     }
     if cx < 1 || cy < 1 || cx > 18 || cy > 18 {
         return true; // rim / out of bounds, both decks
@@ -243,13 +275,13 @@ fn cell(v) { to_int(v + ratio(1, 2)) }
 /// must be clear of walls (on the deck `cz` implies), AND the surface it would
 /// stand on must be at most one step (`STEP_MAX = 1` cell) from `cz` — so a
 /// two-cell drop or rise blocks like a wall, but you climb the stair freely.
-fn reachable(px, py, cz) {
+fn reachable(px, py, cz, grid) {
     let deck = deck_of(cz);
     let r = ratio(40, 100);
-    if blocked(cell(px - r), cell(py - r), deck)
-        || blocked(cell(px + r), cell(py - r), deck)
-        || blocked(cell(px - r), cell(py + r), deck)
-        || blocked(cell(px + r), cell(py + r), deck)
+    if blocked(cell(px - r), cell(py - r), deck, grid)
+        || blocked(cell(px + r), cell(py - r), deck, grid)
+        || blocked(cell(px - r), cell(py + r), deck, grid)
+        || blocked(cell(px + r), cell(py + r), deck, grid)
     {
         return false;
     }
@@ -260,12 +292,58 @@ fn reachable(px, py, cz) {
 /// axis-separated so it slides along walls / step risers. Returns the xy only
 /// (as a `vec3`, z unused) — `step_crew` sets the z from the surface it lands on.
 fn try_move(e, vx, vy, cz) {
+    let grid = entity_grid(e);
     let pos = entity_position(e);
     let nx = pos.x + vx;
-    let fx = if reachable(nx, pos.y, cz) { nx } else { pos.x };
+    let fx = if reachable(nx, pos.y, cz, grid) { nx } else { pos.x };
     let ny = pos.y + vy;
-    let fy = if reachable(fx, ny, cz) { ny } else { pos.y };
+    let fy = if reachable(fx, ny, cz, grid) { ny } else { pos.y };
     vec3(fx, fy, fixed(0))
+}
+
+/// Build one ship at hull-grid origin `(ox, oy, oz)`: a cubic voxel grid, a
+/// rigid body shaped and weighed by the SAME hull `build_hull` paints, and
+/// the SHIP entity that carries both — the `grid`/`body` fields every other
+/// function reads back through `ship_grid`/`ship_body`/`ship_of` instead of a
+/// hardcoded handle. `steel` is passed in rather than made here: one material
+/// covers every hull this demo builds, and only the first `phys_material`
+/// call may claim id 0.
+///
+/// Returns the ship entity, or -1 if this host lacks cubic grids (host_api
+/// 15+) — the caller bails loudly rather than paint into nothing.
+fn spawn_ship(steel, ox, oy, oz) {
+    // The entity first, so a host that fails the grid check just below still
+    // gets a valid (if fieldless) SHIP entity rather than none at all —
+    // `entities_of(1)` stays non-empty either way, which is what every
+    // `ship_entity()`/`ship_by_grid` caller assumes.
+    let ship = entity_create(1);
+    // CUBIC cells (host_api 15): a cell is a cube, so the hull's tilted
+    // tumble below is the sim-space rotation it asks for and a hull-local
+    // point converts to a world point exactly — the column cell's unscaled z
+    // can only do that for yaw.
+    let grid = grid_spawn_cubic(ox, oy, oz);
+    if grid < 0 {
+        return -1;
+    }
+    entity_set_field(ship, "grid", fixed(grid));
+    // The hull, authored ONCE into two places: the voxels the player sees and
+    // the cells the dynamics weigh. `build_hull` writes both through
+    // `hull_box`, so the ship's mass, centre of mass and inertia are the real
+    // geometry's — a shell's, not the solid block that bounds it. The two can
+    // no longer drift apart, which is the same contract `blocked()` still owes
+    // the paint by hand.
+    let shape = phys_shape(20, 20, 6);
+    build_hull(grid, shape, steel);
+    let body = phys_body(shape, vec3(fixed(0), fixed(0), fixed(0)));
+    entity_set_field(ship, "body", fixed(body));
+    // From here the map does not pose the hull at all: the body's pose becomes
+    // the grid's frame after every physics step, and the grid's pivot becomes
+    // the body's centre of mass — so the ship turns about the point it really
+    // turns about, and no hand-authored pivot can drift from it. Crew, crates,
+    // the fog cone, the deck cutaway and the camera all ride the frame exactly
+    // as they did when a hashed `spin` field drove it.
+    grid_body(grid, body);
+    ship
 }
 
 // --- setup --------------------------------------------------------------
@@ -287,60 +365,52 @@ fn init() {
         "aimx", "aimy", "aimz", "aim", "rot",
     ]);
 
-    // Ship: the airlock state, and the physics body the hull IS. The hull's
-    // pose is no longer state this map keeps — it is an outcome of the
-    // dynamics, carried into the grid's frame by `grid_body` after every step
+    // Ship: the airlock state, the physics body the hull IS, and the grid
+    // that body's frame poses (`spawn_ship`). The hull's pose is no longer
+    // state this map keeps — it is an outcome of the dynamics, carried into
+    // the grid's frame by `grid_body` after every step
     // (docs/plans/ship-physics.md). What stays hashed here is what the map
-    // decides: whether the airlock is open, and which body is the ship.
+    // decides: whether the airlock is open, which body is the ship, and
+    // which grid is its hull — the fact every crew member and prop's own
+    // `entity_grid` binding gets checked against (`ship_of`) rather than a
+    // single hardcoded handle, so a second ship is a second `spawn_ship`
+    // call away, not a rewrite.
     // Archetype id 1 (after CREW = 0).
-    archetype(["door", "body"]);
-    let ship = entity_create(1);
+    archetype(["door", "body", "grid"]);
 
     // Cargo: "is someone holding me", what KIND of thing it is (0 = a
-    // one-cell crate, 1 = a two-cell floor locker), and its ORIENTATION as
-    // the `Direction`/`Roll` discriminants `entity_set_side` was last given
-    // (0-5, 0-3) — hashed, so every peer agrees which face a crate shows and
-    // which way a locker lies.
+    // one-cell crate, 1 = a two-cell floor locker, 2 = a console,
+    // 3 = an engine), and its ORIENTATION as the `Direction`/`Roll`
+    // discriminants `entity_set_side` was last given (0-5, 0-3) — hashed, so
+    // every peer agrees which face a crate shows and which way a locker or
+    // an engine's nozzle points.
     //
     // One orientation, not two. A placed prop's footprint runs along `dir`
     // (`prop_rot` reads it back as a quarter-turn), so "which way it is
     // drawn" and "which cells it takes" are the same fact rather than two
     // that can drift — the same discipline `hull_box` gives the hull's paint
     // and its physics shape. `roll` never touches the footprint: rolling a
-    // crate onto another face changes nothing about the deck.
+    // crate onto another face changes nothing about the deck. An engine's
+    // `dir` does double duty as its THRUST axis (`direction_axis`), so a
+    // placed engine pushes the way it visibly faces, not some separate
+    // number nobody can see.
+    //
+    // `throttle` is unused by kinds 0-2 — only an engine (kind 3) writes it,
+    // in `step_ship`. One field on the shared archetype rather than a second
+    // archetype: it is what lets an engine be picked up, carried and set
+    // down through the exact same code cargo already uses (`use`,
+    // `can_place`, `set_down`), instead of a fixture with its own rules.
     //
     // What makes a prop interesting beyond that is still WHICH FRAME it is
     // in — riding the hull, or released into the world (see `step_use`) —
     // but now also WHERE on the deck, because a placed prop blocks.
     // Archetype id 2.
-    archetype(["held", "kind", "dir", "roll"]);
-
-    // Engines: a thruster is an ENTITY on the hull, at a hull cell, pointing
-    // along a hull direction, with a throttle. Nothing about it is engine-side
-    // — `phys_thrust` takes a place, a direction and a force, and everything
-    // that makes this one a main drive rather than a tractor beam is the four
-    // fields below. Archetype id 3.
-    archetype(["dx", "dy", "dz", "throttle"]);
+    archetype(["held", "kind", "dir", "roll", "throttle"]);
 
     set_light(vec3(ratio(-4, 10), ratio(-3, 10), ratio(8, 10)), ratio(8, 10));
     // Space outside the hull: a starfield panorama behind the scene. Unpainted
     // cells (outside the hull) show it. Render-side (headless no-op).
     set_sky("assets/starfield.png");
-
-    // Spawn the ship's own voxel grid (separate from any world grid) so the
-    // hull can be moved/rotated as a unit, and so the fog/deck cutaway ride the
-    // crew's own grid. CUBIC cells (host_api 15): a cell is a cube, so the
-    // hull's tilted tumble below is the sim-space rotation it asks for and a
-    // hull-local point can be converted to a world point exactly — the column
-    // cell's unscaled z can only do that for yaw. `(0,0,0)` places it at the
-    // world voxel origin. As the first (only) grid it spawns its handle is
-    // `hull_grid()` (== 0); a `< 0` return means a host without cubic grids —
-    // the manifest requires 15, so bail loud rather than paint into nothing.
-    let ship_grid = grid_spawn_cubic(0, 0, 0);
-    if ship_grid < 0 {
-        status("this host lacks cubic grids (host_api 15+ required)");
-        return;
-    }
 
     // Space: nothing falls. The map owns feel constants, so gravity is a map
     // decision like any other — a station under spin gravity would say
@@ -348,34 +418,19 @@ fn init() {
     phys_gravity(fixed(0), fixed(0), fixed(0));
     // Hull steel. FIRST material registered, so it is id 0 — the id every
     // un-materialed paint writes (the material-0 contract). This map paints no
-    // world terrain at all, so id 0 is simply what the ship is made of.
+    // world terrain at all, so id 0 is simply what every ship is made of —
+    // one material shared by every hull `spawn_ship` builds.
     let steel = phys_material(fixed(1), ratio(6, 10), ratio(1, 10), fixed(4));
 
-    // The hull, authored ONCE into two places: the voxels the player sees and
-    // the cells the dynamics weigh. `build_hull` writes both through
-    // `hull_box`, so the ship's mass, centre of mass and inertia are the real
-    // geometry's — a shell's, not the solid block that bounds it. The two can
-    // no longer drift apart, which is the same contract `blocked()` still owes
-    // the paint by hand.
-    let shape = phys_shape(20, 20, 6);
-    build_hull(ship_grid, shape, steel);
-    let body = phys_body(shape, vec3(fixed(0), fixed(0), fixed(0)));
-    entity_set_field(ship, "body", fixed(body));
-    // From here the map does not pose the hull at all: the body's pose becomes
-    // the grid's frame after every physics step, and the grid's pivot becomes
-    // the body's centre of mass — so the ship turns about the point it really
-    // turns about, and no hand-authored pivot can drift from it. Crew, crates,
-    // the fog cone, the deck cutaway and the camera all ride the frame exactly
-    // as they did when a hashed `spin` field drove it.
-    grid_body(ship_grid, body);
-
-    // The drive: two main engines low and aft, thrusting along the hull's +x,
-    // mounted symmetrically about the centreline so full throttle pushes
-    // straight rather than yawing. Manoeuvring is `phys_torque` in `step_ship`
-    // — a reaction wheel rather than nozzles, because a hull this size wants to
-    // turn on the spot, not fly a burn to rotate.
-    mount_engine(0, 7, 1, 1, 0, 0);
-    mount_engine(0, 12, 1, 1, 0, 0);
+    // The one ship this demo spawns, at the world voxel origin. `spawn_ship`
+    // bails (-1) on a host without cubic grids (host_api 15+, the manifest's
+    // floor) rather than paint into nothing.
+    let ship = spawn_ship(steel, 0, 0, 0);
+    if ship < 0 {
+        status("this host lacks cubic grids (host_api 15+ required)");
+        return;
+    }
+    let grid = ship_grid(ship);
 
     // The animated billboard crew actor (id 0 by call order). The 3rd arg is
     // the rendered height in cells; the host scales the art to it. Reuses the
@@ -401,6 +456,12 @@ fn init() {
     // spell out.
     model_box(26, 11, 13, 0x8074_8c96);
 
+    // The console, model id 3: a real KV6 asset rather than a
+    // procedural box, the way the chess pieces are (`assets/pieces/*.kv6`).
+    model_kv6("assets/console/model.kv6", 0);
+    // The engine, model id 4 — same deal, a real KV6 rather than a box.
+    model_kv6("assets/engine/model.kv6", 0);
+
     // Cargo stowed on the lower deck, authored in HULL coordinates — so
     // `entity_set_grid` (the raw bind) is right here: nothing should move, the
     // numbers already mean "this cell of the ship". `entity_attach` is for
@@ -410,14 +471,25 @@ fn init() {
     // NB none of them sits in a walking line the crew uses: a stowed prop
     // blocks now (see `blocked`), so where the demo parks its cargo is a
     // level-design decision and not just dressing.
-    // The crates are stowed facing +y (`Direction::Y`) rather than +x, so the
-    // debug spin (key 1, which turns about sim +x) has something to do the
-    // moment you pick one up — a crate already facing along the spin's own
-    // axis would not move at all, which reads as a broken key rather than as
-    // the identity it is.
-    stow_prop(0, 4, 3, 1); // a crate beside the crew's spawn, within arm's reach
-    stow_prop(1, 2, 3, 0); // a locker beside it, lying east-west (two cells)
-    stow_prop(0, 12, 14, 1); // another crate aft, across the divider's doorway
+    //
+    // These four are `crate_of`-indexed by TEST CODE (`crate_of(&world, 0)`
+    // is this first crate, `1` the locker) — the drive's two engines are
+    // appended AFTER them for exactly that reason: mounting them earlier
+    // would shift every index-based test downstream.
+    stow_prop(0, 4, 3, 1, grid); // a crate beside the crew's spawn, within arm's reach
+    stow_prop(1, 2, 3, 0, grid); // a locker beside it, lying east-west (two cells)
+    stow_prop(0, 12, 14, 1, grid); // another crate aft, across the divider's doorway
+    stow_prop(2, 6, 3, 1, grid); // the console, within reach of the same spawn
+
+    // The drive: two main engines low and aft, thrusting along the hull's +x
+    // (`Direction::X`, discriminant 0), mounted symmetrically about the
+    // centreline so full throttle pushes straight rather than yawing.
+    // Manoeuvring is `phys_torque` in `step_ship` — a reaction wheel rather
+    // than nozzles, because a hull this size wants to turn on the spot, not
+    // fly a burn to rotate. Cargo kind 3, so nothing stops a crew member
+    // unbolting one and moving it — the same `use`/`set_down` any prop gets.
+    mount_engine(0, 7, 1, 0, grid);
+    mount_engine(0, 12, 1, 0, grid);
     // No model_drop: the crew pivot already grounds on the deck's solid voxel
     // floor (world_of seats sim-z N at grid-z GROUND_Z-N, the same z the floor
     // voxel sits at). The RPG's `model_drop(0.35)` is `0.35·SCALE ≈ 5.6` WORLD
@@ -443,7 +515,7 @@ fn init() {
     // camera would have `cam_relative` steering in the ship's frame while the
     // player watches the world's, and "forward" would point somewhere new every
     // tick as the hull turns. One call, and the two frames agree again.
-    camera_grid(ship_grid);
+    camera_grid(grid);
 
     // Fog of war: a ~110° facing cone reaching 9 cells + a 3-cell 360°
     // peripheral. `follow_camera` names the LOCAL crew as the observer each tick
@@ -512,18 +584,19 @@ fn rim_walls(grid, shape, lo, hi, col, mat) {
     hull_box(grid, shape, 19, 0, lo, 19, 19, hi, col, mat); // east
 }
 
-/// Bolt a thruster to hull cell `(cx, cy, cz)` pointing along hull direction
-/// `(dx, dy, dz)`. It rides the hull grid like the crew do, so its anchor is
-/// authored in the same cells the hull is painted in — and `phys_thrust` reads
-/// exactly that, in the shape coordinates `build_hull` filled.
-fn mount_engine(cx, cy, cz, dx, dy, dz) {
-    let e = entity_create(3);
+/// Bolt an engine (cargo kind 3) to `grid`'s hull cell `(cx, cy, cz)`, facing
+/// `Direction` `dir` — the axis `step_ship` will read back through
+/// `direction_axis` and hand to `phys_thrust`. It rides that hull grid like
+/// the crew do, so its anchor is authored in the same cells the hull is
+/// painted in, in the shape coordinates `build_hull` filled.
+fn mount_engine(cx, cy, cz, dir, grid) {
+    let e = entity_create(2);
+    entity_set_field(e, "kind", fixed(3));
+    entity_set_model(e, kind_model(3));
     entity_set_position(e, vec3(fixed(cx), fixed(cy), fixed(cz)));
-    entity_set_grid(e, hull_grid());
-    entity_set_field(e, "dx", fixed(dx));
-    entity_set_field(e, "dy", fixed(dy));
-    entity_set_field(e, "dz", fixed(dz));
+    entity_set_grid(e, grid);
     entity_set_field(e, "throttle", fixed(0));
+    face_prop(e, dir, 0);
 }
 
 // --- cargo + airlock -----------------------------------------------------
@@ -538,15 +611,49 @@ fn mount_engine(cx, cy, cz, dx, dy, dz) {
 // it snaps to a cell, it blocks, and it goes where the CURSOR points rather
 // than where the crew happens to stand.
 
-/// The kinds of prop the ship stows, as a footprint LENGTH in cells: a crate
-/// is one cell, a floor locker two. Rhai has no enum, so a map writes one as
-/// a function over an int (see the book's "an enum in a map").
-fn kind_cells(kind) { if kind == 1 { 2 } else { 1 } }
+/// One row per cargo kind — its footprint LENGTH in cells, its render model
+/// id, and its display name — indexed by `kind` (0 crate, 1 locker, 2
+/// console, 3 engine). A single table instead of three parallel if/else
+/// chains: adding a kind is one row here plus one registration call in
+/// `init`, not three separate edits that can drift apart. A function, not a
+/// top-level `const`: the host calls named functions straight through
+/// `call_fn` and never runs a map's top-level statements, so module-scope
+/// state is never initialized — only what a function body builds itself
+/// exists. `model` still has to match `init`'s `model_*` call order by hand —
+/// a function has no way to read back `init`'s local variables — so it stays
+/// data here rather than something derived.
+fn prop_kinds() {
+    [
+        #{ name: "crate", cells: 1, model: 1 },
+        #{ name: "locker", cells: 2, model: 2 },
+        #{ name: "console", cells: 1, model: 3 },
+        #{ name: "engine", cells: 1, model: 4 },
+    ]
+}
 
-/// The render model each kind binds (`init` registers them in this order).
-fn kind_model(kind) { if kind == 1 { 2 } else { 1 } }
+fn kind_cells(kind) { prop_kinds()[kind].cells }
+fn kind_model(kind) { prop_kinds()[kind].model }
+fn kind_name(kind) { prop_kinds()[kind].name }
 
-fn kind_name(kind) { if kind == 1 { "locker" } else { "crate" } }
+/// A `Direction` discriminant (0-5: X, NegX, Y, NegY, Z, NegZ — the same
+/// numbering `entity_set_side` takes) as a unit vector. An engine's `dir`
+/// field IS its thrust axis, so this is the one place that meaning gets
+/// spelled out — `step_ship` reads it straight into `phys_thrust`.
+fn direction_axis(dir) {
+    if dir == 0 {
+        vec3(fixed(1), fixed(0), fixed(0))
+    } else if dir == 1 {
+        vec3(fixed(-1), fixed(0), fixed(0))
+    } else if dir == 2 {
+        vec3(fixed(0), fixed(1), fixed(0))
+    } else if dir == 3 {
+        vec3(fixed(0), fixed(-1), fixed(0))
+    } else if dir == 4 {
+        vec3(fixed(0), fixed(0), fixed(1))
+    } else {
+        vec3(fixed(0), fixed(0), fixed(-1))
+    }
+}
 
 /// The unit cell step of rotation `r` — 0 = +x, 1 = +y, 2 = -x, 3 = -y —
 /// i.e. which way a multi-cell prop lies from its first cell.
@@ -611,17 +718,18 @@ fn prop_base_y(k) {
 /// Does STOWED prop `k` stand on hull cell `(cx, cy)` of `deck`? A carried
 /// prop covers nothing — it is inside its carrier's own cell, and a crew
 /// member is not an obstacle to themselves.
-fn prop_covers(k, cx, cy, deck) {
+fn prop_covers(k, cx, cy, deck, grid) {
     if to_int(entity_field(k, "held")) == 1 {
         return false;
     }
-    // Only what is ABOARD. A crate let go through the airlock is detached into
-    // the WORLD frame, and its position stops being hull cells at that instant
-    // — it is the same numbers in a different space. Without this test the
-    // ship carries an invisible obstacle around: whichever deck cell the
-    // drifting crate's world coordinates happen to land on reads as blocked,
-    // and it moves as the hull flies. The frame is the question, so ask it.
-    if entity_grid(k) != hull_grid() {
+    // Only what is ABOARD THIS SHIP. A crate let go through the airlock is
+    // detached into the WORLD frame, and its position stops being hull cells
+    // at that instant — it is the same numbers in a different space. A crate
+    // stowed on some OTHER ship's hull is grid-bound but the wrong grid.
+    // Either way, without this test a placement check would read a stray
+    // obstacle that has nothing to do with the hull being asked about. The
+    // frame is the question, so ask it.
+    if entity_grid(k) != grid {
         return false;
     }
     let p = entity_position(k);
@@ -642,10 +750,11 @@ fn prop_covers(k, cx, cy, deck) {
     false
 }
 
-/// Is a prop standing on this cell? The cargo half of `blocked`.
-fn occupied(cx, cy, deck) {
+/// Is a prop standing on this cell of `grid`'s hull? The cargo half of
+/// `blocked`.
+fn occupied(cx, cy, deck, grid) {
     for k in entities_of(2) {
-        if prop_covers(k, cx, cy, deck) {
+        if prop_covers(k, cx, cy, deck, grid) {
             return true;
         }
     }
@@ -663,9 +772,9 @@ fn occupied(cx, cy, deck) {
 /// down against you blocks the step INTO it and nothing else, so you can
 /// always back off — which is exactly what walking into a crate should feel
 /// like.
-fn crew_at(cx, cy, deck) {
+fn crew_at(cx, cy, deck, grid) {
     for c in entities_of(0) {
-        if to_int(entity_field(c, "deck")) == deck {
+        if entity_grid(c) == grid && to_int(entity_field(c, "deck")) == deck {
             let p = entity_position(c);
             if cell(p.x) == cx && cell(p.y) == cy {
                 return true;
@@ -692,7 +801,7 @@ fn in_reach(cx, cy, px, py) {
 /// sync wall, because the local layer compiles this same script. So a green
 /// ghost cannot lie about what the tick will do, and the tick still does not
 /// trust the ghost: it runs the rule again on the command.
-fn can_place(cx, cy, deck, r, n, px, py) {
+fn can_place(cx, cy, deck, r, n, px, py, grid) {
     if !in_reach(cx, cy, px, py) {
         return false;
     }
@@ -702,7 +811,7 @@ fn can_place(cx, cy, deck, r, n, px, py) {
         let y = cy + rot_dy(r) * i;
         // `blocked` already covers walls, the rim, a shut airlock — and
         // other props, since cargo blocks.
-        if blocked(x, y, deck) || on_stairs(x, y) || crew_at(x, y, deck) {
+        if blocked(x, y, deck, grid) || on_stairs(x, y) || crew_at(x, y, deck, grid) {
             return false;
         }
         i += 1;
@@ -710,15 +819,42 @@ fn can_place(cx, cy, deck, r, n, px, py) {
     true
 }
 
-/// Put a fresh prop of `kind` on the lower deck, first cell `(cx, cy)`,
+/// Put a fresh prop of `kind` on `grid`'s lower deck, first cell `(cx, cy)`,
 /// lying along quarter-turn `r`.
-fn stow_prop(kind, cx, cy, r) {
+fn stow_prop(kind, cx, cy, r, grid) {
     let k = entity_create(2);
     entity_set_field(k, "kind", fixed(kind));
     entity_set_position(k, prop_seat(cx, cy, 0, r, kind_cells(kind)));
     entity_set_model(k, kind_model(kind));
-    entity_set_grid(k, hull_grid());
+    entity_set_grid(k, grid);
     face_prop(k, dir_of_rot(r), 0);
+}
+
+/// The build hotbar (`1`/`2`, `select_engine`/`select_console`): give crew
+/// `c` a fresh prop of `kind`, already in hand, bound to `c`'s OWN ship —
+/// whichever hull they happen to be standing on. With a full hand, this
+/// DISCARDS whatever `c` was already carrying and hands over a fresh one —
+/// unless it's already the SAME kind, in which case the key TOGGLES it off
+/// (empty hands) rather than pointlessly swapping an engine for an engine.
+fn give_kind(c, kind) {
+    let carried = to_int(entity_field(c, "carry"));
+    if carried != 0 {
+        let same = to_int(entity_field(carried - 1, "kind")) == kind;
+        entity_detach(carried - 1);
+        entity_despawn(carried - 1);
+        entity_set_field(c, "carry", fixed(0));
+        if same {
+            return;
+        }
+    }
+    let k = entity_create(2);
+    entity_set_field(k, "kind", fixed(kind));
+    entity_set_model(k, kind_model(kind));
+    entity_set_grid(k, entity_grid(c));
+    entity_set_position(k, entity_position(c));
+    entity_set_field(k, "held", fixed(1));
+    face_prop(k, dir_of_rot(to_int(entity_field(c, "rot"))), 0);
+    entity_set_field(c, "carry", fixed(k + 1));
 }
 
 /// Point prop `k` at grid face `dir` with roll `roll`, hashing both and
@@ -732,82 +868,39 @@ fn face_prop(k, dir, roll) {
     entity_set_side(k, dir, roll);
 }
 
-/// `dir` (a `Direction` discriminant) rotated 90° around the sim +x axis —
-/// a Rhai-side mirror of `monada_script::Direction::rotate(self, Direction::X)`,
-/// since that Rust method isn't itself exposed over the host-API wall.
-/// Indexed by discriminant (X=0, NegX=1, Y=2, NegY=3, Z=4, NegZ=5): X and
-/// NegX are the rotation axis and stay fixed; the other four cycle
-/// Y -> Z -> NegY -> NegZ -> Y.
-fn rotate_dir_x(dir) {
-    let table = [0, 1, 4, 5, 3, 2];
-    table[dir]
-}
+/// Is `ship`'s airlock open? HASHED ship state, so every peer's collision
+/// agrees.
+fn door_open(ship) { to_int(entity_field(ship, "door")) == 1 }
 
-/// `roll` (a `Roll` discriminant, 0-3) advanced one quarter-turn clockwise —
-/// a Rhai-side mirror of `monada_script::Roll::cw`.
-fn roll_cw(roll) { (roll + 1) % 4 }
-
-/// Debug aid for `entity_set_side` (key 1): while `c` carries a crate, spin
-/// its facing 90° around the sim +x axis, so a rotation is provable by eye —
-/// the crate's `model_box_sides` colours each of its 6 faces distinctly. A
-/// no-op with empty hands.
-fn rotate_carried_crate_x(c) {
-    let carried = to_int(entity_field(c, "carry"));
-    if carried != 0 {
-        let k = carried - 1;
-        face_prop(
-            k,
-            rotate_dir_x(to_int(entity_field(k, "dir"))),
-            to_int(entity_field(k, "roll")),
-        );
-    }
-}
-
-/// Debug aid for `entity_set_side` (key 2): while `c` carries a crate, roll
-/// it one quarter-turn clockwise around whichever axis it currently faces.
-/// A no-op with empty hands.
-fn roll_carried_crate_cw(c) {
-    let carried = to_int(entity_field(c, "carry"));
-    if carried != 0 {
-        let k = carried - 1;
-        face_prop(
-            k,
-            to_int(entity_field(k, "dir")),
-            roll_cw(to_int(entity_field(k, "roll"))),
-        );
-    }
-}
-
-/// Is the airlock open? HASHED ship state, so every peer's collision agrees.
-fn door_open() { to_int(entity_field(ship_entity(), "door")) == 1 }
-
-/// Toggle the airlock: the hashed flag, the wall voxels and — through
+/// Toggle `ship`'s airlock: the hashed flag, the wall voxels and — through
 /// `blocked` — passability, all in one place so they cannot drift apart.
-fn toggle_door() {
-    let open = if door_open() { 0 } else { 1 };
-    entity_set_field(ship_entity(), "door", fixed(open));
-    paint_door(open);
+fn toggle_door(ship) {
+    let open = if door_open(ship) { 0 } else { 1 };
+    entity_set_field(ship, "door", fixed(open));
+    paint_door(ship_grid(ship), open);
 }
 
-/// Cut the doorway out of the rim wall, or weld it shut again. Deck 0's walls
-/// are cells 1..2, so the doorway is those two cells of the two door columns.
-fn paint_door(open) {
+/// Cut the doorway out of `grid`'s rim wall, or weld it shut again. Deck 0's
+/// walls are cells 1..2, so the doorway is those two cells of the two door
+/// columns.
+fn paint_door(grid, open) {
     if open == 1 {
-        voxel_clear_in(hull_grid(), 19, 9, 1);
-        voxel_clear_in(hull_grid(), 19, 9, 2);
-        voxel_clear_in(hull_grid(), 19, 10, 1);
-        voxel_clear_in(hull_grid(), 19, 10, 2);
+        voxel_clear_in(grid, 19, 9, 1);
+        voxel_clear_in(grid, 19, 9, 2);
+        voxel_clear_in(grid, 19, 10, 1);
+        voxel_clear_in(grid, 19, 10, 2);
     } else {
-        voxel_fill_in(hull_grid(), 19, 9, 1, 19, 10, 2, 0x8079_8592);
+        voxel_fill_in(grid, 19, 9, 1, 19, 10, 2, 0x8079_8592);
     }
 }
 
-/// Is this crew member standing IN the open doorway — the one cell where a
-/// released crate leaves the ship instead of resting on its deck?
+/// Is this crew member standing IN their own ship's open doorway — the one
+/// cell where a released crate leaves the ship instead of resting on its
+/// deck?
 fn in_airlock(c) {
     let p = entity_position(c);
     let cy = cell(p.y);
-    door_open() && cell(p.x) == 19 && (cy == 9 || cy == 10) && to_int(entity_field(c, "deck")) == 0
+    door_open(ship_of(c)) && cell(p.x) == 19 && (cy == 9 || cy == 10) && to_int(entity_field(c, "deck")) == 0
 }
 
 // --- aiming ---------------------------------------------------------------
@@ -852,12 +945,12 @@ fn aim_on_deck(c, a) {
 
 /// The prop standing on cell `(cx, cy)` within reach of `(px, py)`, or -1 —
 /// "the one under the cursor", which is what the players asked for.
-fn prop_at(cx, cy, deck, px, py) {
+fn prop_at(cx, cy, deck, px, py, grid) {
     if !in_reach(cx, cy, px, py) {
         return -1;
     }
     for k in entities_of(2) {
-        if prop_covers(k, cx, cy, deck) {
+        if prop_covers(k, cx, cy, deck, grid) {
             return k;
         }
     }
@@ -877,7 +970,7 @@ fn prop_to_take(c) {
         if !aim_on_deck(c, a) {
             return -1;
         }
-        return prop_at(to_int(a.x), to_int(a.y), deck, p.x, p.y);
+        return prop_at(to_int(a.x), to_int(a.y), deck, p.x, p.y, entity_grid(c));
     }
     nearest_prop(c)
 }
@@ -916,11 +1009,11 @@ fn step_use(c) {
     // Bits that went 0 -> 1 this tick, over any bit (`btn ^ prev` is the bits
     // that changed since last tick; ANDing with `btn` keeps only the ones that
     // are now down, i.e. rising edges). Only the EDGE bits below are read from
-    // `pressed` (1 = use, 2 = airlock, 32 = rotate, 64/128 = the crate-orient
-    // debug keys) — the flight controls between them (4 = burn, 8/16 = turn)
-    // are held states, read straight off `btn` in `step_ship` — an engine
-    // fires while the key is down, so computing their edge here would be
-    // harmless but unused.
+    // `pressed` (1 = use, 2 = airlock, 32 = rotate, 64/128 = the build hotbar)
+    // — the flight controls between them (4 = burn, 8/16 = turn) are held
+    // states, read straight off `btn` in `step_ship` — an engine fires while
+    // the key is down, so computing their edge here would be harmless but
+    // unused.
     let pressed = btn & (btn ^ prev);
 
     if (pressed & 32) == 32 {
@@ -939,13 +1032,13 @@ fn step_use(c) {
         }
     }
     if (pressed & 2) == 2 {
-        toggle_door();
+        toggle_door(ship_of(c));
     }
     if (pressed & 64) == 64 {
-        rotate_carried_crate_x(c);
+        give_kind(c, 3); // 1: an engine, fresh in hand
     }
     if (pressed & 128) == 128 {
-        roll_carried_crate_cw(c);
+        give_kind(c, 2); // 2: a console, fresh in hand
     }
     if (pressed & 1) == 1 {
         let carried = to_int(entity_field(c, "carry"));
@@ -990,7 +1083,7 @@ fn set_down(c, k) {
     let n = kind_cells(to_int(entity_field(k, "kind")));
     let cx = to_int(a.x);
     let cy = to_int(a.y);
-    if !can_place(cx, cy, deck, r, n, p.x, p.y) {
+    if !can_place(cx, cy, deck, r, n, p.x, p.y, entity_grid(c)) {
         return;
     }
     entity_set_field(k, "held", fixed(0));
@@ -1035,12 +1128,16 @@ fn ensure_crew(player) {
         entity_set_field(c, "fdx", fixed(1));
         entity_set_field(c, "fdy", fixed(0));
         entity_set_model(c, 0); // crew actor model
-        // Ride the hull grid: the crew's sim position is grid-local, composed
-        // through the hull's transform when drawn, so they stay seated as the
-        // hull turns (`step_ship` spins it in 3D; host_api 12). This binding is
-        // also what puts the FOG on the hull — `vision_observer` names a grid but
-        // never binds one, so the cone and the crew always ride the same hull.
-        entity_set_grid(c, hull_grid());
+        // Ride the DEFAULT ship's hull: the crew's sim position is grid-local,
+        // composed through the hull's transform when drawn, so they stay
+        // seated as the hull turns (`step_ship` spins it in 3D; host_api 12).
+        // This binding is also what puts the FOG on the hull —
+        // `vision_observer` names a grid but never binds one, so the cone and
+        // the crew always ride the same hull. A fresh crew member has no ship
+        // of their own to inherit yet, so they join whichever ship `init`
+        // built first — a real assignment for a single-ship demo, and a
+        // placeholder default the day a second hull needs its own crew.
+        entity_set_grid(c, default_ship_grid());
         entity_set_anim(c, "idle");
     }
 }
@@ -1070,11 +1167,10 @@ fn local_tick(dt) {
     if turn > 0 { btn = btn + 8; }
     if turn < 0 { btn = btn + 16; }
     if action_down("rotate") { btn = btn + 32; }
-    // Debug aids for `entity_set_side` (see `rotate_carried_crate_x` /
-    // `roll_carried_crate_cw`) — edge-triggered like `use`/`door`, above the
-    // flight and placement bits so they never alias them.
-    if action_down("rotate_x") { btn = btn + 64; }
-    if action_down("roll_cw") { btn = btn + 128; }
+    // The build hotbar (`give_kind`) — edge-triggered like `use`/`door`,
+    // above the flight and placement bits so they never alias them.
+    if action_down("select_engine") { btn = btn + 64; }
+    if action_down("select_console") { btn = btn + 128; }
     submit_command(0, 0, vec3(mv.x, mv.y, fixed(btn)));
 
     // Verb 1 — where this client's cursor is, as a HULL CELL. `pick_cell`
@@ -1085,7 +1181,12 @@ fn local_tick(dt) {
     // it. Sent only while the cursor is on the ship: the sim clears the aim
     // every tick, so silence IS "no cursor" and a peer without a window
     // simply never sends one.
-    let cell = pick_cell(hull_grid());
+    //
+    // `default_ship_grid()`, not an entity lookup: the local layer runs
+    // against a world with no entities in it at all (`LocalBackend` never
+    // runs `init`) — a cursor ray needs a grid handle before there is any
+    // crew member, or any entity at all, to ask.
+    let cell = pick_cell(default_ship_grid());
     if type_of(cell) == "Vec3" {
         submit_command(1, 0, cell);
     }
@@ -1108,6 +1209,7 @@ fn local_frame(dt) {
         return;
     }
     let c = crew[idx];
+    let grid = entity_grid(c);
     let deck = to_int(entity_field(c, "deck"));
     let z = deck_floor(deck);
     let p = entity_position(c);
@@ -1122,8 +1224,8 @@ fn local_frame(dt) {
         while dx <= 2 {
             let x = cell(p.x) + dx;
             let y = cell(p.y) + dy;
-            if in_reach(x, y, p.x, p.y) && !blocked(x, y, deck) {
-                gizmo_box(hull_grid(), x, y, z, x, y, z, 0x3078_b4ff);
+            if in_reach(x, y, p.x, p.y) && !blocked(x, y, deck, grid) {
+                gizmo_box(grid, x, y, z, x, y, z, 0x3078_b4ff);
             }
             dx += 1;
         }
@@ -1142,14 +1244,14 @@ fn local_frame(dt) {
         // Hands free: outline what `use` would pick up, so "the one under the
         // cursor" is something you can see before you press.
         if aim_on_deck(c, a) {
-            let k = prop_at(ax, ay, deck, p.x, p.y);
+            let k = prop_at(ax, ay, deck, p.x, p.y, grid);
             if k >= 0 {
                 let r = prop_rot(k);
                 let n = kind_cells(to_int(entity_field(k, "kind")));
                 let bx = prop_base_x(k);
                 let by = prop_base_y(k);
                 gizmo_box(
-                    hull_grid(), bx, by, z + 1,
+                    grid, bx, by, z + 1,
                     bx + rot_dx(r) * (n - 1), by + rot_dy(r) * (n - 1), z + 1,
                     0xb0ff_e878,
                 );
@@ -1158,10 +1260,10 @@ fn local_frame(dt) {
     } else {
         let r = to_int(entity_field(c, "rot"));
         let n = kind_cells(to_int(entity_field(carried - 1, "kind")));
-        let ok = aim_on_deck(c, a) && can_place(ax, ay, deck, r, n, p.x, p.y);
+        let ok = aim_on_deck(c, a) && can_place(ax, ay, deck, r, n, p.x, p.y, grid);
         let col = if ok { 0xb040_ff70 } else { 0xb0ff_5050 };
         gizmo_box(
-            hull_grid(), ax, ay, z + 1,
+            grid, ax, ay, z + 1,
             ax + rot_dx(r) * (n - 1), ay + rot_dy(r) * (n - 1), z + 1,
             col,
         );
@@ -1214,64 +1316,79 @@ fn tick() {
 ///
 /// Controls (any crew member; the ship has no console yet): SPACE burns the
 /// main drive, Q/E turn. Fixed-point throughout, so every peer flies the same
-/// ship.
+/// ship. Loops every SHIP entity rather than assuming the one this demo
+/// spawns: each ship only ever touches its OWN body, its OWN crew's input and
+/// the engines riding its OWN grid — nothing here reaches across hulls.
 fn step_ship() {
-    let body = ship_body();
-    let cmd = ship_controls();
+    for ship in entities_of(1) {
+        let body = ship_body(ship);
+        let grid = ship_grid(ship);
+        let cmd = ship_controls(grid);
 
-    // Main drive: one throttle across both engines, so the pair pushes along
-    // the centreline. Each engine applies its own force at its own anchor —
-    // lose one to a hull breach some day and the ship yaws, for free.
-    let throttle = if (cmd & 4) == 4 { fixed(1) } else { fixed(0) };
-    for e in entities_of(3) {
-        entity_set_field(e, "throttle", throttle);
-        if throttle > fixed(0) {
-            phys_thrust(
-                body,
-                entity_position(e),
-                vec3(entity_field(e, "dx"), entity_field(e, "dy"), entity_field(e, "dz")),
-                engine_force(),
-            );
+        // Main drive: one throttle across every engine aboard THIS ship
+        // (cargo kind 3, `entity_grid(e) == grid`), so the whole set pushes
+        // together. Each fires its own force at its own anchor, along
+        // whichever way it's FACING (`direction_axis(dir)`) — lose one to a
+        // hull breach, or drag one off to a lopsided spot, and the ship
+        // yaws, for free.
+        let throttle = if (cmd & 4) == 4 { fixed(1) } else { fixed(0) };
+        for e in entities_of(2) {
+            if to_int(entity_field(e, "kind")) != 3
+                || to_int(entity_field(e, "held")) == 1
+                || entity_grid(e) != grid
+            {
+                continue;
+            }
+            entity_set_field(e, "throttle", throttle);
+            if throttle > fixed(0) {
+                phys_thrust(
+                    body,
+                    entity_position(e),
+                    direction_axis(to_int(entity_field(e, "dir"))),
+                    engine_force(),
+                );
+            }
         }
-    }
 
-    // Attitude: a reaction wheel about the hull's own up axis, so Q/E turn the
-    // ship on the spot rather than flying an arc. `grid_world` maps the hull's
-    // +z into the world, which is what a torque wants — the hull may be at any
-    // attitude by the time the player presses the key.
-    let up = hull_axis(fixed(0), fixed(0), fixed(1));
-    if (cmd & 8) == 8 {
-        phys_torque(body, scaled(up, rcs_force()));
-    }
-    if (cmd & 16) == 16 {
-        phys_torque(body, scaled(up, -rcs_force()));
-    }
+        // Attitude: a reaction wheel about the hull's own up axis, so Q/E
+        // turn the ship on the spot rather than flying an arc. `grid_world`
+        // maps the hull's +z into the world, which is what a torque wants —
+        // the hull may be at any attitude by the time the player presses the
+        // key.
+        let up = hull_axis(fixed(0), fixed(0), fixed(1), grid);
+        if (cmd & 8) == 8 {
+            phys_torque(body, scaled(up, rcs_force()));
+        }
+        if (cmd & 16) == 16 {
+            phys_torque(body, scaled(up, -rcs_force()));
+        }
 
-    // …and the stabiliser that makes it flyable: bleed off whatever tumble the
-    // player is not asking for (`τ = −k·ω`). Three lines and no engine knob —
-    // how hard a ship fights its own inertia is a property of the SHIP, so it
-    // belongs here (DESIGN.md §3.2).
-    let w = phys_angvel(body);
-    phys_torque(body, vec3(-w.x * damp(), -w.y * damp(), -w.z * damp()));
+        // …and the stabiliser that makes it flyable: bleed off whatever
+        // tumble the player is not asking for (`τ = −k·ω`). Three lines and
+        // no engine knob — how hard a ship fights its own inertia is a
+        // property of the SHIP, so it belongs here (DESIGN.md §3.2).
+        let w = phys_angvel(body);
+        phys_torque(body, vec3(-w.x * damp(), -w.y * damp(), -w.z * damp()));
+    }
 }
 
-/// A hull-local direction in world coordinates: the difference between two
-/// points of the hull's frame, so the hull's translation cancels and only its
-/// rotation remains. What a world-frame torque needs from a ship that may be
-/// at any attitude.
-fn hull_axis(dx, dy, dz) {
-    let o = grid_world(hull_grid(), vec3(fixed(0), fixed(0), fixed(0)));
-    let p = grid_world(hull_grid(), vec3(dx, dy, dz));
+/// A `grid`-local direction in world coordinates: the difference between two
+/// points of that hull's frame, so the hull's translation cancels and only
+/// its rotation remains. What a world-frame torque needs from a ship that may
+/// be at any attitude.
+fn hull_axis(dx, dy, dz, grid) {
+    let o = grid_world(grid, vec3(fixed(0), fixed(0), fixed(0)));
+    let p = grid_world(grid, vec3(dx, dy, dz));
     vec3(p.x - o.x, p.y - o.y, p.z - o.z)
 }
 
 /// A vector times a scalar (no `Vec3 * Fixed` operator in the host API).
 fn scaled(v, s) { vec3(v.x * s, v.y * s, v.z * s) }
 
-/// The body the hull IS, stored on the ship entity by `init` rather than
-/// written as a literal: which id `phys_body` hands out is an ordering detail
-/// of setup, exactly like the entity id `ship_entity` looks up.
-fn ship_body() { to_int(entity_field(ship_entity(), "body")) }
+/// The body `ship`'s hull IS, stored on the entity by `spawn_ship` rather
+/// than written as a literal: which id `phys_body` hands out is an ordering
+/// detail of setup, exactly like the entity id `ship_by_grid` looks up.
+fn ship_body(ship) { to_int(entity_field(ship, "body")) }
 
 /// Main-drive force, in mass·cells/s². The hull weighs ~1500 (its cells at
 /// density 1), so this is about 1 cell/s² per engine — a freighter, not a
@@ -1287,16 +1404,17 @@ fn engine_force() { fixed(750) }
 fn rcs_force() { fixed(170000) }
 fn damp() { fixed(280000) }
 
-/// The ship-control bits of the local crew's input mask (4 = burn, 8/16 =
-/// turn). Read from crew 0 rather than summed: a two-player hull has one
-/// helm, and the alternative — every crew member's keys adding up — would make
-/// the ship fly twice as fast in co-op.
-fn ship_controls() {
-    let crew = entities_of(0);
-    if crew.len() == 0 {
-        return 0;
+/// The ship-control bits of the first crew member riding `grid`'s input mask
+/// (4 = burn, 8/16 = turn). Read from that one crew member rather than
+/// summed: a hull has one helm, and the alternative — every crew member's
+/// keys adding up — would make the ship fly twice as fast in co-op.
+fn ship_controls(grid) {
+    for c in entities_of(0) {
+        if entity_grid(c) == grid {
+            return to_int(entity_field(c, "btn"));
+        }
     }
-    to_int(entity_field(crew[0], "btn"))
+    0
 }
 
 /// Always-on HUD readout of the LOCAL crew's current deck, so climbing the
@@ -1310,6 +1428,7 @@ fn build_deck_hud() {
         return;
     }
     let c = crew[idx];
+    let grid = entity_grid(c);
     let d = to_int(entity_field(c, "deck"));
     ui_clear();
     ui_scale(fixed(2));
@@ -1331,7 +1450,7 @@ fn build_deck_hud() {
             let r = to_int(entity_field(c, "rot"));
             let n = kind_cells(to_int(entity_field(carried - 1, "kind")));
             if aim_on_deck(c, a)
-                && can_place(to_int(a.x), to_int(a.y), deck, r, n, p.x, p.y)
+                && can_place(to_int(a.x), to_int(a.y), deck, r, n, p.x, p.y, grid)
             {
                 "F / click: put it there   R: turn it"
             } else {
@@ -1339,16 +1458,16 @@ fn build_deck_hud() {
             }
         }
     } else if aim_on_deck(c, a)
-        && prop_at(to_int(a.x), to_int(a.y), deck, p.x, p.y) >= 0
+        && prop_at(to_int(a.x), to_int(a.y), deck, p.x, p.y, grid) >= 0
     {
         "F / click: pick up the " + kind_name(
-            to_int(entity_field(prop_at(to_int(a.x), to_int(a.y), deck, p.x, p.y), "kind")),
+            to_int(entity_field(prop_at(to_int(a.x), to_int(a.y), deck, p.x, p.y, grid), "kind")),
         )
     } else {
         "point at a crate to pick it up"
     };
     ui_text(8, 42, hands, 8);
-    let lock = if door_open() { "G: airlock OPEN (starboard, deck 1)" } else { "G: airlock closed" };
+    let lock = if door_open(ship_of(c)) { "G: airlock OPEN (starboard, deck 1)" } else { "G: airlock closed" };
     ui_text(8, 60, lock, 8);
 
     // The flight readout. Speed and spin are the two numbers that tell a
@@ -1356,7 +1475,7 @@ fn build_deck_hud() {
     // the drive feel the size it does — all three read straight off the body,
     // so a hull that loses cells some day reports its new self without this
     // line changing.
-    let body = ship_body();
+    let body = ship_body(ship_of(c));
     let v = phys_vel(body);
     let w = phys_angvel(body);
     ui_text(8, 78, "SPACE burn  Q/E turn", 8);
@@ -1430,8 +1549,8 @@ fn follow_camera() {
         // the un-rotated cell and slides off a turning hull.
         camera_focus_entity(c, entity_position(c));
         // See the world through this crew member's eyes (fog of war), against
-        // the hull's own grid so the mask stays grid-local (movable hull).
-        vision_observer(c, hull_grid());
+        // THEIR OWN hull's grid so the mask stays grid-local (movable hull).
+        vision_observer(c, entity_grid(c));
         // Show the crew's deck band (floor..deck_top): deck 0 cuts the upper
         // deck away; deck 1 is the top band and cuts nothing.
         let d = to_int(entity_field(c, "deck"));
