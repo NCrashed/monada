@@ -962,6 +962,15 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").set_shadows(strength);
     });
 
+    // View-plane billboards. Off by default, so a map drawn against the
+    // eye-facing look keeps it.
+    let b = bridge.clone();
+    engine.register_fn("set_sprite_facing", move |view_plane: bool| {
+        b.lock()
+            .expect("bridge mutex")
+            .set_sprite_facing(view_plane);
+    });
+
     let b = bridge.clone();
     engine.register_fn("set_sky", move |path: ImmutableString| {
         b.lock().expect("bridge mutex").set_sky(path.as_str());

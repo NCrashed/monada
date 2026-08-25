@@ -357,6 +357,15 @@ pub trait WorldRead {
         }
     }
 
+    /// Align billboard actors to the view plane rather than aiming each at
+    /// the camera position, so a sprite stops turning as it drifts off the
+    /// middle of the screen. Off by default.
+    fn set_sprite_facing(&self, view_plane: bool) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").set_sprite_facing(view_plane);
+        }
+    }
+
     /// Load a sky panorama from an asset.
     fn set_sky(&self, asset_path: &str) {
         if let Some(b) = self.bridge() {

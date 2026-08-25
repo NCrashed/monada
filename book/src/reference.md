@@ -334,6 +334,7 @@ so a dock snap or a jump drive still snaps.
 | `vision_hear(x, y, z, loudness)` | briefly reveal a cell from a heard sound (`0..1`) |
 | `set_light(dir, intensity)` | declare the directional "sun" |
 | `set_shadows(strength)` | cast real shadows from the sun, `0..1` deep (`0` = off, the default) |
+| `set_sprite_facing(view_plane)` | `true` aligns billboard actors to the view plane instead of aiming each at the camera (off by default) |
 | `set_sky(path)` | load a sky panorama from an asset |
 
 ## Selection and status — *presentation*

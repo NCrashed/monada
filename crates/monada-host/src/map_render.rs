@@ -295,7 +295,10 @@ struct ActorModel {
 }
 
 /// Build a fresh actor recipe from registered directional clip ids.
-fn actor_def(registered: &[(&'static str, Vec<VoxelClipId>)]) -> BillboardActorDef {
+fn actor_def(
+    registered: &[(&'static str, Vec<VoxelClipId>)],
+    mode: BillboardMode,
+) -> BillboardActorDef {
     BillboardActorDef {
         states: registered
             .iter()
@@ -304,8 +307,9 @@ fn actor_def(registered: &[(&'static str, Vec<VoxelClipId>)]) -> BillboardActorD
                 dirs: ids.clone(),
             })
             .collect(),
-        // Cylindrical: the card only yaws to face the camera, staying upright
-        // on its floor. A grounded character's feet stay planted on its pivot.
+        // Yaw-only, whichever variant: the card only yaws to face the camera,
+        // staying upright on its floor. A grounded character's feet stay
+        // planted on its pivot.
         // Spherical tilts the whole card to face the camera *including pitch*,
         // which at this steep view leans the body up- and-back off its ground
         // anchor — the sprite reads as floating above its collision box even
@@ -318,9 +322,59 @@ fn actor_def(registered: &[(&'static str, Vec<VoxelClipId>)]) -> BillboardActorD
         // an unbound one, its grid's own up for a rider. Cylindrical yaws about
         // whichever axis that is (roxlap 0.32 / BB.6), so a card on a tilted
         // deck stands on the deck rather than leaning across it.
-        mode: BillboardMode::Cylindrical,
+        //
+        // Eye-facing or view-plane is the map's call (`set_sprite_facing`),
+        // because it is a question about the ART: a sprite drawn to be seen
+        // flat wants the view plane, a card standing in for a volume wants
+        // the eye. Defaults to the eye, which is what every map before
+        // `host_api` 29 was drawn against.
+        mode,
         ..BillboardActorDef::default()
     }
+}
+
+impl MapRender {
+    /// How billboard actors turn this frame.
+    fn sprite_mode(&self) -> BillboardMode {
+        if self.look.sprite_view_plane {
+            BillboardMode::CylindricalViewPlane
+        } else {
+            BillboardMode::Cylindrical
+        }
+    }
+}
+
+/// The look a map asked for: the sun, how billboards turn, how deep cast
+/// shadows go.
+///
+/// One struct rather than three fields on [`MapRender`] because they are
+/// one question — what this scene should look like — and every one of them
+/// defaults to "as it was before the verb existed", which is what keeps
+/// older maps rendering unchanged.
+#[derive(Clone, Copy, Debug, Default)]
+struct Look {
+    /// The sun as declared by `set_light`: unit travel direction in sim
+    /// space, plus intensity. Feeds the dynamic [`LightRig`] (sun +
+    /// baked-AO ambient + stylized shadows) so voxel edges read.
+    sun: Option<(DVec3, f32)>,
+    /// Whether billboard actors align to the view plane rather than aim at
+    /// the eye (`set_sprite_facing`).
+    ///
+    /// Aiming each card at the camera POSITION turns it as it drifts off
+    /// the middle of the screen — under a 90° field of view, a card at the
+    /// edge stands ~45° away from one in the centre. Right for a card
+    /// standing in for a volume, wrong for a sprite drawn to be seen flat,
+    /// so it is the map's call. Off by default: every map before
+    /// `host_api` 29 was drawn against the eye-facing look.
+    sprite_view_plane: bool,
+    /// Cast-shadow strength asked for with `set_shadows`, or `None` for the
+    /// legacy per-face `side_shades` look.
+    ///
+    /// Volume maps take the rig unconditionally, because isotropic voxel
+    /// edges need it to read at all. Column maps ask, and the default
+    /// keeps them byte-stable: chess, the RPG and the RTS were tuned
+    /// against `side_shades` and a silent switch would restyle all three.
+    shadows: Option<f32>,
 }
 
 /// The opaque (non-air) voxel bounding box of a clip — `(min_x, max_x, min_z,
@@ -393,6 +447,9 @@ struct ActorInst {
     /// Desired `0x00RR_GGBB` colour multiply (script-set; `0x00FF_FFFF` =
     /// white = no tint). Used for the damage-flash.
     tint: u32,
+    /// The facing mode last pushed to the renderer — only re-set on change,
+    /// so a map that never calls `set_sprite_facing` costs nothing per frame.
+    applied_mode: BillboardMode,
     /// The tint last pushed to the renderer — only re-set on change.
     applied_tint: u32,
 }
@@ -1373,18 +1430,8 @@ pub struct MapRender {
     /// D4): the body mirror consults this before the engine's fallback
     /// palette. Render-side only.
     phys_colors: BTreeMap<u16, u32>,
-    /// The map's sun as declared by `set_light` (unit travel direction,
-    /// sim space + intensity). Feeds the dynamic [`LightRig`] (sun +
-    /// baked-AO ambient + stylized shadows) so voxel edges read.
-    sun: Option<(DVec3, f32)>,
-    /// Cast-shadow strength a map asked for with `set_shadows`, or `None`
-    /// for the legacy per-face `side_shades` look.
-    ///
-    /// Volume maps take the rig unconditionally, because isotropic voxel
-    /// edges need it to read at all. Column maps ask, and the default
-    /// keeps them byte-stable: chess, the RPG and the RTS were tuned
-    /// against `side_shades` and a silent switch would restyle all three.
-    shadows: Option<f32>,
+    /// How the map asked the scene to look.
+    look: Look,
     /// Render-only decoration boxes per body (`body_deco_box`): FINE
     /// voxels (16 per cell), shape-local. Blitted into a `vws = 1` grid
     /// posed identically to the body's cell grid — skirts, cockpits,
@@ -1693,8 +1740,7 @@ impl MapRender {
             fx_grid: None,
             fx_painted: Vec::new(),
             phys_colors: BTreeMap::new(),
-            sun: None,
-            shadows: None,
+            look: Look::default(),
             body_decos: BTreeMap::new(),
             drill_vis: BTreeMap::new(),
             grids: Vec::new(),
@@ -3296,6 +3342,9 @@ impl MapRender {
             self.clips_registered = true;
         }
 
+        // Read once: the loop below borrows `entity_actors` mutably.
+        let mode = self.sprite_mode();
+
         // Create / update each present actor entity from this frame's targets.
         let present: BTreeSet<EntityId> = self.actor_targets.iter().map(|t| t.0).collect();
         for &(e, ai, pos, local_yaw, rot) in &self.actor_targets {
@@ -3314,13 +3363,17 @@ impl MapRender {
                         renderer.set_actor_tint(id, Rgb(inst.tint));
                         inst.applied_tint = inst.tint;
                     }
+                    if mode != inst.applied_mode {
+                        renderer.set_actor_mode(id, mode);
+                        inst.applied_mode = mode;
+                    }
                 }
                 None => {
                     if let Some(reg) = self.actors.get(ai).and_then(|a| a.registered.as_ref()) {
                         // roxlap 0.30: `add_billboard_actor` returns `None` for a
                         // malformed def (no states / empty dirs); skip if so.
                         if let Some(id) =
-                            renderer.add_billboard_actor(actor_def(reg), pos, local_yaw)
+                            renderer.add_billboard_actor(actor_def(reg, mode), pos, local_yaw)
                         {
                             // `add_billboard_actor` still takes a world yaw, so
                             // give a fresh actor its real floor at once — else
@@ -3333,6 +3386,7 @@ impl MapRender {
                             inst.id = Some(id);
                             inst.applied_anim = inst.anim;
                             inst.applied_tint = inst.tint;
+                            inst.applied_mode = mode;
                         }
                     }
                 }
@@ -3509,9 +3563,10 @@ impl MapRender {
         // A column map opts in with `set_shadows`, and without that keeps
         // the legacy per-face side_shades, byte-stable.
         let rig = self
+            .look
             .shadows
             .or_else(|| self.volume.then_some(DEFAULT_SHADOW_STRENGTH));
-        if let (Some(strength), Some((dir, intensity))) = (rig, self.sun) {
+        if let (Some(strength), Some((dir, intensity))) = (rig, self.look.sun) {
             #[allow(clippy::cast_possible_truncation)]
             {
                 frame.lights = Some(roxlap_render::LightRig {
@@ -4050,6 +4105,9 @@ impl HostBridge for MapRender {
                         facing: 0.0,
                         tint: WHITE_TINT,
                         applied_tint: WHITE_TINT,
+                        // Set for real when the actor is first created, from
+                        // whatever `set_sprite_facing` says then.
+                        applied_mode: BillboardMode::None,
                     },
                 );
             }
@@ -5119,7 +5177,7 @@ impl HostBridge for MapRender {
         {
             // Volume maps light through the dynamic rig (render_into);
             // stored in SIM space, transformed there.
-            self.sun = Some((travel, intensity.to_f64() as f32));
+            self.look.sun = Some((travel, intensity.to_f64() as f32));
         }
         // Board grid: darken only faces tilted *away* from the sun (normal
         // along the light's travel, `dot > 0`); faces toward or perpendicular
@@ -5135,12 +5193,16 @@ impl HostBridge for MapRender {
         self.side_shades = shades;
     }
 
+    fn set_sprite_facing(&mut self, view_plane: bool) {
+        self.look.sprite_view_plane = view_plane;
+    }
+
     fn set_shadows(&mut self, strength: Fixed) {
         // `0` (and anything below) means "back to per-face shading", so the
         // rig is absent rather than present-but-black.
         #[allow(clippy::cast_possible_truncation)]
         let s = strength.to_f64().clamp(0.0, 1.0) as f32;
-        self.shadows = (s > 0.0).then_some(s);
+        self.look.shadows = (s > 0.0).then_some(s);
     }
 
     fn set_sky(&mut self, asset_path: &str) {

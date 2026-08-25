@@ -109,12 +109,19 @@ monada-format = { path = "crates/monada-format", version = "0.0.1" }
 # `RenderOptions`; `RenderOptions.want_gpu: bool` became
 # `backend: BackendPreference`; and `add_billboard_actor` returns `Option`.
 # Oracle goldens are byte-identical across the bump. Still the unified
-# SceneRenderer facade over CPU/GPU. crates.io rather than the sibling path so
-# the author's in-progress roxlap working copy doesn't perturb monada's build.
-roxlap-core = "0.32.0"
-roxlap-render = "0.32.0"
-roxlap-scene = "0.32.0"
-roxlap-formats = "0.32.0"
+# SceneRenderer facade over CPU/GPU.
+#
+# The sibling checkout rather than crates.io. This used to be the other way
+# round, so an in-progress roxlap working copy could not perturb monada's
+# build — but the two are developed together and the wall cost more than it
+# saved: `host_api` 29 needs `BillboardMode::CylindricalViewPlane` and
+# `set_actor_mode`, and pinning the published crate meant monada could not
+# compile the feature that had just been written next door. Goes back to a
+# version pin when roxlap and monada are released together.
+roxlap-core = { path = "../roxlap/crates/roxlap-core" }
+roxlap-render = { path = "../roxlap/crates/roxlap-render" }
+roxlap-scene = { path = "../roxlap/crates/roxlap-scene" }
+roxlap-formats = { path = "../roxlap/crates/roxlap-formats" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

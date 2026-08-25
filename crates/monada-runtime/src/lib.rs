@@ -224,7 +224,15 @@ pub use volume::VolumeStore;
 /// only, where a shape reads by its own facets and nothing casts onto
 /// anything else. Opt-in rather than a default switch, because chess, the
 /// RPG and the RTS were all tuned against `side_shades`.
-pub const HOST_API_VERSION: u32 = 28;
+/// 29 = `set_sprite_facing`: billboard actors aligned to the VIEW PLANE
+/// rather than each aimed at the camera position. Eye-facing turns a card
+/// as it drifts off the middle of the screen -- under a 90 degree field of
+/// view one at the edge stands about 45 degrees away from one in the
+/// centre -- which is right for a card standing in for a volume and wrong
+/// for art drawn to be seen flat. Needs roxlap's
+/// `BillboardMode::CylindricalViewPlane` + `set_actor_mode`. Off by
+/// default: every map before this was drawn against the eye-facing look.
+pub const HOST_API_VERSION: u32 = 29;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -906,6 +914,20 @@ pub trait HostBridge: Send {
     /// the RTS looking as they were tuned to look. Render-side only; the
     /// default ignores it.
     fn set_shadows(&mut self, _strength: Fixed) {}
+
+    /// Align billboard actors to the **view plane** instead of aiming each
+    /// at the camera position. Off by default.
+    ///
+    /// Aiming at the eye turns a card as it drifts off the middle of the
+    /// screen: under a 90° field of view one at the edge stands about 45°
+    /// away from one in the centre, so a sprite that looked square-on
+    /// stands part side-on once the camera pans. A card standing in for a
+    /// volume should turn -- it really is at that bearing. A sprite drawn
+    /// to be seen flat should not, which is what Doom and Build did.
+    ///
+    /// Off by default because every map before `host_api` 29 was drawn
+    /// against the eye-facing look. Render-side only.
+    fn set_sprite_facing(&mut self, _view_plane: bool) {}
 
     /// Load a sky panorama from an `assets/` image and render it behind the
     /// scene. Render-side only.
