@@ -382,6 +382,69 @@ pub trait WorldRead {
         }
     }
 
+    // --- fog of war (per client, never hashed) -----------------------------
+    //
+    // What one player can see is not simulation state: two peers on the
+    // same lockstep stream see different fog and are not desynced, which
+    // is the whole reason this lives on the render side.
+
+    /// Declare an entity the fog sees through, replacing whichever were
+    /// declared before. Pass a despawned or negative id to clear.
+    fn vision_observer(&self, entity: EntityId) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .vision_observer(entity_arg(entity));
+        }
+    }
+
+    /// [`vision_observer`](Self::vision_observer) with the mask riding a
+    /// `grid_spawn` grid (a movable hull) instead of the world grid.
+    fn vision_observer_in(&self, entity: EntityId, grid: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .vision_observer_in(entity_arg(entity), grid);
+        }
+    }
+
+    /// Add another entity the fog sees through: what is visible becomes
+    /// the union of them all. Adding the same one twice is one observer.
+    fn vision_observer_add(&self, entity: EntityId) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .vision_observer_add(entity_arg(entity));
+        }
+    }
+
+    /// Nobody sees; everything visible demotes to memory.
+    fn vision_observer_clear(&self) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").vision_observer_clear();
+        }
+    }
+
+    /// Tune the observers' cone, reach and peripheral radius, in cells. A
+    /// cone of 360 is an observer who sees all round, which is what a
+    /// strategy unit is.
+    fn vision_config(&self, cone_deg: i64, range: i64, peripheral: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .vision_config(cone_deg, range, peripheral);
+        }
+    }
+
+    /// Briefly reveal a cell from a heard sound (`loudness` in `0..1`).
+    fn vision_hear(&self, x: i64, y: i64, z: i64, loudness: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .vision_hear(x, y, z, loudness);
+        }
+    }
+
     /// Set the HUD status line.
     fn status(&self, text: &str) {
         if let Some(b) = self.bridge() {

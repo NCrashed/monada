@@ -1688,7 +1688,14 @@ pub struct MapRender {
     deck_band: Option<(i64, i64)>,
     /// Fog of war (`vision_observer`): the local observer entity, or `None`.
     /// Per-client, never hashed.
-    vision_entity: Option<EntityId>,
+    /// Who the fog sees through. Empty means no fog at all.
+    ///
+    /// A list because a strategy map has a party, not a protagonist: what
+    /// is visible is the union of what each of them sees. The FIRST one is
+    /// privileged in one way only — it derives
+    /// [`vision_grid`](Self::vision_grid), since a mask belongs to one
+    /// grid and observers split across hulls have no single answer.
+    vision_entities: Vec<EntityId>,
     /// Fog-of-war tuning (`vision_config`): `(cone_deg, range_cells, peripheral_cells)`.
     vision_cfg: (i64, i64, i64),
     /// The live fog mask + its dimmed "known twin" grid, lazily built for the
@@ -1700,7 +1707,7 @@ pub struct MapRender {
     /// The observer's world feet-position + facing yaw, captured in
     /// `build_instances` (which has the `World`) for `render_into` to build the
     /// `FowObserver` from.
-    observer_pose: Option<(DVec3, f64)>,
+    observer_poses: Vec<(EntityId, DVec3, f64)>,
     /// Queued `vision_hear` reveals `(grid cell x, y, deck z sim, loudness)`,
     /// drained into the mask each frame.
     vision_hears: Vec<(i64, i64, i64, f32)>,
@@ -1820,12 +1827,12 @@ impl MapRender {
             cursor_entity: -1,
             cutout: None,
             deck_band: None,
-            vision_entity: None,
+            vision_entities: Vec::new(),
             vision_cfg: (100, 8, 3),
             fow: None,
             fow_twin: None,
             fow_band: None,
-            observer_pose: None,
+            observer_poses: Vec::new(),
             vision_hears: Vec::new(),
         }
     }
@@ -1899,8 +1906,9 @@ impl MapRender {
     /// `None` only when a map has none of them — i.e. never painted terrain nor
     /// named a vision grid.
     fn vision_grid(&self) -> Option<GridId> {
-        self.vision_entity
-            .and_then(|e| self.entity_grid.get(&e).copied())
+        self.vision_entities
+            .first()
+            .and_then(|e| self.entity_grid.get(e).copied())
             .or(self.named_vision_grid)
             .or(self.world_grid)
     }
@@ -1911,11 +1919,17 @@ impl MapRender {
     /// new observer or a switch to another hull both invalidate the old mask.
     fn set_observer(&mut self, entity: i64, grid: Option<GridId>) {
         let e = (entity >= 0).then_some(EntityId(entity as u64));
+        self.set_observers(e.into_iter().collect(), grid);
+    }
+
+    /// Replace the whole observer list. `grid` is the mask's fallback grid
+    /// (`vision_observer_in`), left alone by the add/clear verbs.
+    fn set_observers(&mut self, entities: Vec<EntityId>, grid: Option<GridId>) {
         let before = self.vision_grid();
-        let changed_entity = e != self.vision_entity;
-        self.vision_entity = e;
+        let changed = entities != self.vision_entities;
+        self.vision_entities = entities;
         self.named_vision_grid = grid;
-        if changed_entity || self.vision_grid() != before {
+        if changed || self.vision_grid() != before {
             self.retarget_vision(before);
         }
     }
@@ -1976,8 +1990,9 @@ impl MapRender {
     /// `FrameParams.fow`, or `None` if vision is off / not ready. Mirrors the
     /// roxlap boarding demo's FW.5 loop (build → update → sync twin).
     fn update_fow(&mut self, dt: f64) -> Option<GridId> {
-        self.vision_entity?; // no observer ⇒ no fog (guards a stale pose)
-        let (feet, yaw) = self.observer_pose?;
+        if self.vision_entities.is_empty() {
+            return None; // no observers ⇒ no fog (guards a stale mask)
+        }
         self.deck_band?; // a deck was declared (deck_clip ran) ⇒ vision is ready
         let main_grid = self.vision_grid()?; // no grid yet ⇒ no fog
                                              // The grid's cell shape sets the z scale everything below works in (the
@@ -1999,7 +2014,6 @@ impl MapRender {
                 (g.transform.origin, g.transform.rotation)
             });
         let grid_rot_inv = grid_rot.inverse();
-        let feet = grid_rot_inv * (feet - grid_origin);
         // Build the mask once. The fog rides ONE fixed grid-local band spanning
         // the whole hull, NOT the crew's current `deck_clip` band. A staircase
         // BRIDGES two decks — its columns run from the lower floor up past the
@@ -2022,6 +2036,14 @@ impl MapRender {
             let z_top = GROUND_Z as i32 - hull_span; // generous ceiling
             let mut cfg = VisionConfig::for_decks(vec![DeckBand { z_top, z_bottom }]);
             cfg.cone_half_angle = (cone_deg as f32).to_radians() * 0.5;
+            // A full circle has no rim to soften, and the default taper
+            // would leave a hairline blind wedge directly behind every
+            // observer -- the taper fades intensity to zero AT the cone
+            // edge, and for a 360 cone that edge is the observer's own
+            // back. `>= 360` is how a map says "sees all round".
+            if cone_deg >= 360 {
+                cfg.cone_taper = 0.0;
+            }
             // Ranges are sim cells; grid columns are SCALE finer.
             cfg.range = range as f32 * SCALE as f32;
             cfg.peripheral_range = peripheral as f32 * SCALE as f32;
@@ -2040,38 +2062,45 @@ impl MapRender {
         // does. De-rotating here by `grid_rot_inv` (as this used to) cancels the
         // twin's rotation and pins the cone to one world direction while the hull
         // spins under it. `world_of` mirrors sim +x → world -x (hence `-cos`).
-        let facing_local = DVec3::new(-(yaw.cos()), yaw.sin(), 0.0);
-        let observer = FowObserver {
-            cell: IVec2::new(feet.x.floor() as i32, feet.y.floor() as i32),
-            facing: Vec2::new(facing_local.x as f32, facing_local.y as f32),
-            deck: 0,
-            // Eye near HEAD height above the feet (z-down ⇒ a smaller grid-z).
-            // Two forces set this:
-            //  - roxlap blocks LOS with any voxel within `EYE_HALF` (2) of the
-            //    eye. The crew stands ON the 1-voxel floor slab (at `feet.z`), so
-            //    a low eye sits in the floor's opacity band and goes blind to a
-            //    patch underfoot.
-            //  - Each staircase riser (7 tall) OCCLUDES the tread behind it: an
-            //    eye that barely clears one step sees risers, not treads, so the
-            //    step tops stay fogged from below (correct LOS, but too low).
-            // The roxlap boarding demo rides the eye at ~83% of body height
-            // (EYE_HEIGHT 10 of a 12-tall body) so the crew looks OVER the near
-            // steps onto the treads — `-16` (≈head height on the ~22-tall crew,
-            // clears two 7-risers) matches that and reveals the run from below.
-            //
-            // A CUBIC hull quantises a step to a whole cell (SCALE voxels), and
-            // the eye's opacity band is `±EYE_HALF` (2) around `eye_z`: at `-16`
-            // the band's top (`eye − 2` = feet − 18) sits BELOW the next riser's
-            // top (feet − 16), so the riser blocks and the run fogs from below
-            // again. `-(SCALE + 2·EYE_HALF)` = `-20` lifts the whole band clear
-            // of it — still under the ~22-tall crew's head, i.e. the same ~83%.
-            eye_z: feet.z as i32 - if cubic { SCALE as i32 + 4 } else { 16 },
-        };
+        let observers: Vec<FowObserver> = self
+            .observer_poses
+            .iter()
+            .map(|&(_, feet, yaw)| {
+                let feet = grid_rot_inv * (feet - grid_origin);
+                let facing_local = DVec3::new(-(yaw.cos()), yaw.sin(), 0.0);
+                FowObserver {
+                    cell: IVec2::new(feet.x.floor() as i32, feet.y.floor() as i32),
+                    facing: Vec2::new(facing_local.x as f32, facing_local.y as f32),
+                    deck: 0,
+                    // Eye near HEAD height above the feet (z-down ⇒ a smaller grid-z).
+                    // Two forces set this:
+                    //  - roxlap blocks LOS with any voxel within `EYE_HALF` (2) of the
+                    //    eye. The crew stands ON the 1-voxel floor slab (at `feet.z`), so
+                    //    a low eye sits in the floor's opacity band and goes blind to a
+                    //    patch underfoot.
+                    //  - Each staircase riser (7 tall) OCCLUDES the tread behind it: an
+                    //    eye that barely clears one step sees risers, not treads, so the
+                    //    step tops stay fogged from below (correct LOS, but too low).
+                    // The roxlap boarding demo rides the eye at ~83% of body height
+                    // (EYE_HEIGHT 10 of a 12-tall body) so the crew looks OVER the near
+                    // steps onto the treads — `-16` (≈head height on the ~22-tall crew,
+                    // clears two 7-risers) matches that and reveals the run from below.
+                    //
+                    // A CUBIC hull quantises a step to a whole cell (SCALE voxels), and
+                    // the eye's opacity band is `±EYE_HALF` (2) around `eye_z`: at `-16`
+                    // the band's top (`eye − 2` = feet − 18) sits BELOW the next riser's
+                    // top (feet − 16), so the riser blocks and the run fogs from below
+                    // again. `-(SCALE + 2·EYE_HALF)` = `-20` lifts the whole band clear
+                    // of it — still under the ~22-tall crew's head, i.e. the same ~83%.
+                    eye_z: feet.z as i32 - if cubic { SCALE as i32 + 4 } else { 16 },
+                }
+            })
+            .collect();
         // Take the mask + twin out to keep `self.scene` borrows disjoint.
         let mut fow = self.fow.take()?;
         let mut twin = self.fow_twin.take()?;
         if let Some(grid) = self.scene.grid(main_grid) {
-            fow.update(grid, &observer, dt as f32);
+            fow.update_many(grid, &observers, dt as f32);
         }
         for (hx, hy, _hz, loud) in std::mem::take(&mut self.vision_hears) {
             // Same world→grid-local re-basing as the observer above (heard
@@ -2497,11 +2526,20 @@ impl MapRender {
         self.char_targets.clear();
         // Capture the fog-of-war observer's world pose (feet + facing yaw) while
         // we have the World; `render_into` builds the `FowObserver` from it.
-        self.observer_pose = self.vision_entity.and_then(|e| {
-            let p = world.position(e)?;
-            let yaw = self.entity_facing(e);
-            Some((self.place(e, p), yaw))
-        });
+        // Each observer that still exists, carrying its own id: a despawned
+        // one is dropped rather than freezing the fog at its last pose, so
+        // the list is shorter than `vision_entities` and cannot be indexed
+        // in parallel with it.
+        self.observer_poses = self
+            .vision_entities
+            .clone()
+            .into_iter()
+            .filter_map(|e| {
+                let p = world.position(e)?;
+                let yaw = self.entity_facing(e);
+                Some((e, self.place(e, p), yaw))
+            })
+            .collect();
         // Snapshot the bindings so the loop can mutate the disjoint sprite /
         // actor-target fields freely (the map is small — per-entity).
         let bindings: Vec<(EntityId, usize)> = self.models.iter().map(|(&e, &m)| (e, m)).collect();
@@ -2512,11 +2550,9 @@ impl MapRender {
             // The observer entity is usually model-bound too, so reuse the
             // seat we already composed for `observer_pose` above instead of
             // running `place` (a quaternion rotate) a second time this frame.
-            let w = if Some(e) == self.vision_entity {
-                self.observer_pose
-                    .map_or_else(|| self.place(e, p), |(pos, _)| pos)
-            } else {
-                self.place(e, p)
+            let w = match self.observer_poses.iter().find(|&&(o, ..)| o == e) {
+                Some(&(_, pos, _)) => pos,
+                None => self.place(e, p),
             };
             match self.model_refs.get(model_id) {
                 Some(&ModelRef::Sprite(si)) => self.seat_sprite(e, si, w),
@@ -4980,6 +5016,23 @@ impl HostBridge for MapRender {
         self.set_observer(entity, g);
     }
 
+    fn vision_observer_add(&mut self, entity: i64) {
+        if entity < 0 {
+            return;
+        }
+        let e = EntityId(entity as u64);
+        if self.vision_entities.contains(&e) {
+            return; // idempotent: adding twice is one observer
+        }
+        let mut all = std::mem::take(&mut self.vision_entities);
+        all.push(e);
+        self.set_observers(all, self.named_vision_grid);
+    }
+
+    fn vision_observer_clear(&mut self) {
+        self.set_observers(Vec::new(), self.named_vision_grid);
+    }
+
     fn vision_config(&mut self, cone_deg: i64, range: i64, peripheral: i64) {
         let cfg = (cone_deg, range, peripheral);
         if cfg != self.vision_cfg {
@@ -5110,11 +5163,7 @@ impl HostBridge for MapRender {
         let local_dir = g.transform.rotation.inverse() * dirn;
         let (dx, dy, dz) = (d.x, d.y, d.z);
         let axis = if dx == 0 && dy == 0 && dz == 0 {
-            let (ax, ay, az) = (
-                local_dir.x.abs(),
-                local_dir.y.abs(),
-                local_dir.z.abs(),
-            );
+            let (ax, ay, az) = (local_dir.x.abs(), local_dir.y.abs(), local_dir.z.abs());
             if ax >= ay && ax >= az {
                 (-local_dir.x.signum() as i32, 0, 0)
             } else if ay >= az {
@@ -5613,7 +5662,16 @@ mod tests {
         let world = World::new(0);
         let g = r.grid_spawn_cubic(0, 0, 0);
         let cell = (4_i64, 1_i64, 2_i64);
-        r.voxel_fill_in(g, cell.0, cell.1, cell.2, cell.0, cell.1, cell.2, 0x80b8_9850);
+        r.voxel_fill_in(
+            g,
+            cell.0,
+            cell.1,
+            cell.2,
+            cell.0,
+            cell.1,
+            cell.2,
+            0x80b8_9850,
+        );
         // A tilted tumble, pivoted about the middle of the block — the
         // pose `grid_body` writes every tick on the ship.
         r.grid_pivot(
@@ -5650,7 +5708,11 @@ mod tests {
         );
         let face = r.pick_face(g).expect("a hit has a face");
         let axes = [face.x, face.y, face.z].map(|c| i64::from(c.floor_to_int()).abs());
-        assert_eq!(axes.iter().sum::<i64>(), 1, "a face is one unit axis: {face:?}");
+        assert_eq!(
+            axes.iter().sum::<i64>(),
+            1,
+            "a face is one unit axis: {face:?}"
+        );
     }
 
     /// The deck cutaway moves the cursor with it: pointing at a hull
@@ -5665,7 +5727,7 @@ mod tests {
         let (cx, cy) = (2_i64, 2_i64);
         r.voxel_fill_in(g, cx, cy, 0, cx, cy, 0, 0x8055_5f6b); // lower deck plate
         r.voxel_fill_in(g, cx, cy, 3, cx, cy, 3, 0x8055_5f6b); // upper deck plate
-        // The fog observer is what names the grid a deck band clips.
+                                                               // The fog observer is what names the grid a deck band clips.
         r.vision_observer_in(-1, g);
 
         let col = DVec3::new(-(cx as f64 + 0.5) * SCALE, (cy as f64 + 0.5) * SCALE, 0.0);
@@ -7675,7 +7737,11 @@ mod tests {
     #[test]
     fn sprite_facing_picks_the_billboard_mode() {
         let mut r = MapRender::new(hero_assets(), Some(0), &[]);
-        assert_eq!(r.sprite_mode(), BillboardMode::Cylindrical, "eye by default");
+        assert_eq!(
+            r.sprite_mode(),
+            BillboardMode::Cylindrical,
+            "eye by default"
+        );
 
         r.set_sprite_facing(true);
         assert_eq!(r.sprite_mode(), BillboardMode::CylindricalViewPlane);

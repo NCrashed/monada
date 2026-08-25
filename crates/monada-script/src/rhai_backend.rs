@@ -909,6 +909,18 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
             .vision_observer_in(entity, grid);
     });
 
+    // A party rather than a protagonist: `vision_observer` sets the list,
+    // these two grow and empty it.
+    let b = bridge.clone();
+    engine.register_fn("vision_observer_add", move |entity: i64| {
+        b.lock().expect("bridge mutex").vision_observer_add(entity);
+    });
+
+    let b = bridge.clone();
+    engine.register_fn("vision_observer_clear", move || {
+        b.lock().expect("bridge mutex").vision_observer_clear();
+    });
+
     let b = bridge.clone();
     engine.register_fn(
         "vision_config",

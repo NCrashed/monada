@@ -329,7 +329,9 @@ so a dock snap or a jump drive still snaps.
 | `camera_cutout(radius, feather)` | dissolve geometry between the camera and its focus inside a keyhole (sim cells; `radius <= 0` off) |
 | `camera_grid(grid)` | make the camera RIDE a dynamic grid: its orbit frame turns with that grid, so the grid holds still on screen and the world sweeps past; `-1` returns it to the world frame (requires `host_api` 17) |
 | `deck_clip(z_lo, z_hi)` | show only the sim-z band `z_lo..=z_hi`, cutting the ceiling above it away |
-| `vision_observer(entity)` | declare the local fog-of-war viewpoint (per-client); `-1` clears it |
+| `vision_observer(entity)` | declare the local fog-of-war viewpoint (per-client), replacing any already declared; `-1` clears it |
+| `vision_observer_add(entity)` | add another viewpoint — what is visible is the union of them all (a party, a side) |
+| `vision_observer_clear()` | no viewpoints: everything visible demotes to memory |
 | `vision_config(cone_deg, range, peripheral)` | tune the observer's vision cone / reach / peripheral radius (cells) |
 | `vision_hear(x, y, z, loudness)` | briefly reveal a cell from a heard sound (`0..1`) |
 | `set_light(dir, intensity)` | declare the directional "sun" |

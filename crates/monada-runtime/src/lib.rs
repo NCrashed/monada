@@ -237,7 +237,15 @@ pub use volume::VolumeStore;
 /// the camera back by the same factor is how a perspective raycaster
 /// imitates an orthographic one, which is the look a 2D-sprite game wants.
 /// The default is unchanged, so no existing map's framing moves.
-pub const HOST_API_VERSION: u32 = 30;
+/// 31 = fog of war for a PARTY. `FogOfWar` took one observer with a facing
+/// cone -- a first-person model, a crew member looking down a corridor.
+/// A strategy map is the other shape: several units, each seeing all round
+/// itself, ground staying explored once anyone walked it. roxlap grows
+/// `update_many`; here the observer becomes a list
+/// (`vision_observer_add` / `vision_observer_clear`), and the whole vision
+/// family is lifted into `WorldRead`, which a native map could not reach
+/// at all before.
+pub const HOST_API_VERSION: u32 = 31;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -725,6 +733,21 @@ pub trait HostBridge: Send {
     /// Tune the observer's vision: facing-cone half-angle (`cone_deg` degrees),
     /// cone reach and 360° peripheral reach (`range`/`peripheral` cells). Sets
     /// roxlap's `VisionConfig`. Render-side only; the default ignores it.
+    /// Add another entity the fog sees through, so what is visible is the
+    /// union of them all. Adding the same entity twice is one observer.
+    ///
+    /// [`vision_observer`](Self::vision_observer) still means "these are
+    /// the observers", replacing the list, so a map that names one keeps
+    /// today's behaviour. A party or a side adds the rest.
+    ///
+    /// All observers share one mask, and a mask belongs to one grid: the
+    /// grid is derived from the FIRST observer. Render-side only.
+    fn vision_observer_add(&mut self, _entity: i64) {}
+
+    /// Nobody sees. Everything visible demotes to memory, which is what a
+    /// side with no units left should be looking at. Render-side only.
+    fn vision_observer_clear(&mut self) {}
+
     fn vision_config(&mut self, _cone_deg: i64, _range: i64, _peripheral: i64) {}
     /// Briefly reveal cell `(x, y, z)` from a heard sound (SS13 "you hear
     /// something" — live data, remembered styling); `loudness` in `0..1`. Pairs
