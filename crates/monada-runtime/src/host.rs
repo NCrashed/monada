@@ -1098,6 +1098,49 @@ pub trait LocalHost: WorldRead {
     fn highlight_clear(&self);
     /// The (first) selected entity, or `None`.
     fn highlighted(&self) -> Option<EntityId>;
+
+    /// The whole selection, in the order it was built.
+    ///
+    /// The default reads only the first, so a runtime that has no
+    /// multi-select still answers something sane rather than nothing.
+    fn highlighted_all(&self) -> Vec<EntityId> {
+        self.bridge().map_or_else(
+            || self.highlighted().into_iter().collect(),
+            |b| {
+                b.lock()
+                    .expect("bridge mutex")
+                    .highlighted_all()
+                    .into_iter()
+                    .filter_map(entity_opt)
+                    .collect()
+            },
+        )
+    }
+
+    /// Anchor a drag rectangle at the cursor.
+    ///
+    /// The gesture's anchor lives on the HOST, not here: a Rhai local
+    /// layer is stateless and could not carry it between the press and the
+    /// release, and the host has to draw the rectangle anyway.
+    fn drag_begin(&self) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").drag_begin();
+        }
+    }
+
+    /// Finish the drag and take its ground quad: four sim-ground corners
+    /// wound around the screen-aligned rectangle, so a selection test is
+    /// against the box the player actually drew whatever the camera yaw.
+    /// Empty if no drag was in progress.
+    ///
+    /// A quad whose diagonal is tiny is a CLICK rather than a drag — the
+    /// caller decides where that threshold sits, since it depends on how
+    /// big a cell is on screen.
+    fn drag_end(&self) -> Vec<FixedVec3> {
+        self.bridge()
+            .map(|b| b.lock().expect("bridge mutex").drag_end())
+            .unwrap_or_default()
+    }
 }
 
 /// An inclusive box of sim cells.

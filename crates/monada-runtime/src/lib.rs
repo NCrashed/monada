@@ -251,7 +251,11 @@ pub use volume::VolumeStore;
 /// Outdoors that hole shows the SKY through the ground, which reads as
 /// missing terrain rather than unknown terrain. Both render backends;
 /// off by default.
-pub const HOST_API_VERSION: u32 = 32;
+/// 33 = selection reaches a native map: `highlighted_all`, `drag_begin`
+/// and `drag_end` lifted into `LocalHost`. A compiled map could select one
+/// entity and read one back, so a drag box and multi-select -- the whole
+/// Warcraft III control scheme -- were script-only.
+pub const HOST_API_VERSION: u32 = 33;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
