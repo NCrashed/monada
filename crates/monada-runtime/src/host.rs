@@ -425,6 +425,15 @@ pub trait WorldRead {
         }
     }
 
+    /// Draw never-seen ground as opaque black instead of as air — what an
+    /// outdoor map wants, where transparent unexplored ground shows the
+    /// sky through it. Off by default.
+    fn vision_shroud(&self, opaque: bool) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").vision_shroud(opaque);
+        }
+    }
+
     /// Tune the observers' cone, reach and peripheral radius, in cells. A
     /// cone of 360 is an observer who sees all round, which is what a
     /// strategy unit is.

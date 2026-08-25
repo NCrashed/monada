@@ -1698,6 +1698,9 @@ pub struct MapRender {
     vision_entities: Vec<EntityId>,
     /// Fog-of-war tuning (`vision_config`): `(cone_deg, range_cells, peripheral_cells)`.
     vision_cfg: (i64, i64, i64),
+    /// Whether never-seen ground renders opaque black (`vision_shroud`)
+    /// rather than as air. Off by default — see the verb's docs.
+    shroud_unseen: bool,
     /// The live fog mask + its dimmed "known twin" grid, lazily built for the
     /// observer once a deck band is known; rebuilt when the band changes (deck
     /// change). `fow_band` is the sim band the current mask was built for.
@@ -1829,6 +1832,7 @@ impl MapRender {
             deck_band: None,
             vision_entities: Vec::new(),
             vision_cfg: (100, 8, 3),
+            shroud_unseen: false,
             fow: None,
             fow_twin: None,
             fow_band: None,
@@ -2047,6 +2051,7 @@ impl MapRender {
             // Ranges are sim cells; grid columns are SCALE finer.
             cfg.range = range as f32 * SCALE as f32;
             cfg.peripheral_range = peripheral as f32 * SCALE as f32;
+            cfg.unseen_occludes = self.shroud_unseen;
             cfg.memory_decay = 2.0;
             self.fow = Some(FogOfWar::new(cfg));
             self.fow_twin = Some(FowTwin::attach(&mut self.scene, main_grid));
@@ -5031,6 +5036,13 @@ impl HostBridge for MapRender {
 
     fn vision_observer_clear(&mut self) {
         self.set_observers(Vec::new(), self.named_vision_grid);
+    }
+
+    fn vision_shroud(&mut self, opaque: bool) {
+        if opaque != self.shroud_unseen {
+            self.shroud_unseen = opaque;
+            self.drop_fow(); // it rides the config, which is built once
+        }
     }
 
     fn vision_config(&mut self, cone_deg: i64, range: i64, peripheral: i64) {

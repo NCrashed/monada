@@ -245,7 +245,13 @@ pub use volume::VolumeStore;
 /// (`vision_observer_add` / `vision_observer_clear`), and the whole vision
 /// family is lifted into `WorldRead`, which a native map could not reach
 /// at all before.
-pub const HOST_API_VERSION: u32 = 31;
+/// 32 = `vision_shroud`: never-seen ground drawn opaque black rather than
+/// treated as air. Transparent is the first-person reading -- inside a
+/// hull, unexplored floor is a hole and the ray hits the wall behind it.
+/// Outdoors that hole shows the SKY through the ground, which reads as
+/// missing terrain rather than unknown terrain. Both render backends;
+/// off by default.
+pub const HOST_API_VERSION: u32 = 32;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -747,6 +753,17 @@ pub trait HostBridge: Send {
     /// Nobody sees. Everything visible demotes to memory, which is what a
     /// side with no units left should be looking at. Render-side only.
     fn vision_observer_clear(&mut self) {}
+
+    /// Draw never-seen ground as opaque black rather than treating it as
+    /// air. Off by default.
+    ///
+    /// Off is the first-person reading: you are inside a hull, unexplored
+    /// floor is a hole, and the ray carries on to the wall behind it. Seen
+    /// from above and outdoors that same hole shows the **sky** through
+    /// the ground, which reads as missing terrain rather than as unknown
+    /// terrain — so an outdoor map wants Warcraft III's black mask, and
+    /// says so here. Render-side only.
+    fn vision_shroud(&mut self, _opaque: bool) {}
 
     fn vision_config(&mut self, _cone_deg: i64, _range: i64, _peripheral: i64) {}
     /// Briefly reveal cell `(x, y, z)` from a heard sound (SS13 "you hear

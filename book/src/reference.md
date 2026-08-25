@@ -332,6 +332,7 @@ so a dock snap or a jump drive still snaps.
 | `vision_observer(entity)` | declare the local fog-of-war viewpoint (per-client), replacing any already declared; `-1` clears it |
 | `vision_observer_add(entity)` | add another viewpoint — what is visible is the union of them all (a party, a side) |
 | `vision_observer_clear()` | no viewpoints: everything visible demotes to memory |
+| `vision_shroud(opaque)` | `true` draws never-seen ground as opaque black instead of as air — an outdoor map, where transparent shows the sky through the ground (off by default) |
 | `vision_config(cone_deg, range, peripheral)` | tune the observer's vision cone / reach / peripheral radius (cells) |
 | `vision_hear(x, y, z, loudness)` | briefly reveal a cell from a heard sound (`0..1`) |
 | `set_light(dir, intensity)` | declare the directional "sun" |

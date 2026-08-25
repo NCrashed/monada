@@ -921,6 +921,13 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").vision_observer_clear();
     });
 
+    // Unexplored ground opaque rather than transparent — what an outdoor
+    // map wants, where transparent shows the sky through the ground.
+    let b = bridge.clone();
+    engine.register_fn("vision_shroud", move |opaque: bool| {
+        b.lock().expect("bridge mutex").vision_shroud(opaque);
+    });
+
     let b = bridge.clone();
     engine.register_fn(
         "vision_config",
