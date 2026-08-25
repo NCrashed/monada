@@ -334,6 +334,15 @@ fn actor_def(
 }
 
 impl MapRender {
+    /// `settings` with the map's field of view applied.
+    fn projected(&self, settings: &OpticastSettings) -> OpticastSettings {
+        let mut s = *settings;
+        if let Some(deg) = self.look.fov_deg {
+            s.hz = s.hx / (deg.to_radians() / 2.0).tan();
+        }
+        s
+    }
+
     /// How billboard actors turn this frame.
     fn sprite_mode(&self) -> BillboardMode {
         if self.look.sprite_view_plane {
@@ -367,6 +376,16 @@ struct Look {
     /// so it is the map's call. Off by default: every map before
     /// `host_api` 29 was drawn against the eye-facing look.
     sprite_view_plane: bool,
+    /// Horizontal field of view in degrees (`camera_fov`), or `None` for
+    /// the host's 90°.
+    ///
+    /// Narrowing this and pulling the camera back the same factor is how a
+    /// perspective raycaster imitates an orthographic one: the further and
+    /// tighter the cone, the less an object's size depends on its depth,
+    /// until the scene reads flat. It stays an imitation — a true
+    /// orthographic projection would mean parallel primary rays, which is
+    /// a change to both backends' ray setup, not a projection constant.
+    fov_deg: Option<f32>,
     /// Cast-shadow strength asked for with `set_shadows`, or `None` for the
     /// legacy per-face `side_shades` look.
     ///
@@ -3502,6 +3521,12 @@ impl MapRender {
         dt: f64,
         debug: bool,
     ) {
+        // The map's own field of view, if it asked for one. `hz` is the
+        // focal length in pixels, so `hx / tan(fov/2)` is the definition
+        // read backwards. Applied here rather than where the host builds
+        // the settings, because it is the MAP's look and both backends
+        // derive their projection from this one struct.
+        let settings = &self.projected(settings);
         // GPU backend has its own sky path — upload the panorama once.
         if !self.sky_uploaded {
             if let Some((rgba, w, h)) = &self.sky_panorama {
@@ -5195,6 +5220,15 @@ impl HostBridge for MapRender {
 
     fn set_sprite_facing(&mut self, view_plane: bool) {
         self.look.sprite_view_plane = view_plane;
+    }
+
+    fn camera_fov(&mut self, degrees: Fixed) {
+        // Outside this the projection stops being useful rather than
+        // merely odd: at 1° the camera has to sit kilometres back, and at
+        // 170° the edges of the frame are unreadable smear.
+        #[allow(clippy::cast_possible_truncation)]
+        let d = degrees.to_f64() as f32;
+        self.look.fov_deg = (1.0..=170.0).contains(&d).then_some(d);
     }
 
     fn set_shadows(&mut self, strength: Fixed) {

@@ -335,6 +335,7 @@ so a dock snap or a jump drive still snaps.
 | `set_light(dir, intensity)` | declare the directional "sun" |
 | `set_shadows(strength)` | cast real shadows from the sun, `0..1` deep (`0` = off, the default) |
 | `set_sprite_facing(view_plane)` | `true` aligns billboard actors to the view plane instead of aiming each at the camera (off by default) |
+| `camera_fov(degrees)` | horizontal field of view, default `90`; narrow it and pull `camera_dist` back the same factor for a near-orthographic look |
 | `set_sky(path)` | load a sky panorama from an asset |
 
 ## Selection and status — *presentation*

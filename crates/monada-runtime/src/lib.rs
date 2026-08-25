@@ -232,7 +232,12 @@ pub use volume::VolumeStore;
 /// for art drawn to be seen flat. Needs roxlap's
 /// `BillboardMode::CylindricalViewPlane` + `set_actor_mode`. Off by
 /// default: every map before this was drawn against the eye-facing look.
-pub const HOST_API_VERSION: u32 = 29;
+/// 30 = `camera_fov`: the horizontal field of view, fixed at 90 degrees
+/// until now (`OpticastSettings::hz = xres/2`). Narrowing it and pulling
+/// the camera back by the same factor is how a perspective raycaster
+/// imitates an orthographic one, which is the look a 2D-sprite game wants.
+/// The default is unchanged, so no existing map's framing moves.
+pub const HOST_API_VERSION: u32 = 30;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -928,6 +933,21 @@ pub trait HostBridge: Send {
     /// Off by default because every map before `host_api` 29 was drawn
     /// against the eye-facing look. Render-side only.
     fn set_sprite_facing(&mut self, _view_plane: bool) {}
+
+    /// Set the horizontal field of view in degrees. The host's default is
+    /// 90; values outside `1..=170` are ignored.
+    ///
+    /// Narrowing this and pulling [`camera_dist`](Self::camera_dist) back
+    /// by the same factor is how a perspective renderer imitates an
+    /// orthographic one: the tighter and further the cone, the less an
+    /// object's on-screen size depends on its depth, until the scene reads
+    /// flat. The framing is unchanged if the two move together, since what
+    /// fills the frame is `dist · tan(fov/2)`.
+    ///
+    /// It stays an imitation. True orthographic projection means parallel
+    /// primary rays, which is a change to how both backends build a ray,
+    /// not a projection constant. Render-side only.
+    fn camera_fov(&mut self, _degrees: Fixed) {}
 
     /// Load a sky panorama from an `assets/` image and render it behind the
     /// scene. Render-side only.

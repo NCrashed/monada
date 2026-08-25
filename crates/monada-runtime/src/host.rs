@@ -366,6 +366,15 @@ pub trait WorldRead {
         }
     }
 
+    /// Set the horizontal field of view in degrees (default 90). Narrow it
+    /// and pull `camera_dist` back by the same factor to approach an
+    /// orthographic look at unchanged framing.
+    fn camera_fov(&self, degrees: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").camera_fov(degrees);
+        }
+    }
+
     /// Load a sky panorama from an asset.
     fn set_sky(&self, asset_path: &str) {
         if let Some(b) = self.bridge() {

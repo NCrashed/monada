@@ -971,6 +971,13 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
             .set_sprite_facing(view_plane);
     });
 
+    // Horizontal field of view. Narrow it and pull the camera back the
+    // same factor for a near-orthographic look at unchanged framing.
+    let b = bridge.clone();
+    engine.register_fn("camera_fov", move |degrees: Fixed| {
+        b.lock().expect("bridge mutex").camera_fov(degrees);
+    });
+
     let b = bridge.clone();
     engine.register_fn("set_sky", move |path: ImmutableString| {
         b.lock().expect("bridge mutex").set_sky(path.as_str());
