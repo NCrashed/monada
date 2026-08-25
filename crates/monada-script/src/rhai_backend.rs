@@ -955,6 +955,13 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").set_light(dir, intensity);
     });
 
+    // Real cast shadows from the sun. A column map takes per-face shading
+    // until it asks for these, so every existing map keeps its look.
+    let b = bridge.clone();
+    engine.register_fn("set_shadows", move |strength: Fixed| {
+        b.lock().expect("bridge mutex").set_shadows(strength);
+    });
+
     let b = bridge.clone();
     engine.register_fn("set_sky", move |path: ImmutableString| {
         b.lock().expect("bridge mutex").set_sky(path.as_str());

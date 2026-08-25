@@ -218,7 +218,13 @@ pub use volume::VolumeStore;
 /// `tile_fill` lands on `Host` rather than `WorldRead` because it feeds
 /// collision as well as the eye, so it writes the terrain store first,
 /// exactly like `voxel_fill`.
-pub const HOST_API_VERSION: u32 = 27;
+/// 28 = `set_shadows`: real cast shadows on a COLUMN map. The dynamic
+/// light rig (sun + baked ambient + stylized shadows) was gated on
+/// `terrain = "volume"`, so a heightmap map got per-face `side_shades`
+/// only, where a shape reads by its own facets and nothing casts onto
+/// anything else. Opt-in rather than a default switch, because chess, the
+/// RPG and the RTS were all tuned against `side_shades`.
+pub const HOST_API_VERSION: u32 = 28;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -888,6 +894,18 @@ pub trait HostBridge: Send {
     /// light travels, `intensity` its strength. The host shades the map's
     /// sprites and grid from it. Render-side only.
     fn set_light(&mut self, dir: FixedVec3, intensity: Fixed);
+
+    /// Ask for real cast shadows from the `set_light` sun, `strength` deep
+    /// (`0..1`; `0` turns them off again). Off by default.
+    ///
+    /// A `terrain = "volume"` map already lights through the dynamic rig
+    /// and only tunes the depth here. A column map is the reason this verb
+    /// exists: it has always taken the legacy per-face shading, where a
+    /// shape reads by its own facets but nothing casts onto anything else.
+    /// Opting in rather than switching by default keeps chess, the RPG and
+    /// the RTS looking as they were tuned to look. Render-side only; the
+    /// default ignores it.
+    fn set_shadows(&mut self, _strength: Fixed) {}
 
     /// Load a sky panorama from an `assets/` image and render it behind the
     /// scene. Render-side only.

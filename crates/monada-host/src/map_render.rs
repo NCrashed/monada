@@ -47,6 +47,9 @@ use roxlap_scene::{addr, GridId, GridTransform, RayHit, Scene};
 
 /// World voxels per sim unit (x/y). The board's 8 squares span 8·SCALE.
 const SCALE: f64 = 16.0;
+/// How dark a cast shadow goes when a map asks for shadows without saying
+/// how hard, and what a volume map has always used.
+const DEFAULT_SHADOW_STRENGTH: f32 = 0.42;
 /// World z of the board surface (z grows downward in voxlap).
 const GROUND_Z: f64 = 100.0;
 /// The no-op actor tint (`0x00RR_GGBB` colour multiply): white leaves the art
@@ -1371,10 +1374,17 @@ pub struct MapRender {
     /// palette. Render-side only.
     phys_colors: BTreeMap<u16, u32>,
     /// The map's sun as declared by `set_light` (unit travel direction,
-    /// sim space + intensity). Volume maps feed it to the dynamic
-    /// [`LightRig`] (sun + baked-AO ambient + stylized shadows) so voxel
-    /// edges read; column maps keep the legacy `side_shades` path.
+    /// sim space + intensity). Feeds the dynamic [`LightRig`] (sun +
+    /// baked-AO ambient + stylized shadows) so voxel edges read.
     sun: Option<(DVec3, f32)>,
+    /// Cast-shadow strength a map asked for with `set_shadows`, or `None`
+    /// for the legacy per-face `side_shades` look.
+    ///
+    /// Volume maps take the rig unconditionally, because isotropic voxel
+    /// edges need it to read at all. Column maps ask, and the default
+    /// keeps them byte-stable: chess, the RPG and the RTS were tuned
+    /// against `side_shades` and a silent switch would restyle all three.
+    shadows: Option<f32>,
     /// Render-only decoration boxes per body (`body_deco_box`): FINE
     /// voxels (16 per cell), shape-local. Blitted into a `vws = 1` grid
     /// posed identically to the body's cell grid — skirts, cockpits,
@@ -1684,6 +1694,7 @@ impl MapRender {
             fx_painted: Vec::new(),
             phys_colors: BTreeMap::new(),
             sun: None,
+            shadows: None,
             body_decos: BTreeMap::new(),
             drill_vis: BTreeMap::new(),
             grids: Vec::new(),
@@ -3488,13 +3499,19 @@ impl MapRender {
         frame.sky = self.sky.as_ref(); // CPU backend sky panorama
                                        // Sprites are flat-lit on both backends; this is just the on/off opt-in.
         frame.draw_sprites = true;
-        // Volume maps light through the dynamic rig — the map's sun as a
-        // real directional light over the baked ambient/AO channel, with
-        // stylized shadows, so isotropic voxel edges READ (digger feel
-        // polish). The sim→world direction composes the world-X mirror
-        // and the z-down flip (`R_y(π)`): `(dx, dy, dz) → (−dx, dy, −dz)`.
-        // Column maps keep the legacy per-face side_shades, byte-stable.
-        if let (true, Some((dir, intensity))) = (self.volume, self.sun) {
+        // Light through the dynamic rig — the map's sun as a real
+        // directional light over the baked ambient/AO channel, with
+        // stylized shadows, so voxel edges READ. The sim→world direction
+        // composes the world-X mirror and the z-down flip (`R_y(π)`):
+        // `(dx, dy, dz) → (−dx, dy, −dz)`.
+        //
+        // Volume maps take it unconditionally (isotropic edges need it).
+        // A column map opts in with `set_shadows`, and without that keeps
+        // the legacy per-face side_shades, byte-stable.
+        let rig = self
+            .shadows
+            .or_else(|| self.volume.then_some(DEFAULT_SHADOW_STRENGTH));
+        if let (Some(strength), Some((dir, intensity))) = (rig, self.sun) {
             #[allow(clippy::cast_possible_truncation)]
             {
                 frame.lights = Some(roxlap_render::LightRig {
@@ -3505,7 +3522,7 @@ impl MapRender {
                         casts_shadow: true,
                     }),
                     ambient: [0.62; 3],
-                    shadow_strength: 0.42,
+                    shadow_strength: strength,
                     shadow_bias_voxels: 1.5,
                     shadow_max_dist: 2400.0,
                     ..roxlap_render::LightRig::default()
@@ -5116,6 +5133,14 @@ impl HostBridge for MapRender {
             shades[face] = (max_shade * dot.max(0.0)).clamp(0.0, MAX_SIDE_SHADE) as i8;
         }
         self.side_shades = shades;
+    }
+
+    fn set_shadows(&mut self, strength: Fixed) {
+        // `0` (and anything below) means "back to per-face shading", so the
+        // rig is absent rather than present-but-black.
+        #[allow(clippy::cast_possible_truncation)]
+        let s = strength.to_f64().clamp(0.0, 1.0) as f32;
+        self.shadows = (s > 0.0).then_some(s);
     }
 
     fn set_sky(&mut self, asset_path: &str) {

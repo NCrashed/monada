@@ -347,6 +347,16 @@ pub trait WorldRead {
         }
     }
 
+    /// Ask for real cast shadows from the sun, `strength` deep (`0..1`;
+    /// `0` turns them off). A volume map lights through the shadow rig
+    /// already and only tunes depth here; a column map takes per-face
+    /// shading until it calls this.
+    fn set_shadows(&self, strength: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").set_shadows(strength);
+        }
+    }
+
     /// Load a sky panorama from an asset.
     fn set_sky(&self, asset_path: &str) {
         if let Some(b) = self.bridge() {
