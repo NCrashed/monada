@@ -206,7 +206,19 @@ pub use volume::VolumeStore;
 /// is visible on sight, the same way an authored `.kv6` would be.
 /// Debug/demo tooling, not a new render capability: identical geometry to
 /// `model_box`, just per-face colour instead of one colour throughout.
-pub const HOST_API_VERSION: u32 = 26;
+/// 27 = the tileset, actor and audio verbs reach a NATIVE map. They have
+/// existed on `HostBridge` since the Rhai days, but were never lifted into
+/// `WorldRead`/`Host` when `monada-runtime` was split out, so a compiled
+/// map could paint a tileset or animate a billboard only by locking
+/// `bridge()` and going round the typed surface the split exists to
+/// provide. Rhai-scripted maps could do both all along — which made
+/// "the runtime is swappable" untrue in the one direction that mattered.
+/// Additive: every method carries a default over `bridge()`, the Rhai
+/// registrations are untouched, and no existing map's rendering changes.
+/// `tile_fill` lands on `Host` rather than `WorldRead` because it feeds
+/// collision as well as the eye, so it writes the terrain store first,
+/// exactly like `voxel_fill`.
+pub const HOST_API_VERSION: u32 = 27;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a

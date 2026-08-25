@@ -219,6 +219,43 @@ pub trait WorldRead {
         })
     }
 
+    /// Define an animated 8-direction billboard actor from GIFs laid out
+    /// as `<dir_path>/<state>/<side>.gif`; returns its model id, or `-1`.
+    /// `height_cells` is the rendered height in sim cells, so swapping art
+    /// resolutions does not change on-screen size.
+    ///
+    /// Takes `&[&str]` where the bridge takes `&[String]`: naming states is
+    /// a literal at every call site, and the one allocation happens once
+    /// per model definition rather than per frame.
+    fn model_actor(&self, dir_path: &str, states: &[&str], height_cells: Fixed) -> i64 {
+        let owned: Vec<String> = states.iter().map(|s| (*s).to_string()).collect();
+        self.bridge().map_or(-1, |b| {
+            b.lock()
+                .expect("bridge mutex")
+                .model_actor(dir_path, &owned, height_cells)
+        })
+    }
+
+    /// Define a rigged `.rkc` character model — real geometry that turns in
+    /// world space rather than a pre-drawn facing. Returns its model id, or
+    /// `-1`. `height_cells <= 0` keeps the artist's scale.
+    fn model_character(&self, asset_path: &str, height_cells: Fixed) -> i64 {
+        self.bridge().map_or(-1, |b| {
+            b.lock()
+                .expect("bridge mutex")
+                .model_character(asset_path, height_cells)
+        })
+    }
+
+    /// Nudge a model's sprites down (`cells > 0`) or up, on top of the
+    /// pivot-computed grounding — art whose visible feet are not at its
+    /// trimmed bottom, corrected without re-authoring the GIFs.
+    fn model_drop(&self, model: i64, cells: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").model_drop(model, cells);
+        }
+    }
+
     /// Bind an entity to a render model.
     fn entity_set_model(&self, entity: EntityId, model: i64) {
         if let Some(b) = self.bridge() {
@@ -280,6 +317,29 @@ pub trait WorldRead {
         }
     }
 
+    /// Select an entity's animation state by name — one of the `states`
+    /// given to [`model_actor`](Self::model_actor), or a clip baked into a
+    /// [`model_character`](Self::model_character). An unknown name leaves
+    /// the current animation playing.
+    fn entity_set_anim(&self, entity: EntityId, state: &str) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .entity_set_anim(entity_arg(entity), state);
+        }
+    }
+
+    /// Tint an actor's sprite by an `0x00RR_GGBB` colour multiply
+    /// (`0x00FF_FFFF` = no tint) — a damage flash without touching the
+    /// hashed sim. Billboard actors only.
+    fn entity_set_tint(&self, entity: EntityId, tint: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .entity_set_tint(entity_arg(entity), tint);
+        }
+    }
+
     /// Declare the directional "sun".
     fn set_light(&self, dir: FixedVec3, intensity: Fixed) {
         if let Some(b) = self.bridge() {
@@ -298,6 +358,108 @@ pub trait WorldRead {
     fn status(&self, text: &str) {
         if let Some(b) = self.bridge() {
             b.lock().expect("bridge mutex").status(text);
+        }
+    }
+
+    // --- terrain tiles (render-side) --------------------------------------
+    //
+    // The tileset half of a Warcraft-III-shaped map: per-cell PNG tiles for
+    // painted geometry, and a marching-squares autotiled flat floor under
+    // it. Everything here is render-only — the one verb that also feeds
+    // collision, `tile_fill`, lives on `Host` beside `voxel_fill` for
+    // exactly that reason.
+
+    /// Load a per-cell tile texture from an `assets/` PNG; returns its id
+    /// for [`tile_fill`](Host::tile_fill), or `-1`.
+    fn tile(&self, asset_path: &str) -> i64 {
+        self.bridge()
+            .map_or(-1, |b| b.lock().expect("bridge mutex").tile(asset_path))
+    }
+
+    /// Register a marching-squares transition sheet (a 4×4 PNG) blending
+    /// terrain type `high` over `low`; higher id wins. Read by
+    /// [`terrain_blit`](Self::terrain_blit).
+    fn transition(&self, low: i64, high: i64, asset_path: &str) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .transition(low, high, asset_path);
+        }
+    }
+
+    /// Set the flat-floor terrain type over a cell region. The floor is
+    /// walkable, so this never touches collision.
+    fn terrain_fill(&self, lo: (i64, i64), hi: (i64, i64), type_id: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .terrain_fill(lo.0, lo.1, hi.0, hi.1, type_id);
+        }
+    }
+
+    /// Autotile the flat floor from the types set so far, blending
+    /// boundaries with the registered sheets. `base_type` fills everything
+    /// outside the region.
+    fn terrain_blit(&self, base_type: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").terrain_blit(base_type);
+        }
+    }
+
+    // --- audio (render-side, never hashed) --------------------------------
+    //
+    // Triggered from `tick` like `status` and `entity_set_anim`, and like
+    // them never part of the world hash: a headless peer no-ops the lot, so
+    // a match cannot desync on sound.
+
+    /// Play a one-shot sound. Identical sounds fired the same frame are
+    /// de-duplicated, so a wave of attackers plays it once, not stacked.
+    fn play_sound(&self, asset_path: &str) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").play_sound(asset_path);
+        }
+    }
+
+    /// [`play_sound`](Self::play_sound) with an explicit gain (`0..1`).
+    fn play_sound_gain(&self, asset_path: &str, gain: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .play_sound_gain(asset_path, gain);
+        }
+    }
+
+    /// Synthesise a short voice blip — the Undertale-style typing sound.
+    /// `wave`: 0 square / 1 saw / 2 triangle / 3 sine / 4 noise. No de-dup;
+    /// fire one per typed glyph.
+    fn play_blip(&self, wave: i64, freq: i64, dur_ms: i64, gain: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .play_blip(wave, freq, dur_ms, gain);
+        }
+    }
+
+    /// Keep a looping sound audible: call it every tick the loop should
+    /// play. A *state* (moving) drives a seamless loop with no per-actor
+    /// timer and no restart per frame.
+    fn play_loop(&self, asset_path: &str) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").play_loop(asset_path);
+        }
+    }
+
+    /// Start or replace the background track. Idempotent for the same path.
+    fn play_music(&self, asset_path: &str) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").play_music(asset_path);
+        }
+    }
+
+    /// Stop the background track.
+    fn stop_music(&self) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").stop_music();
         }
     }
 
@@ -333,6 +495,63 @@ pub trait WorldRead {
     fn ui_text(&self, x: i64, y: i64, text: &str, size: i64) {
         if let Some(b) = self.bridge() {
             b.lock().expect("bridge mutex").ui_text(x, y, text, size);
+        }
+    }
+
+    /// Draw word-wrapped `text` within `width` points, in `0xRRGGBB` —
+    /// the dialogue paragraph.
+    fn ui_text_wrap(&self, x: i64, y: i64, text: &str, size: i64, width: i64, color: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .ui_text_wrap(x, y, text, size, width, color);
+        }
+    }
+
+    /// Register a HUD texture from an `assets/` PNG; returns its id, or `-1`.
+    fn ui_texture(&self, asset_path: &str) -> i64 {
+        self.bridge().map_or(-1, |b| {
+            b.lock().expect("bridge mutex").ui_texture(asset_path)
+        })
+    }
+
+    /// Register an animated HUD image from a `.gif` — a talking portrait.
+    /// Its own id space, separate from [`ui_texture`](Self::ui_texture);
+    /// returns `-1` on a missing asset.
+    fn ui_gif(&self, asset_path: &str) -> i64 {
+        self.bridge()
+            .map_or(-1, |b| b.lock().expect("bridge mutex").ui_gif(asset_path))
+    }
+
+    /// Draw animated image `gif`'s current frame at `(x, y)`.
+    fn ui_anim(&self, gif: i64, x: i64, y: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").ui_anim(gif, x, y);
+        }
+    }
+
+    /// Draw texture `tex` with its top-left at `(x, y)`.
+    fn ui_image(&self, tex: i64, x: i64, y: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").ui_image(tex, x, y);
+        }
+    }
+
+    /// Draw `tex` clipped to the left `frac` (`0..1`) of its width — the
+    /// health-bar fill.
+    fn ui_image_clip(&self, tex: i64, x: i64, y: i64, frac: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .ui_image_clip(tex, x, y, frac);
+        }
+    }
+
+    /// Uniform scale over every HUD texture and label this frame; positions
+    /// stay as given. `1` is native pixel size. Set it before the draws.
+    fn ui_scale(&self, factor: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").ui_scale(factor);
         }
     }
 
@@ -495,6 +714,28 @@ pub trait Host: WorldRead {
         }
         if let Some(b) = self.bridge() {
             b.lock().expect("bridge mutex").voxel_clear(x, y, z);
+        }
+    }
+
+    /// Fill a box of cells with a tile — the texture's pixels become the
+    /// cells' voxel colours.
+    ///
+    /// This sits here rather than beside [`WorldRead::tile`] because it is
+    /// **not** render-only: a textured wall blocks exactly like a painted
+    /// one, so it writes the terrain store first and only then hands the
+    /// call to the bridge, the same order [`voxel_fill`](Self::voxel_fill)
+    /// keeps. Skipping the store would let the eye and the pathfinder
+    /// disagree about a wall — the drift that ordering exists to prevent.
+    fn tile_fill(&self, lo: (i64, i64, i64), hi: (i64, i64, i64), tile: i64) {
+        if let Some(t) = self.terrain() {
+            t.lock()
+                .expect("terrain mutex")
+                .fill(lo.0, lo.1, lo.2, hi.0, hi.1, hi.2);
+        }
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .tile_fill(lo.0, lo.1, lo.2, hi.0, hi.1, hi.2, tile);
         }
     }
 
