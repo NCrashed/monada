@@ -7636,6 +7636,20 @@ mod tests {
         a
     }
 
+    /// `set_sprite_facing` picks the mode actors are posed with, and the
+    /// default is what every map before `host_api` 29 was drawn against.
+    #[test]
+    fn sprite_facing_picks_the_billboard_mode() {
+        let mut r = MapRender::new(hero_assets(), Some(0), &[]);
+        assert_eq!(r.sprite_mode(), BillboardMode::Cylindrical, "eye by default");
+
+        r.set_sprite_facing(true);
+        assert_eq!(r.sprite_mode(), BillboardMode::CylindricalViewPlane);
+
+        r.set_sprite_facing(false);
+        assert_eq!(r.sprite_mode(), BillboardMode::Cylindrical, "and back");
+    }
+
     #[test]
     fn model_actor_decodes_binds_and_targets() {
         let mut r = MapRender::new(hero_assets(), Some(0), &[]);
