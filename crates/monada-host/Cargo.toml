@@ -17,6 +17,12 @@ path = "src/main.rs"
 [dependencies]
 monada-sim = { workspace = true }
 monada-script = { workspace = true }
+# `ui`: a compiled map's local layer may draw into the host's egui pass
+# (`LocalRules::local_ui`), for authoring tools that want panels rather
+# than the immediate-mode `ui_*` HUD verbs. Enabled here because this is
+# the crate that owns the egui pass; a headless rules crate leaves it off
+# and never compiles egui.
+monada-runtime = { workspace = true, features = ["ui"] }
 monada-fixed = { workspace = true }
 monada-render = { workspace = true }
 # Map archive loading (tar.zst + manifest + SHA-256) for `--map` /

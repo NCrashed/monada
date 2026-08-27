@@ -1750,6 +1750,7 @@ dependencies = [
  "monada-format",
  "monada-net",
  "monada-render",
+ "monada-runtime",
  "monada-script",
  "monada-sim",
  "rodio",
@@ -1843,6 +1844,7 @@ dependencies = [
 name = "monada-runtime"
 version = "0.0.1"
 dependencies = [
+ "egui",
  "monada-fixed",
  "monada-nav",
  "monada-physics",

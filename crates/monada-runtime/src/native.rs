@@ -257,6 +257,28 @@ pub trait LocalRules: Send {
         let (_, _, _, _) = (host, button, point, entity);
     }
 
+    /// Draw this frame's own UI, over the scene and over the map's `ui_*`
+    /// HUD.
+    ///
+    /// The immediate-mode `ui_*` verbs are a HUD: a few labels, images and
+    /// buttons a game draws over its world. An **authoring tool** wants
+    /// something else — docked panels, a tree of regions, a tile palette,
+    /// a file dialog — and building those out of positioned rectangles is
+    /// how you end up writing a widget toolkit. So a compiled map may draw
+    /// straight into the host's egui pass instead (DESIGN.md §3.5).
+    ///
+    /// **Why this is allowed to exist here.** The local layer is one
+    /// client's presentation and is already outside the state hash — the
+    /// same reason two peers may see different fog and stay in step. An
+    /// `egui::Context` reaches no further than a `status` line does.
+    ///
+    /// Only compiled maps get it: a Rhai script cannot hold this type, and
+    /// the scripted surface stays the `ui_*` verbs.
+    #[cfg(feature = "ui")]
+    fn local_ui(&mut self, ctx: &egui::Context, host: &dyn LocalHost) {
+        let (_, _) = (ctx, host);
+    }
+
     /// Whether this map assembles its own per-tick input command in
     /// [`local_tick`](LocalRules::local_tick). When `true` the host must
     /// not inject its legacy input snapshot — the map owns the encoding
@@ -301,6 +323,18 @@ pub trait LocalLayer {
     /// Whatever the layer's language raises.
     fn on_pointer(&mut self, button: i64, point: FixedVec3, entity: i64)
         -> Result<(), ScriptError>;
+
+    /// Let the layer draw into the host's egui pass. The default draws
+    /// nothing, which is every scripted map: a Rhai layer has no way to
+    /// hold a `Context`.
+    ///
+    /// # Errors
+    /// Whatever the layer's language raises.
+    #[cfg(feature = "ui")]
+    fn on_local_ui(&mut self, ctx: &egui::Context) -> Result<(), ScriptError> {
+        let _ = ctx;
+        Ok(())
+    }
 }
 
 /// The local layer's backend: compiled [`LocalRules`] over a
@@ -383,6 +417,12 @@ impl LocalLayer for NativeLocalBackend {
     ) -> Result<(), ScriptError> {
         let picked = (entity >= 0).then_some(EntityId(entity as u64));
         self.rules.pointer(&self.host, button, point, picked);
+        Ok(())
+    }
+
+    #[cfg(feature = "ui")]
+    fn on_local_ui(&mut self, ctx: &egui::Context) -> Result<(), ScriptError> {
+        self.rules.local_ui(ctx, &self.host);
         Ok(())
     }
 }

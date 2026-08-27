@@ -34,6 +34,11 @@ mod volume;
 pub use granular::{Granular, Repose, Slide};
 pub use host::{Host, LocalHost, RuntimeHost, WorldRead};
 pub use native::{LocalLayer, LocalRules, MapRules, NativeBackend, NativeLocalBackend};
+
+/// The exact `egui` the host tessellates with, re-exported so a map names
+/// one crate rather than a second copy that happens to share a version.
+#[cfg(feature = "ui")]
+pub use egui;
 pub use nav::{shared_nav, NavCache, SharedNav};
 pub use physics::{shared_physics, DrillToolDef, PhysicsSim, SharedPhysics};
 // The navigation vocabulary a map speaks, re-exported so a rules crate
@@ -272,7 +277,14 @@ pub use volume::VolumeStore;
 /// MEETS terrain -- a cliff foot, the inside of a hollow, the seam where
 /// a slope turns -- had nothing to mark them. Cast shadows only help
 /// where the sun falls; occlusion draws the shape.
-pub const HOST_API_VERSION: u32 = 36;
+/// 37 = `LocalRules::local_ui`: a compiled map's local layer may draw
+/// straight into the host's egui pass. The `ui_*` verbs are a HUD -- a few
+/// labels and buttons over a world -- and an authoring tool wants docks,
+/// trees and file dialogs, which out of positioned rectangles means
+/// writing a widget toolkit. Legal because the local layer is already
+/// outside the state hash: a `Context` reaches no further than `status`
+/// does. Scripted maps keep the `ui_*` surface; Rhai cannot hold the type.
+pub const HOST_API_VERSION: u32 = 37;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a

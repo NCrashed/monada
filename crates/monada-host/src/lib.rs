@@ -1291,6 +1291,11 @@ impl App {
         // The map's own scripted HUD (health bar / panels / buttons), painted
         // over the status window; button clicks feed the next tick's command.
         self.paint_map_hud(&ctx);
+        // …and a compiled map's own egui, over that. An authoring tool
+        // wants docks and trees rather than positioned rectangles, and the
+        // local layer is already outside the state hash, so handing it the
+        // context reaches no further than a `status` line does.
+        self.paint_map_ui(&ctx);
         // The key-bindings panel (F2), on top of everything.
         if self.rebind_open {
             self.build_rebind_panel(&ctx);
@@ -1301,6 +1306,28 @@ impl App {
             .handle_platform_output(window, out.platform_output);
         let jobs = ctx.tessellate(out.shapes, out.pixels_per_point);
         Some((jobs, out.textures_delta, out.pixels_per_point))
+    }
+
+    /// Let a compiled map's local layer draw its own egui, then route
+    /// whatever it submitted — a panel button is a command like any other.
+    ///
+    /// Scripted maps no-op: a Rhai layer cannot hold a `Context`, so its
+    /// surface stays the `ui_*` verbs.
+    fn paint_map_ui(&mut self, ctx: &egui::Context) {
+        match &mut self.sim {
+            Sim::Map(map) => {
+                map.local_layer.on_local_ui(ctx).expect("map local_ui");
+                map.route_local_commands();
+            }
+            Sim::NetMap(nm) => {
+                nm.local_layer.on_local_ui(ctx).expect("map local_ui");
+                let commands = nm.render.lock().expect("render mutex").drain_commands();
+                nm.pending.extend(commands);
+            }
+            // A replay is watched, not driven, and the circle demo has no
+            // map layer at all.
+            _ => {}
+        }
     }
 
     /// Paint the scripted map HUD ([`MapRender::ui_widgets`]) this frame and

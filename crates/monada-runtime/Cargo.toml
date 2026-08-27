@@ -26,6 +26,22 @@ serde = { workspace = true }
 # fixed-point world serialises.
 postcard = { version = "1", features = ["use-std"] }
 
+# A native map's local layer may draw its own egui, for an authoring tool
+# that wants docks, trees and file dialogs rather than the immediate-mode
+# `ui_*` verbs (DESIGN.md §3.5). Optional so a headless rules crate --
+# which is most of them -- does not compile a UI library it never calls.
+#
+# The version must match what roxlap-render paints with, or the host
+# tessellates one `egui::Context` and the map fills another. They unify to
+# one crate while the semver ranges overlap; when roxlap bumps, this
+# follows.
+egui = { version = "0.34", optional = true }
+
+[features]
+default = []
+# Hand the map's local layer an `egui::Context` each frame.
+ui = ["dep:egui"]
+
 [dev-dependencies]
 # Snapshot round-trip test only; production stays format-agnostic.
 serde_json = "1"
