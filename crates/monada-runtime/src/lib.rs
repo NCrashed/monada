@@ -1164,10 +1164,16 @@ pub trait HostBridge: Send {
         0
     }
 
-    /// Paint ONE cell whose surface is not flat: `tops[ly * s + lx]` is the
-    /// sim-z each of the cell's `s × s` sub-columns rises to, where `s` is
-    /// [`cell_voxels`](Self::cell_voxels). Shorter slices leave the rest of
-    /// the cell unpainted.
+    /// Paint ONE cell whose surface is not flat: each of the cell's `s × s`
+    /// sub-columns runs from `floor` up to `tops[ly * s + lx]`, where `s`
+    /// is [`cell_voxels`](Self::cell_voxels). Shorter slices leave the rest
+    /// of the cell unpainted.
+    ///
+    /// **`floor` is not decoration.** A top is where a column ENDS, so a
+    /// map that digs a hollow below its datum has columns that must start
+    /// lower still or there is nothing under them — a hole through the
+    /// world rather than a dip in it. The map picks how deep its basement
+    /// goes; assuming zero here would make every hollow a hole.
     ///
     /// **Collision stays a cell.** `walkable` is the one height the
     /// heightfield store, `ground_height`, `nav_path` and the walk rule all
@@ -1184,7 +1190,16 @@ pub trait HostBridge: Send {
     /// must keep sharp — costs nothing here: `tile_fill` already walks
     /// these sub-columns to place the tile's colours.
     #[allow(clippy::too_many_arguments)]
-    fn tile_relief(&mut self, _x: i64, _y: i64, _walkable: i64, _tops: &[i64], _tile: i64) {}
+    fn tile_relief(
+        &mut self,
+        _x: i64,
+        _y: i64,
+        _floor: i64,
+        _walkable: i64,
+        _tops: &[i64],
+        _tile: i64,
+    ) {
+    }
 
     /// Register a marching-squares transition sheet (a 4×4 `.png`) for terrain
     /// type `high` blended over `low` (higher type id = higher priority). Used

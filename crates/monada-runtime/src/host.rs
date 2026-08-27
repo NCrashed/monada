@@ -856,22 +856,28 @@ pub trait Host: WorldRead {
         }
     }
 
-    /// Paint one cell with a surface that is not flat: `tops[ly * s + lx]`
-    /// is the sim-z each sub-column rises to, `s` being
+    /// Paint one cell with a surface that is not flat: each sub-column
+    /// runs from `floor` to `tops[ly * s + lx]`, `s` being
     /// [`WorldRead::cell_voxels`].
+    ///
+    /// `floor` is where the columns START, and a map that digs below its
+    /// datum needs it lower still — a top alone leaves a hollow with
+    /// nothing under it, which is a hole rather than a dip.
     ///
     /// `walkable` is the single height the store, `ground_height` and
     /// `nav_path` see — the feet keep a cell, only the eye gets the
     /// relief. Which is the trade that makes smooth ground affordable: a
     /// pathfinder over sub-columns would be a different engine.
-    fn tile_relief(&self, x: i64, y: i64, walkable: i64, tops: &[i64], tile: i64) {
+    fn tile_relief(&self, x: i64, y: i64, floor: i64, walkable: i64, tops: &[i64], tile: i64) {
         if let Some(t) = self.terrain() {
-            t.lock().expect("terrain mutex").fill(x, y, 0, x, y, walkable);
+            t.lock()
+                .expect("terrain mutex")
+                .fill(x, y, floor, x, y, walkable);
         }
         if let Some(b) = self.bridge() {
             b.lock()
                 .expect("bridge mutex")
-                .tile_relief(x, y, walkable, tops, tile);
+                .tile_relief(x, y, floor, walkable, tops, tile);
         }
     }
 

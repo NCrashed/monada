@@ -4744,11 +4744,19 @@ impl HostBridge for MapRender {
         SCALE as i64
     }
 
-    fn tile_relief(&mut self, x: i64, y: i64, walkable: i64, tops: &[i64], tile: i64) {
+    fn tile_relief(
+        &mut self,
+        x: i64,
+        y: i64,
+        floor: i64,
+        walkable: i64,
+        tops: &[i64],
+        tile: i64,
+    ) {
         // The feet get one height per cell, as they always have: the
         // heightfield store is what `ground_height` and `nav_path` read,
         // and a pathfinder over sub-columns is a different engine.
-        self.terrain.fill(x, y, 0, x, y, walkable);
+        self.terrain.fill(x, y, floor, x, y, walkable);
         let Some(cells) = self.tiles.get(tile as usize).cloned() else {
             return;
         };
@@ -4768,7 +4776,7 @@ impl HostBridge for MapRender {
                 // maps across the cell's mirrored X span, row `ly` along Y.
                 let wx = (-x * s - 1 - lx) as i32;
                 let wy = (y * s + ly) as i32;
-                for z in 0..=top {
+                for z in floor..=top {
                     grid.set_voxel(IVec3::new(wx, wy, (g - z) as i32), Some(VoxColor(color)));
                 }
             }

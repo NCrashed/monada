@@ -597,12 +597,14 @@ pub(crate) fn register_terrain_api(
     let t = terrain.clone();
     engine.register_fn(
         "tile_relief",
-        move |x: i64, y: i64, walkable: i64, tops: Array, tile: i64| {
+        move |x: i64, y: i64, floor: i64, walkable: i64, tops: Array, tile: i64| {
             let tops: Vec<i64> = tops.into_iter().map(|v| v.as_int().unwrap_or(0)).collect();
-            t.lock().expect("terrain mutex").fill(x, y, 0, x, y, walkable);
+            t.lock()
+                .expect("terrain mutex")
+                .fill(x, y, floor, x, y, walkable);
             b.lock()
                 .expect("bridge mutex")
-                .tile_relief(x, y, walkable, &tops, tile);
+                .tile_relief(x, y, floor, walkable, &tops, tile);
         },
     );
 
