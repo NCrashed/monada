@@ -266,7 +266,13 @@ pub use volume::VolumeStore;
 /// height per voxel while the feet keep the cell the heightfield store,
 /// `ground_height` and `nav_path` all speak. Only the MAP can interpolate
 /// that surface, since only it knows which steps are cliffs to keep sharp.
-pub const HOST_API_VERSION: u32 = 35;
+/// 36 = `bake_ao`: ambient occlusion baked into the world grid. roxlap
+/// has had the bake all along; nothing exposed it, so a map running the
+/// dynamic light rig got a flat ambient and the places where terrain
+/// MEETS terrain -- a cliff foot, the inside of a hollow, the seam where
+/// a slope turns -- had nothing to mark them. Cast shadows only help
+/// where the sun falls; occlusion draws the shape.
+pub const HOST_API_VERSION: u32 = 36;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -1200,6 +1206,27 @@ pub trait HostBridge: Send {
         _tile: i64,
     ) {
     }
+
+    /// Bake the world grid's lighting byte, once the terrain is painted.
+    ///
+    /// `strength` is how much ambient a fully-occluded voxel loses, in
+    /// hundredths (`0` = off, `100` = black crevices); `radius` is the
+    /// sampling reach in voxels, where `1` is a tight edge line and larger
+    /// is a softer pocket.
+    ///
+    /// **What it buys.** Under a runtime light rig
+    /// ([`set_shadows`](Self::set_shadows)) the baked byte IS the rig's
+    /// ambient fill, so without a bake every surface gets the same flat
+    /// ambient and the places where terrain MEETS terrain — the foot of a
+    /// cliff, the inside of a hollow, the seam where a slope turns — have
+    /// nothing to distinguish them. A cast shadow only helps where the sun
+    /// happens to fall. Occlusion is what draws the shape itself.
+    ///
+    /// Call after painting and before the first frame: this walks every
+    /// column, so it is a one-time cost, not a per-frame one. Terrain
+    /// edited afterwards keeps the bake it had until the next call.
+    /// Render-side only; the default ignores it.
+    fn bake_ao(&mut self, _strength: i64, _radius: i64) {}
 
     /// Register a marching-squares transition sheet (a 4×4 `.png`) for terrain
     /// type `high` blended over `low` (higher type id = higher priority). Used

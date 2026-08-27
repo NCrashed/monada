@@ -4802,6 +4802,20 @@ impl HostBridge for MapRender {
         }
     }
 
+    fn bake_ao(&mut self, strength: i64, radius: i64) {
+        let world = self.world_grid();
+        let Some(grid) = self.scene.grid_mut(world) else {
+            return;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let params = roxlap_core::AoParams {
+            strength: strength.clamp(0, 100) as f32 / 100.0,
+            radius: radius.clamp(1, 8) as i32,
+            ..roxlap_core::AoParams::default()
+        };
+        grid.bake(roxlap_scene::BakeMode::AmbientOcclusion(params));
+    }
+
     fn transition(&mut self, low: i64, high: i64, asset_path: &str) {
         let Some(bytes) = self.assets.get(asset_path) else {
             eprintln!("monada-host: transition: missing asset {asset_path:?}");

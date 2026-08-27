@@ -486,6 +486,21 @@ pub trait WorldRead {
             .map_or(-1, |b| b.lock().expect("bridge mutex").tile(asset_path))
     }
 
+    /// Bake ambient occlusion into the world grid, once the terrain is
+    /// painted. `strength` in hundredths (`0` off, `100` black crevices),
+    /// `radius` the sampling reach in voxels.
+    ///
+    /// Under a runtime light rig the baked byte IS the ambient fill, so
+    /// without this every surface takes the same flat ambient and the
+    /// places where terrain meets terrain have nothing to mark them. A
+    /// cast shadow only helps where the sun happens to fall; occlusion
+    /// draws the shape.
+    fn bake_ao(&self, strength: i64, radius: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").bake_ao(strength, radius);
+        }
+    }
+
     /// World voxels across one sim cell in x/y, or `0` headless. What a
     /// column map needs to say anything finer than a cell.
     fn cell_voxels(&self) -> i64 {

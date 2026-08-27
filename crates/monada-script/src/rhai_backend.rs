@@ -586,6 +586,14 @@ pub(crate) fn register_terrain_api(
         },
     );
 
+    // Ambient occlusion, baked once the terrain is down. Under the light
+    // rig this byte IS the ambient fill, so without it terrain meeting
+    // terrain has nothing to mark it.
+    let b = bridge.clone();
+    engine.register_fn("bake_ao", move |strength: i64, radius: i64| {
+        b.lock().expect("bridge mutex").bake_ao(strength, radius);
+    });
+
     // One cell whose surface is not flat. The feet still get a cell; only
     // the eye gets the relief.
     let b = bridge.clone();
