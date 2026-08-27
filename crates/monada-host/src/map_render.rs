@@ -859,6 +859,21 @@ fn cell_box_to_volume_grid(x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64)
     (lo, hi)
 }
 
+/// [`world_of`] the other way: a world point back to sim cells (x/y).
+///
+/// **The half cell is the whole point.** `world_of` puts sim `c` at the
+/// CENTRE of cell `c`'s voxels, so an inverse that drops the `+0.5` lands
+/// half a cell off in both axes — and then the nearest-cell rounding that
+/// follows it lands a whole cell off, because half plus half is one.
+///
+/// It stayed hidden for as long as a pick only had to name a cell to walk
+/// to on flat ground. It is glaring the moment anything is drawn under the
+/// cursor: the outline and the placement ghost both stood diagonally off
+/// the pointer, which is what finally showed it.
+fn sim_of(w: DVec3) -> (f64, f64) {
+    (-w.x / SCALE - 0.5, w.y / SCALE - 0.5)
+}
+
 /// The continuous sim→world map of a volume map (see the `volume` field):
 /// `(0, 0, GROUND_Z) + SCALE · R_y(π) · p`. Agrees with
 /// `cell_box_to_volume_grid` on cell corners and with `world_of` on x/y —
@@ -2899,13 +2914,9 @@ impl MapRender {
             })
         } else {
             ground_hit(origin, dir).map(|hit| {
+                let (x, y) = sim_of(hit);
                 (
-                    FixedVec3::new(
-                        // world X is mirrored (see world_of)
-                        Fixed::from_f64(-hit.x / SCALE),
-                        Fixed::from_f64(hit.y / SCALE),
-                        Fixed::ZERO,
-                    ),
+                    FixedVec3::new(Fixed::from_f64(x), Fixed::from_f64(y), Fixed::ZERO),
                     hit,
                 )
             })
@@ -3081,7 +3092,7 @@ impl MapRender {
         let t_plane = (plane - origin).length();
         let below = |t: f64| {
             let p = origin + dir * t;
-            let (sx, sy) = (-p.x / SCALE, p.y / SCALE);
+            let (sx, sy) = sim_of(p);
             // The same nearest-cell rule the scripts' `cell()` uses.
             let (cx, cy) = ((sx + 0.5).floor() as i64, (sy + 0.5).floor() as i64);
             let surface = self.terrain.ground_height(cx, cy) as f64;
@@ -3094,7 +3105,7 @@ impl MapRender {
             t += step;
         }
         if t >= t_plane {
-            return Some((-plane.x / SCALE, plane.y / SCALE));
+            return Some(sim_of(plane));
         }
         let (mut lo, mut hi) = ((t - step).max(0.0), t);
         for _ in 0..12 {
@@ -3105,8 +3116,7 @@ impl MapRender {
                 lo = mid;
             }
         }
-        let p = origin + dir * hi;
-        Some((-p.x / SCALE, p.y / SCALE))
+        Some(sim_of(origin + dir * hi))
     }
 
     /// Where the cursor ray first meets solid ground on a **volume** map.
@@ -3356,7 +3366,7 @@ impl MapRender {
     /// the host derives the mouse-aim direction from it without the genre.
     #[must_use]
     pub fn camera_center_sim(&self) -> (f64, f64) {
-        (-self.camera.center.x / SCALE, self.camera.center.y / SCALE)
+        sim_of(self.camera.center)
     }
     pub fn status_text(&self) -> &str {
         &self.status
@@ -8413,6 +8423,48 @@ mod tests {
             "a malformed .rkc aborts the character model"
         );
     }
+    /// **The pick and the placement must agree about where a cell is.**
+    ///
+    /// `world_of` seats a sim coordinate at the centre of its cell; the
+    /// inverse the cursor came back through dropped that half cell, so
+    /// every pick on a column map landed half a cell off in x and y — and
+    /// the nearest-cell rounding after it then landed a WHOLE cell off,
+    /// because half plus half is one. Invisible while a pick only had to
+    /// name a cell to walk to, and glaring the moment a ghost was drawn
+    /// under the pointer.
+    #[test]
+    fn a_picked_point_is_the_point_that_was_picked() {
+        for (x, y) in [(0.0, 0.0), (5.0, 2.0), (-3.0, 11.0), (0.5, 0.5)] {
+            let p = FixedVec3::new(Fixed::from_f64(x), Fixed::from_f64(y), Fixed::ZERO);
+            let (bx, by) = sim_of(world_of(p));
+            assert!(
+                (bx - x).abs() < 1e-9 && (by - y).abs() < 1e-9,
+                "{x},{y} came back as {bx},{by}",
+            );
+        }
+    }
+
+    /// …and the rounding built on it names the cell the point is in, not
+    /// its neighbour. This is the half that actually moved the terrain
+    /// under the cursor.
+    #[test]
+    fn a_point_inside_a_cell_names_that_cell() {
+        let cell_of = |p: FixedVec3| {
+            let (sx, sy) = sim_of(world_of(p));
+            ((sx + 0.5).floor() as i64, (sy + 0.5).floor() as i64)
+        };
+        let at = |x: f64, y: f64| {
+            cell_of(FixedVec3::new(
+                Fixed::from_f64(x),
+                Fixed::from_f64(y),
+                Fixed::ZERO,
+            ))
+        };
+        assert_eq!(at(7.0, 3.0), (7, 3), "dead centre");
+        assert_eq!(at(7.4, 3.4), (7, 3), "still inside it");
+        assert_eq!(at(7.6, 3.6), (8, 4), "and over the line is the next one");
+    }
+
     /// **A preview that stood somewhere else would be worse than none.**
     /// The whole promise of a ghost is that the prop lands where the ghost
     /// stood, so it is seated through the same pivot drop an entity's
