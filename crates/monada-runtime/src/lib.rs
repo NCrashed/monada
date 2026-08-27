@@ -1325,6 +1325,17 @@ impl VoxelStore {
         }
     }
 
+    /// The lowest column top the store holds, or `0` when it is empty.
+    ///
+    /// What a map's ground actually reaches down to, which is not `0` for
+    /// any map that digs a hollow. Anything that assumes the datum is the
+    /// floor — the fog's deck band did — silently mistreats the ground
+    /// below it.
+    #[must_use]
+    pub fn lowest(&self) -> i64 {
+        self.tops.values().copied().min().unwrap_or(0)
+    }
+
     /// Raise a single column to at least `z`.
     pub fn set(&mut self, x: i64, y: i64, z: i64) {
         let e = self.tops.entry((x, y)).or_insert(i64::MIN);

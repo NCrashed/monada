@@ -224,6 +224,53 @@ fn the_same_map_runs_headless() {
     host.stop_music();
 }
 
+/// What a map's ground reaches DOWN to.
+///
+/// Everything that assumed the datum was the floor mistreated a map that
+/// digs: the fog's deck band stopped at sim z 0, so a hollow fell off
+/// every deck and the classifier painted it opaque black — ground you
+/// could walk into and not see.
+#[test]
+fn the_store_knows_how_deep_its_ground_goes() {
+    let terrain = shared_terrain();
+    let host = RuntimeHost::with_terrain(shared_world(0), &terrain);
+
+    host.voxel_fill((0, 0, 0), (8, 8, 0), 0);
+    assert_eq!(terrain.lock().expect("terrain").lowest(), 0, "flat is flat");
+
+    // A hollow, on ground not yet painted: the column's top is BELOW the
+    // datum, and that is what the fog's band has to reach.
+    host.tile_relief(20, 20, -9, -9, &[], -1);
+    assert_eq!(terrain.lock().expect("terrain").lowest(), -9);
+
+    // …and a plateau does not move the floor.
+    host.voxel_fill((6, 6, 0), (7, 7, 24), 0);
+    assert_eq!(terrain.lock().expect("terrain").lowest(), -9);
+}
+
+/// The store RAISES; it never lowers.
+///
+/// `fill` keeps the higher of what is there and what is asked for, so
+/// painting a hollow over ground already painted higher does nothing. A
+/// map paints each cell once and never notices; an editor re-painting a
+/// lowered cell would, and `voxel_clear` is what it wants instead. Pinned
+/// because the failure is silent — the ground simply does not move.
+#[test]
+fn filling_a_column_raises_it_and_never_lowers_it() {
+    let terrain = shared_terrain();
+    let host = RuntimeHost::with_terrain(shared_world(0), &terrain);
+
+    host.voxel_fill((3, 3, 0), (3, 3, 12), 0);
+    assert_eq!(host.ground_height(3, 3), 12);
+
+    host.voxel_fill((3, 3, 0), (3, 3, 4), 0);
+    assert_eq!(host.ground_height(3, 3), 12, "a lower fill did not lower it");
+
+    host.voxel_clear(3, 3, 5);
+    host.voxel_fill((3, 3, 0), (3, 3, 4), 0);
+    assert_eq!(host.ground_height(3, 3), 4, "clearing first is what lowers");
+}
+
 /// The one lifted verb that is not render-only.
 ///
 /// `tile_fill` paints a wall the pathfinder must also see. If it only

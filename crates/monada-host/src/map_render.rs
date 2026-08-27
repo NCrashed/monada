@@ -2039,7 +2039,17 @@ impl MapRender {
             // so a cubic hull (a cell is SCALE voxels tall) gets the same eight
             // cells of headroom the column tuning's 64 voxels bought.
             let hull_span: i32 = if cubic { 8 * SCALE as i32 } else { 64 };
-            let z_bottom = GROUND_Z as i32; // lowest floor
+            // The floor is the LOWEST GROUND, not the datum. A map that
+            // digs a hollow has columns below sim z 0, and a band that
+            // stopped at the datum left them off every deck — where the
+            // classifier reads "unexplored basement" and paints them
+            // opaque black. A hollow you can walk into and cannot see.
+            //
+            // Zero where nothing is dug, so a hull whose lowest deck sits
+            // on the datum keeps exactly the band it had.
+            #[allow(clippy::cast_possible_truncation)]
+            let dug = self.terrain.lowest().min(0) as i32;
+            let z_bottom = GROUND_Z as i32 - dug;
             let z_top = GROUND_Z as i32 - hull_span; // generous ceiling
             let mut cfg = VisionConfig::for_decks(vec![DeckBand { z_top, z_bottom }]);
             cfg.cone_half_angle = (cone_deg as f32).to_radians() * 0.5;
