@@ -375,6 +375,16 @@ pub trait WorldRead {
         }
     }
 
+    /// Set the flat background colour (`0x00RR_GGBB`) a ray that hits
+    /// nothing lands on. Black is what a fogged outdoor map wants: the
+    /// fog's known twin has no geometry where nobody has been, so the
+    /// background shows through unexplored ground.
+    fn set_sky_color(&self, color: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").set_sky_color(color);
+        }
+    }
+
     /// Load a sky panorama from an asset.
     fn set_sky(&self, asset_path: &str) {
         if let Some(b) = self.bridge() {

@@ -340,6 +340,7 @@ so a dock snap or a jump drive still snaps.
 | `set_sprite_facing(view_plane)` | `true` aligns billboard actors to the view plane instead of aiming each at the camera (off by default) |
 | `camera_fov(degrees)` | horizontal field of view, default `90`; narrow it and pull `camera_dist` back the same factor for a near-orthographic look |
 | `set_sky(path)` | load a sky panorama from an asset |
+| `set_sky_color(color)` | flat `0xRRGGBB` background a ray that hits nothing lands on; black suits a fogged outdoor map, where the fog's known twin has no geometry over ground nobody has been near |
 
 ## Selection and status — *presentation*
 

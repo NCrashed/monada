@@ -255,7 +255,12 @@ pub use volume::VolumeStore;
 /// and `drag_end` lifted into `LocalHost`. A compiled map could select one
 /// entity and read one back, so a drag box and multi-select -- the whole
 /// Warcraft III control scheme -- were script-only.
-pub const HOST_API_VERSION: u32 = 33;
+/// 34 = `set_sky_color`: the flat background a ray that hits nothing lands
+/// on. Fixed at a daylight blue until now, which shows through unexplored
+/// ground on a fogged outdoor map -- the fog's known twin only holds
+/// chunks something has been seen in, so ground nobody has been near has
+/// no geometry to shroud.
+pub const HOST_API_VERSION: u32 = 34;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -996,6 +1001,20 @@ pub trait HostBridge: Send {
     /// Load a sky panorama from an `assets/` image and render it behind the
     /// scene. Render-side only.
     fn set_sky(&mut self, asset_path: &str);
+
+    /// Set the flat background colour a ray that hits nothing lands on,
+    /// as `0x00RR_GGBB`. The host's default is a daylight blue.
+    ///
+    /// Worth setting to black on a fogged outdoor map. Where fog of war is
+    /// on, the renderer draws a *known twin* of the terrain — a copy that
+    /// gains a chunk only once some of it has been seen — so ground nobody
+    /// has been near yet has no geometry to shroud, and the background
+    /// shows through it. A background the same colour as the shroud makes
+    /// the twin's edge invisible instead of a moving hole.
+    ///
+    /// A panorama from [`set_sky`](Self::set_sky) covers this whenever one
+    /// is loaded; this is the colour behind it. Render-side only.
+    fn set_sky_color(&mut self, _color: i64) {}
 
     /// Define an animated, 8-direction billboard "actor" model from GIFs laid
     /// out as `<dir_path>/<state>/<side>.gif` for the 8 compass sides (one

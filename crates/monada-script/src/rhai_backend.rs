@@ -1002,6 +1002,13 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
         b.lock().expect("bridge mutex").set_sky(path.as_str());
     });
 
+    // The flat background behind the sky. Black is what a fogged outdoor
+    // map wants — see the verb's docs.
+    let b = bridge.clone();
+    engine.register_fn("set_sky_color", move |color: i64| {
+        b.lock().expect("bridge mutex").set_sky_color(color);
+    });
+
     // Per-cell PNG tiles: `tile(path)` loads; `tile_fill` paints and is
     // registered with the terrain verbs, because what it paints is solid.
     let b = bridge.clone();

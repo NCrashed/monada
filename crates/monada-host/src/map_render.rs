@@ -376,6 +376,9 @@ struct Look {
     /// so it is the map's call. Off by default: every map before
     /// `host_api` 29 was drawn against the eye-facing look.
     sprite_view_plane: bool,
+    /// Background colour a ray that hits nothing lands on
+    /// (`set_sky_color`), or `None` for the host's daylight blue.
+    sky_color: Option<Rgb>,
     /// Horizontal field of view in degrees (`camera_fov`), or `None` for
     /// the host's 90°.
     ///
@@ -3594,7 +3597,19 @@ impl MapRender {
         // (chess) rebuilds the set each frame (it has nothing to clobber).
         if self.dynamic_layer() {
             if !self.sprites_uploaded {
+                // Selection markers must NOT be in that one upload. On this
+                // path they ride the dynamic layer (`sync_rings` mirrors
+                // them), so a marker already present on the first rendered
+                // frame is baked into the static set — frozen at that
+                // position for the rest of the session — and then drawn a
+                // SECOND time, live, by the mirror. A map that selects
+                // something in `local_init` sees the ghost immediately; one
+                // that only selects on a click never does, which is why the
+                // RTS demo never hit it. `sync_rings` still reads the
+                // markers from the list below, so put them back after.
+                let markers = self.take_markers();
                 renderer.set_sprites(&self.sprites);
+                self.sprites.instances.extend(markers);
                 self.sprites_uploaded = true;
             }
         } else {
@@ -3615,7 +3630,7 @@ impl MapRender {
         // (mip-scan → `RenderOptions`; step budget + FOV are now derived from
         // the scan distance + projection so the backends can't disagree).
         let mut frame = FrameParams::new(settings);
-        frame.sky_color = sky_color;
+        frame.sky_color = self.look.sky_color.unwrap_or(sky_color);
         frame.sky = self.sky.as_ref(); // CPU backend sky panorama
                                        // Sprites are flat-lit on both backends; this is just the on/off opt-in.
         frame.draw_sprites = true;
@@ -3797,6 +3812,15 @@ impl MapRender {
                 self.prop_ids.push(id);
             }
         }
+    }
+
+    /// Lift the selection markers out of the static instance list.
+    fn take_markers(&mut self) -> Vec<SpriteInstanceDesc> {
+        let (markers, rest) = std::mem::take(&mut self.sprites.instances)
+            .into_iter()
+            .partition(|i| i.model == HIGHLIGHT_MODEL);
+        self.sprites.instances = rest;
+        markers
     }
 
     fn sync_rings(&mut self, renderer: &mut SceneRenderer) {
@@ -5298,6 +5322,13 @@ impl HostBridge for MapRender {
         #[allow(clippy::cast_possible_truncation)]
         let s = strength.to_f64().clamp(0.0, 1.0) as f32;
         self.look.shadows = (s > 0.0).then_some(s);
+    }
+
+    fn set_sky_color(&mut self, color: i64) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            self.look.sky_color = Some(Rgb(color as u32 & 0x00FF_FFFF));
+        }
     }
 
     fn set_sky(&mut self, asset_path: &str) {
