@@ -260,7 +260,13 @@ pub use volume::VolumeStore;
 /// ground on a fogged outdoor map -- the fog's known twin only holds
 /// chunks something has been seen in, so ground nobody has been near has
 /// no geometry to shroud.
-pub const HOST_API_VERSION: u32 = 34;
+/// 35 = `tile_relief` + `cell_voxels`: a column map may paint a cell whose
+/// surface is not flat. One height per cell is a sixteen-voxel step, so a
+/// gentle hill still read as a ziggurat; now the eye gets a sub-column
+/// height per voxel while the feet keep the cell the heightfield store,
+/// `ground_height` and `nav_path` all speak. Only the MAP can interpolate
+/// that surface, since only it knows which steps are cliffs to keep sharp.
+pub const HOST_API_VERSION: u32 = 35;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -1147,6 +1153,38 @@ pub trait HostBridge: Send {
         _tile: i64,
     ) {
     }
+
+    /// World voxels across one sim cell in x/y — the host's sim→world
+    /// scale. `0` where there is no renderer to ask.
+    ///
+    /// A column map needs this to talk about anything finer than a cell:
+    /// it is the length of the `tops` slice
+    /// [`tile_relief`](Self::tile_relief) wants, squared.
+    fn cell_voxels(&self) -> i64 {
+        0
+    }
+
+    /// Paint ONE cell whose surface is not flat: `tops[ly * s + lx]` is the
+    /// sim-z each of the cell's `s × s` sub-columns rises to, where `s` is
+    /// [`cell_voxels`](Self::cell_voxels). Shorter slices leave the rest of
+    /// the cell unpainted.
+    ///
+    /// **Collision stays a cell.** `walkable` is the one height the
+    /// heightfield store, `ground_height`, `nav_path` and the walk rule all
+    /// see, exactly as [`tile_fill`](Self::tile_fill) would set it. The
+    /// relief is what the eye gets, and it is deliberately allowed to
+    /// disagree with what the feet get by a voxel or two — the alternative
+    /// is a pathfinder over a million columns.
+    ///
+    /// This is how a column map stops looking like a staircase. A cell is
+    /// sixteen voxels across, so one height per cell is a sixteen-voxel
+    /// step, and a hill built out of those reads as a ziggurat however
+    /// gentle its slope. Interpolating the surface across the cell — which
+    /// only the MAP can do, since only it knows which steps are cliffs it
+    /// must keep sharp — costs nothing here: `tile_fill` already walks
+    /// these sub-columns to place the tile's colours.
+    #[allow(clippy::too_many_arguments)]
+    fn tile_relief(&mut self, _x: i64, _y: i64, _walkable: i64, _tops: &[i64], _tile: i64) {}
 
     /// Register a marching-squares transition sheet (a 4×4 `.png`) for terrain
     /// type `high` blended over `low` (higher type id = higher priority). Used

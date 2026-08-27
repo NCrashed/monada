@@ -586,6 +586,26 @@ pub(crate) fn register_terrain_api(
         },
     );
 
+    // One cell whose surface is not flat. The feet still get a cell; only
+    // the eye gets the relief.
+    let b = bridge.clone();
+    engine.register_fn("cell_voxels", move || -> i64 {
+        b.lock().expect("bridge mutex").cell_voxels()
+    });
+
+    let b = bridge.clone();
+    let t = terrain.clone();
+    engine.register_fn(
+        "tile_relief",
+        move |x: i64, y: i64, walkable: i64, tops: Array, tile: i64| {
+            let tops: Vec<i64> = tops.into_iter().map(|v| v.as_int().unwrap_or(0)).collect();
+            t.lock().expect("terrain mutex").fill(x, y, 0, x, y, walkable);
+            b.lock()
+                .expect("bridge mutex")
+                .tile_relief(x, y, walkable, &tops, tile);
+        },
+    );
+
     // Collision queries (sim coords). Deterministic: the store is a pure
     // function of the map's own paint calls, so every peer answers
     // identically — safe to feed hashed `tick()` decisions.

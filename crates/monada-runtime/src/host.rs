@@ -486,6 +486,13 @@ pub trait WorldRead {
             .map_or(-1, |b| b.lock().expect("bridge mutex").tile(asset_path))
     }
 
+    /// World voxels across one sim cell in x/y, or `0` headless. What a
+    /// column map needs to say anything finer than a cell.
+    fn cell_voxels(&self) -> i64 {
+        self.bridge()
+            .map_or(0, |b| b.lock().expect("bridge mutex").cell_voxels())
+    }
+
     /// Register a marching-squares transition sheet (a 4×4 PNG) blending
     /// terrain type `high` over `low`; higher id wins. Read by
     /// [`terrain_blit`](Self::terrain_blit).
@@ -846,6 +853,25 @@ pub trait Host: WorldRead {
             b.lock()
                 .expect("bridge mutex")
                 .tile_fill(lo.0, lo.1, lo.2, hi.0, hi.1, hi.2, tile);
+        }
+    }
+
+    /// Paint one cell with a surface that is not flat: `tops[ly * s + lx]`
+    /// is the sim-z each sub-column rises to, `s` being
+    /// [`WorldRead::cell_voxels`].
+    ///
+    /// `walkable` is the single height the store, `ground_height` and
+    /// `nav_path` see — the feet keep a cell, only the eye gets the
+    /// relief. Which is the trade that makes smooth ground affordable: a
+    /// pathfinder over sub-columns would be a different engine.
+    fn tile_relief(&self, x: i64, y: i64, walkable: i64, tops: &[i64], tile: i64) {
+        if let Some(t) = self.terrain() {
+            t.lock().expect("terrain mutex").fill(x, y, 0, x, y, walkable);
+        }
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .tile_relief(x, y, walkable, tops, tile);
         }
     }
 

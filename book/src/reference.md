@@ -341,6 +341,8 @@ so a dock snap or a jump drive still snaps.
 | `camera_fov(degrees)` | horizontal field of view, default `90`; narrow it and pull `camera_dist` back the same factor for a near-orthographic look |
 | `set_sky(path)` | load a sky panorama from an asset |
 | `set_sky_color(color)` | flat `0xRRGGBB` background a ray that hits nothing lands on; black suits a fogged outdoor map, where the fog's known twin has no geometry over ground nobody has been near |
+| `cell_voxels()` | world voxels across one sim cell in x/y — the sub-column grid `tile_relief` addresses |
+| `tile_relief(x, y, walkable, tops, tile)` | paint one cell whose surface is not flat: `tops[ly*s + lx]` per sub-column, `walkable` the single height collision and pathing see. How a column map stops looking like a staircase |
 
 ## Selection and status — *presentation*
 

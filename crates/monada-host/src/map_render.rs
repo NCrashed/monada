@@ -4740,6 +4740,41 @@ impl HostBridge for MapRender {
         }
     }
 
+    fn cell_voxels(&self) -> i64 {
+        SCALE as i64
+    }
+
+    fn tile_relief(&mut self, x: i64, y: i64, walkable: i64, tops: &[i64], tile: i64) {
+        // The feet get one height per cell, as they always have: the
+        // heightfield store is what `ground_height` and `nav_path` read,
+        // and a pathfinder over sub-columns is a different engine.
+        self.terrain.fill(x, y, 0, x, y, walkable);
+        let Some(cells) = self.tiles.get(tile as usize).cloned() else {
+            return;
+        };
+        let s = SCALE as i64;
+        let g = GROUND_Z as i64;
+        let world = self.world_grid();
+        let Some(grid) = self.scene.grid_mut(world) else {
+            return;
+        };
+        for ly in 0..s {
+            for lx in 0..s {
+                let Some(&top) = tops.get((ly * s + lx) as usize) else {
+                    continue; // a short slice leaves the rest unpainted
+                };
+                let color = cells[(ly * s + lx) as usize];
+                // World X is mirrored (see `world_of`); tile column `lx`
+                // maps across the cell's mirrored X span, row `ly` along Y.
+                let wx = (-x * s - 1 - lx) as i32;
+                let wy = (y * s + ly) as i32;
+                for z in 0..=top {
+                    grid.set_voxel(IVec3::new(wx, wy, (g - z) as i32), Some(VoxColor(color)));
+                }
+            }
+        }
+    }
+
     fn transition(&mut self, low: i64, high: i64, asset_path: &str) {
         let Some(bytes) = self.assets.get(asset_path) else {
             eprintln!("monada-host: transition: missing asset {asset_path:?}");
