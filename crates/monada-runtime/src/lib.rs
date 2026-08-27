@@ -284,7 +284,14 @@ pub use volume::VolumeStore;
 /// writing a widget toolkit. Legal because the local layer is already
 /// outside the state hash: a `Context` reaches no further than `status`
 /// does. Scripted maps keep the `ui_*` surface; Rhai cannot hold the type.
-pub const HOST_API_VERSION: u32 = 37;
+/// 38 = `ghost_clear`/`ghost_model`: a translucent preview of a model, drawn
+/// for one frame. An editor's placement ghost has to be the prop's own
+/// silhouette -- that is the thing being judged -- and the gizmo outlines
+/// cannot be one. It could not be built out of what was already here: a
+/// sprite belonged to an entity, entities are simulation state, and the
+/// local layer may not make one, so showing what is about to be placed
+/// meant telling the simulation it had been.
+pub const HOST_API_VERSION: u32 = 38;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -962,6 +969,25 @@ pub trait HostBridge: Send {
     /// (`-1` = the world frame), same colour packing as
     /// [`gizmo_box`](Self::gizmo_box).
     fn gizmo_line(&mut self, _grid: i64, _a: FixedVec3, _b: FixedVec3, _color: i64) {}
+
+    /// Start a fresh set of ghosts, on the same immediate-mode contract
+    /// [`gizmo_clear`](Self::gizmo_clear) has.
+    fn ghost_clear(&mut self) {}
+    /// Draw `model` translucently at `pos`, turned to `yaw` radians, at
+    /// `alpha` in `0..=255` — a **preview**, not an entity.
+    ///
+    /// What an editor's placement ghost is made of, and what an outline
+    /// cannot be: a prop's silhouette is the thing a designer is judging,
+    /// and a wireframe of its bounding box is not that silhouette. The
+    /// model is the same id [`model_kv6`](Self::model_kv6) returned, so a
+    /// preview draws exactly what the placement will.
+    ///
+    /// **A preview is not an entity**, which is why this exists at all.
+    /// Entities are simulation state and the local layer may not make
+    /// one, so without this a map has no way to show what it is about to
+    /// place without lying to the simulation about having placed it.
+    /// Ghosts cast no shadow and take no part in picking.
+    fn ghost_model(&mut self, _model: i64, _pos: FixedVec3, _yaw: Fixed, _alpha: i64) {}
 
     /// The sim-space yaw (radians, fixed-point) from the local player /
     /// camera focus toward the cursor's ground point. Holds its last

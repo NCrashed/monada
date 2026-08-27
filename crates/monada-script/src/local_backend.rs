@@ -345,6 +345,25 @@ fn register_input_api(engine: &mut Engine, bridge: &SharedBridge) {
         },
     );
 
+    // Placement ghosts: a translucent copy of a model, for one frame.
+    // Local-layer only for a stronger reason than the gizmos above — a
+    // ghost is a sprite, and every other sprite belongs to an entity,
+    // which is state the simulation hashes.
+    let b = bridge.clone();
+    engine.register_fn("ghost_clear", move || {
+        b.lock().expect("bridge mutex").ghost_clear();
+    });
+
+    let b = bridge.clone();
+    engine.register_fn(
+        "ghost_model",
+        move |model: i64, pos: FixedVec3, yaw: Fixed, alpha: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .ghost_model(model, pos, yaw, alpha);
+        },
+    );
+
     let b = bridge.clone();
     engine.register_fn("aim_yaw", move || -> Fixed {
         b.lock().expect("bridge mutex").aim_yaw()

@@ -146,6 +146,30 @@ through the frames between its ticks. Local layer only, and never hashed
 `color` is `0xAA_RR_GG_BB` — here the high byte really is **alpha**, unlike
 a voxel colour's (which is brightness).
 
+## Placement ghosts — *local*
+
+A translucent copy of a model, drawn for one frame at a pose the map
+chooses. What an editor previews a placement with, and what the outlines
+above cannot be: the thing a designer is judging is the prop's own
+silhouette, not a box around it. Immediate mode, same contract as the
+gizmos — clear and reissue (requires `host_api` 38).
+
+| Function | Result |
+|---|---|
+| `ghost_clear()` | start a fresh set; what was drawn before is gone |
+| `ghost_model(model, pos, yaw, alpha)` | draw `model` at sim point `pos`, turned to `yaw` radians, at `alpha` in `0..=255` |
+
+`model` is the id `model_kv6` returned — a preview draws exactly what the
+placement will, seated the same way, so the ghost and the prop that
+replaces it stand in the same spot. Actor and character models are ignored:
+previewing one means posing an animation, and nothing has needed that.
+
+**A ghost is not an entity**, which is why the verb exists. Every other
+sprite belongs to one, entities are simulation state, and the local layer
+may not make one — so without this, showing what is about to be placed
+meant telling the simulation it had been. Ghosts cast no shadow, receive
+none, and cannot be picked.
+
 ## Models and sprites — *presentation*
 
 | Function | Result |

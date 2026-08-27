@@ -1198,6 +1198,36 @@ pub trait LocalHost: WorldRead {
             .map(|b| b.lock().expect("bridge mutex").drag_end())
             .unwrap_or_default()
     }
+
+    // --- placement ghosts --------------------------------------------
+    //
+    // Here rather than on `WorldRead` beside the gizmos, which are local
+    // by convention and by nothing stronger. A preview belongs to the eye
+    // that is about to click, so the simulation is given no way to reach
+    // it at all.
+
+    /// Start a fresh set of ghosts; what was drawn before this is gone.
+    /// Immediate mode, on the HUD's contract: clear and reissue.
+    fn ghost_clear(&self) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").ghost_clear();
+        }
+    }
+
+    /// Draw `model` translucently at `pos`, turned to `yaw` radians, at
+    /// `alpha` in `0..=255`.
+    ///
+    /// The model id is the one [`model_kv6`](WorldRead::model_kv6) gave,
+    /// so a preview draws exactly what the placement will -- which is the
+    /// whole point of it, and what an outline of a bounding box can never
+    /// be. Ghosts cast no shadow and cannot be picked.
+    fn ghost_model(&self, model: i64, pos: FixedVec3, yaw: Fixed, alpha: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .ghost_model(model, pos, yaw, alpha);
+        }
+    }
 }
 
 /// An inclusive box of sim cells.

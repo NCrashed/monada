@@ -58,6 +58,49 @@ const WHITE_TINT: u32 = 0x00FF_FFFF;
 /// Reserved model 0: the selection-highlight marker the host draws on the
 /// locally selected entity. Map-defined models start at 1.
 const HIGHLIGHT_MODEL: usize = 0;
+/// Reserved material palette id for placement ghosts, taken from the far
+/// end so that map-facing material ids, whenever there are any, can grow
+/// from 1 without meeting it. Id 0 is roxlap's locked opaque entry.
+const GHOST_MATERIAL: u8 = 255;
+
+/// Model 0: a flat amber selection ring circling the selected entity's
+/// footprint on the ground under the sprite — the classic RTS read (a
+/// multi-selected squad shows one ring per unit). Same placement contract
+/// as the old filled tile (`from_fn` and `solid_box` share the pivot
+/// path), so chess's square highlight simply became a circle on its square.
+fn selection_ring() -> Sprite {
+    let d = SCALE as u32 + 4; // a hair wider than the cell
+    let c = f64::from(d - 1) * 0.5;
+    let (r_out, r_in) = (c, c - 2.5);
+    let kv6 = Kv6::from_fn(d, d, 2, |x, y, _z| {
+        let (dx, dy) = (f64::from(x) - c, f64::from(y) - c);
+        let d2 = dx.mul_add(dx, dy * dy);
+        (d2 <= r_out * r_out && d2 >= r_in * r_in).then_some(VoxColor(0x80FF_E000))
+    });
+    let mut s = Sprite::axis_aligned(kv6, [0.0, 0.0, 0.0]);
+    s.flags = SPRITE_FLAG_NO_SHADING;
+    s
+}
+
+/// The placement previews a map asked for, and the instances drawing them.
+///
+/// Immediate mode, like the gizmos: `ghost_model` fills `targets`,
+/// `sync_ghosts` turns them into instances and empties the list, so what a
+/// frame asked for is what a frame gets.
+#[derive(Default)]
+struct Ghosts {
+    /// This frame's requests: `(sprite model index, world seat, world
+    /// yaw, alpha)`.
+    targets: Vec<(usize, DVec3, f64, u8)>,
+    /// Live instance ids, torn down and re-issued each frame.
+    ids: Vec<roxlap_render::SpriteInstanceId>,
+    /// Whether the translucent material has been registered yet. Defined
+    /// on first use rather than at startup: a map that never previews
+    /// anything should not put a translucent entry in the palette,
+    /// because a non-opaque palette is what switches the renderer onto
+    /// its two-sweep sprite path.
+    material: bool,
+}
 /// Max world-xy distance from a click to an entity for it to be picked.
 const PICK_RADIUS: f64 = 12.0;
 /// Strongest per-face grid darkening a sun can apply, to the face pointing
@@ -1561,6 +1604,9 @@ pub struct MapRender {
     /// [`ring_ids`](Self::ring_ids) — a handful of crates per hull, so the
     /// churn is cheaper than tracking per-entity lifetimes.
     prop_ids: Vec<roxlap_render::SpriteInstanceId>,
+    /// Placement previews: what the local layer asked for this frame and
+    /// what is drawing it.
+    ghosts: Ghosts,
     /// An active pointer drag's anchor (sim-space ground point), set by
     /// `drag_begin`; the far corner rides `cursor_ground`. Render-side
     /// gesture state — the stateless local script layer cannot hold it.
@@ -1737,27 +1783,8 @@ impl MapRender {
         actions: &[ActionDecl],
     ) -> MapRender {
         let scene = Scene::new();
-        // Model 0: a flat amber selection RING circling the selected
-        // entity's footprint on the ground under the sprite — the classic
-        // RTS read (a multi-selected squad shows one ring per unit). Same
-        // placement contract as the old filled tile (`from_fn` and
-        // `solid_box` share the pivot path), so chess's square highlight
-        // simply became a circle on its square.
-        let marker = {
-            let d = SCALE as u32 + 4; // a hair wider than the cell
-            let c = f64::from(d - 1) * 0.5;
-            let (r_out, r_in) = (c, c - 2.5);
-            let kv6 = Kv6::from_fn(d, d, 2, |x, y, _z| {
-                let (dx, dy) = (f64::from(x) - c, f64::from(y) - c);
-                let d2 = dx.mul_add(dx, dy * dy);
-                (d2 <= r_out * r_out && d2 >= r_in * r_in).then_some(VoxColor(0x80FF_E000))
-            });
-            let mut s = Sprite::axis_aligned(kv6, [0.0, 0.0, 0.0]);
-            s.flags = SPRITE_FLAG_NO_SHADING;
-            s
-        };
         let sprites = SpriteSet {
-            models: vec![marker],
+            models: vec![selection_ring()],
             instances: Vec::new(),
             carve_model: None,
         };
@@ -1799,6 +1826,7 @@ impl MapRender {
             prop_targets: Vec::new(),
             prop_models: BTreeMap::new(),
             prop_ids: Vec::new(),
+            ghosts: Ghosts::default(),
             drag_anchor: None,
             status: String::new(),
             camera: OrbitCamera::framing(DVec3::new(0.0, 0.0, GROUND_Z)),
@@ -3629,6 +3657,7 @@ impl MapRender {
         self.update_characters(renderer, dt);
         self.sync_props(renderer);
         self.sync_rings(renderer);
+        self.sync_ghosts(renderer);
         // Deck cutaway: clip the grid above the local crew's deck so the camera
         // sees inside (set before building `frame`, which doesn't touch scene).
         self.apply_deck_clip();
@@ -3821,6 +3850,74 @@ impl MapRender {
             if let Some(id) = renderer.add_sprite_instance_posed(model, xf) {
                 self.prop_ids.push(id);
             }
+        }
+    }
+
+    /// Place this frame's placement ghosts, and take away last frame's.
+    ///
+    /// Same teardown-and-reissue as [`sync_props`](Self::sync_props), for
+    /// the same reason: a preview is one or two instances that move every
+    /// frame anyway, so tracking their lifetimes would buy nothing.
+    ///
+    /// A ghost is a **preview and not an entity**: it casts no shadow, is
+    /// not in the world the cursor picks against, and nothing in the
+    /// simulation can see it. That is the whole reason the verb exists —
+    /// entities are simulation state, and the layer that wants to show
+    /// what it is about to place is the one layer that may not make one.
+    fn sync_ghosts(&mut self, renderer: &mut SceneRenderer) {
+        for id in self.ghosts.ids.drain(..) {
+            renderer.remove_sprite_instance(id);
+        }
+        let targets = std::mem::take(&mut self.ghosts.targets);
+        if targets.is_empty() {
+            return;
+        }
+        if !self.ghosts.material {
+            renderer.define_material(
+                GHOST_MATERIAL,
+                roxlap_formats::material::Material {
+                    alpha: 255,
+                    mode: roxlap_formats::material::BlendMode::AlphaBlend,
+                    emissive: 0,
+                },
+            );
+            self.ghosts.material = true;
+        }
+        for (si, pos, yaw, alpha) in targets {
+            let model = if let Some(&m) = self.prop_models.get(&si) {
+                m
+            } else {
+                let Some(sprite) = self.sprites.models.get(si) else {
+                    continue;
+                };
+                let m = renderer.add_sprite_model(&sprite.kv6);
+                self.prop_models.insert(si, m);
+                m
+            };
+            let rot = DQuat::from_rotation_z(yaw);
+            let axis = |v: DVec3| [v.x as f32, v.y as f32, v.z as f32];
+            let xf = DynSpriteTransform {
+                pos: axis(pos),
+                right: axis(rot * DVec3::X),
+                up: axis(rot * DVec3::Y),
+                forward: axis(rot * DVec3::Z),
+            };
+            let Some(id) = renderer.add_sprite_instance_posed(model, xf) else {
+                continue;
+            };
+            renderer.set_sprite_instance_material(id, GHOST_MATERIAL);
+            renderer.set_sprite_instance_alpha(id, alpha);
+            // A preview that darkened the ground under it would read as a
+            // prop already standing there, which is the one thing it is
+            // not.
+            renderer.set_sprite_instance_shadow_flags(
+                id,
+                roxlap_render::ShadowFlags {
+                    casts: false,
+                    receives: false,
+                },
+            );
+            self.ghosts.ids.push(id);
         }
     }
 
@@ -5342,6 +5439,38 @@ impl HostBridge for MapRender {
             width_px,
             depth_test: !on_top,
         });
+    }
+
+    fn ghost_clear(&mut self) {
+        self.ghosts.targets.clear();
+    }
+
+    fn ghost_model(&mut self, model: i64, pos: FixedVec3, yaw: Fixed, alpha: i64) {
+        // Only a sprite has a silhouette to preview. An actor is eight
+        // pre-drawn cards picked from a camera bearing and a character is
+        // a rigged clip: previewing either means posing an animation, and
+        // nothing has asked to.
+        let Some(&ModelRef::Sprite(si)) = usize::try_from(model)
+            .ok()
+            .and_then(|i| self.model_refs.get(i))
+        else {
+            return;
+        };
+        // Seated exactly as a real prop is, or the preview lies about the
+        // one thing it is for: `drop` puts the model's feet on the point
+        // rather than its pivot, and the world yaw mirrors the sim one
+        // because `world_of` mirrors x.
+        let drop = self.sprites.models.get(si).map_or(SCALE * 0.5, |m| {
+            f64::from(m.kv6.zsiz) - f64::from(m.kv6.zpiv)
+        });
+        let mut w = entity_world_of_in(self.volume, pos);
+        w.z -= drop;
+        self.ghosts.targets.push((
+            si,
+            w,
+            facing_to_world_yaw(yaw.to_f64()),
+            u8::try_from(alpha.clamp(0, 255)).unwrap_or(255),
+        ));
     }
 
     fn aim_yaw(&self) -> Fixed {
@@ -8283,5 +8412,94 @@ mod tests {
             -1,
             "a malformed .rkc aborts the character model"
         );
+    }
+    /// **A preview that stood somewhere else would be worse than none.**
+    /// The whole promise of a ghost is that the prop lands where the ghost
+    /// stood, so it is seated through the same pivot drop an entity's
+    /// sprite is -- and this pins the two together rather than trusting
+    /// two copies of the arithmetic to stay equal.
+    #[test]
+    fn a_ghost_stands_exactly_where_the_prop_will() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let model = r.model_kv6("missing.kv6", 0);
+        let p = FixedVec3::new(Fixed::from_int(5), Fixed::from_int(2), Fixed::from_int(3));
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["deck"]);
+        let e = world.spawn(arch);
+        world.set_position(e, p);
+        r.entity_set_model(e.0 as i64, model);
+        r.build_instances(&world);
+        let placed = r
+            .sprites
+            .instances
+            .iter()
+            .find(|i| i.model != HIGHLIGHT_MODEL)
+            .expect("the entity got a sprite")
+            .pos;
+
+        r.ghost_model(model, p, Fixed::ZERO, 128);
+        let (_, seat, _, alpha) = r.ghosts.targets[0];
+        for (a, b) in [seat.x as f32, seat.y as f32, seat.z as f32]
+            .into_iter()
+            .zip(placed)
+        {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "the ghost and the prop disagree about where they stand: {a} against {b}",
+            );
+        }
+        assert_eq!(alpha, 128);
+    }
+
+    /// A sim yaw reads mirrored on screen (`world_of` mirrors x), so a
+    /// ghost that took the sim yaw straight would face the wrong way --
+    /// visible on anything that is not symmetric, which is most props.
+    #[test]
+    fn a_ghost_turns_the_way_the_prop_turns() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let model = r.model_kv6("missing.kv6", 0);
+        let yaw = Fixed::from_f64(0.75);
+        r.ghost_model(model, FixedVec3::ZERO, yaw, 255);
+        let (_, _, world_yaw, _) = r.ghosts.targets[0];
+        assert!((world_yaw - facing_to_world_yaw(0.75)).abs() < 1e-9);
+    }
+
+    /// Immediate mode: what a frame asked for is what a frame gets, and a
+    /// map that stops asking stops drawing.
+    #[test]
+    fn ghosts_last_exactly_as_long_as_they_are_asked_for() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let model = r.model_kv6("missing.kv6", 0);
+        r.ghost_model(model, FixedVec3::ZERO, Fixed::ZERO, 200);
+        r.ghost_model(model, FixedVec3::ZERO, Fixed::ZERO, 200);
+        assert_eq!(r.ghosts.targets.len(), 2);
+        r.ghost_clear();
+        assert!(r.ghosts.targets.is_empty());
+    }
+
+    /// Only a sprite has a silhouette to preview. An actor is eight cards
+    /// picked from a camera bearing -- previewing one means posing an
+    /// animation, and a magenta box in its place would be a worse answer
+    /// than nothing.
+    #[test]
+    fn only_a_sprite_can_be_ghosted() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let actor = r.model_actor("mobs/none", &["idle".to_string()], Fixed::from_int(2));
+        r.ghost_model(actor, FixedVec3::ZERO, Fixed::ZERO, 255);
+        r.ghost_model(9999, FixedVec3::ZERO, Fixed::ZERO, 255);
+        assert!(r.ghosts.targets.is_empty());
+    }
+
+    /// Alpha crosses the wall as a plain number, so it has to be clamped
+    /// rather than trusted: a wrapped 256 is a ghost that vanishes.
+    #[test]
+    fn a_ghosts_alpha_is_clamped_and_not_wrapped() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let model = r.model_kv6("missing.kv6", 0);
+        r.ghost_model(model, FixedVec3::ZERO, Fixed::ZERO, 4096);
+        r.ghost_model(model, FixedVec3::ZERO, Fixed::ZERO, -7);
+        assert_eq!(r.ghosts.targets[0].3, 255);
+        assert_eq!(r.ghosts.targets[1].3, 0);
     }
 }
