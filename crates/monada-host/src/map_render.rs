@@ -4728,12 +4728,14 @@ impl HostBridge for MapRender {
                         // maps across the cell's mirrored X span, row `ly` along Y.
                         let wx = (-cx * s - 1 - lx) as i32;
                         let wy = (cy * s + ly) as i32;
-                        for z in z0.min(z1)..=z0.max(z1) {
-                            grid.set_voxel(
-                                IVec3::new(wx, wy, (g - z) as i32),
-                                Some(VoxColor(color)),
-                            );
-                        }
+                        // One span per sub-column rather than one call per
+                        // voxel: the colour is constant down the column and
+                        // `set_rect` decomposes per chunk.
+                        grid.set_rect(
+                            IVec3::new(wx, wy, (g - z0.max(z1)) as i32),
+                            IVec3::new(wx, wy, (g - z0.min(z1)) as i32),
+                            Some(VoxColor(color)),
+                        );
                     }
                 }
             }
@@ -4776,9 +4778,16 @@ impl HostBridge for MapRender {
                 // maps across the cell's mirrored X span, row `ly` along Y.
                 let wx = (-x * s - 1 - lx) as i32;
                 let wy = (y * s + ly) as i32;
-                for z in floor..=top {
-                    grid.set_voxel(IVec3::new(wx, wy, (g - z) as i32), Some(VoxColor(color)));
-                }
+                // One span, not one call per voxel. A sub-column is a
+                // single colour by construction, and `set_rect` decomposes
+                // per chunk — the per-voxel loop this replaces was tens of
+                // millions of calls on a map of any size, which is minutes
+                // of startup.
+                grid.set_rect(
+                    IVec3::new(wx, wy, (g - top) as i32),
+                    IVec3::new(wx, wy, (g - floor) as i32),
+                    Some(VoxColor(color)),
+                );
             }
         }
     }
