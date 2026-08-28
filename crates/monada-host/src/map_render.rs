@@ -4905,9 +4905,32 @@ impl HostBridge for MapRender {
         tops: &[i64],
         tile: i64,
     ) {
+        // **The cell's column is this call's to own.** Painting a relief
+        // over whatever was there leaves every voxel the new surface does
+        // not reach exactly as it was -- the old shape, in the old colour,
+        // standing through the new one. Re-sculpting a hill and then
+        // repainting it showed the leftovers, and they read as the paint
+        // not having landed.
+        //
+        // The span cleared is the tallest of what the store says was here,
+        // what the map says is here now, and what this relief actually
+        // reaches: sub-column tops lean toward taller neighbours, so they
+        // can stand above the cell's own walkable height.
+        let ceiling = tops
+            .iter()
+            .copied()
+            .fold(walkable.max(self.terrain.ground_height(x, y)), i64::max);
+        if ceiling >= floor {
+            let world = self.world_grid();
+            let (lo, hi) = sim_box_to_world(x, y, floor, x, y, ceiling);
+            if let Some(grid) = self.scene.grid_mut(world) {
+                grid.set_rect(lo, hi, None);
+            }
+        }
         // The feet get one height per cell, as they always have: the
         // heightfield store is what `ground_height` and `nav_path` read,
         // and a pathfinder over sub-columns is a different engine.
+        self.terrain.clear_above(x, y, floor);
         self.terrain.fill(x, y, floor, x, y, walkable);
         let Some(cells) = self.tiles.get(tile as usize).cloned() else {
             return;
@@ -8475,6 +8498,53 @@ mod tests {
             "a malformed .rkc aborts the character model"
         );
     }
+    /// **A relief owns its cell's column.**
+    ///
+    /// Painting one over whatever was there left every voxel the new
+    /// surface did not reach exactly as it was: the old shape, in the old
+    /// colour, standing through the new one. Sculpt a hill, lower it, then
+    /// repaint, and the leftovers of the taller version are still there --
+    /// which reads as the paint not having landed, and reads that way only
+    /// where the ground has been shaped, because flat ground has no old
+    /// shape to leave behind.
+    #[test]
+    fn a_relief_leaves_nothing_of_the_shape_before_it() {
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([200, 100, 50, 255]))
+            .write_to(
+                &mut std::io::Cursor::new(&mut png),
+                image::ImageFormat::Png,
+            )
+            .expect("encode a tile");
+        let mut assets = BTreeMap::new();
+        assets.insert("t.png".to_string(), png);
+        let mut r = MapRender::new(assets, None, &[]);
+        let tile = r.tile("t.png");
+        assert!(tile >= 0, "the tile loaded");
+        let tall = 20;
+        let flat = [0i64; 256];
+        let raised = [tall; 256];
+
+        // A cell painted tall, then repainted low: nothing of the tall
+        // version may still be standing.
+        r.tile_relief(4, 4, -1, tall, &raised, tile);
+        let column = |r: &MapRender, z: i64| {
+            let world = r.world_grid.expect("a grid was painted");
+            let (lo, _) = sim_box_to_world(4, 4, z, 4, 4, z);
+            r.scene.grid(world).and_then(|g| g.voxel_color(lo)).is_some()
+        };
+        assert!(column(&r, tall), "the tall version was painted");
+
+        r.tile_relief(4, 4, -1, 0, &flat, tile);
+        assert!(column(&r, 0), "the low version is painted");
+        for z in 1..=tall {
+            assert!(
+                !column(&r, z),
+                "a voxel of the taller version is still standing at z {z}",
+            );
+        }
+    }
+
     /// **A cursor has to reach ground dug below the datum.**
     ///
     /// The march stopped at the datum plane, so a hollow — ground the
