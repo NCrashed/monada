@@ -626,6 +626,24 @@ pub(crate) fn register_terrain_api(
         },
     );
 
+    let b = bridge.clone();
+    let t = terrain.clone();
+    engine.register_fn(
+        "tile_relief_mixed",
+        move |x: i64, y: i64, floor: i64, walkable: i64, tops: Array, tiles: Array| {
+            let ints = |a: Array| -> Vec<i64> {
+                a.into_iter().map(|v| v.as_int().unwrap_or(0)).collect()
+            };
+            let (tops, tiles) = (ints(tops), ints(tiles));
+            t.lock()
+                .expect("terrain mutex")
+                .fill(x, y, floor, x, y, walkable);
+            b.lock()
+                .expect("bridge mutex")
+                .tile_relief_mixed(x, y, floor, walkable, &tops, &tiles);
+        },
+    );
+
     // Collision queries (sim coords). Deterministic: the store is a pure
     // function of the map's own paint calls, so every peer answers
     // identically — safe to feed hashed `tick()` decisions.

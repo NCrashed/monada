@@ -284,6 +284,11 @@ pub use volume::VolumeStore;
 /// writing a widget toolkit. Legal because the local layer is already
 /// outside the state hash: a `Context` reaches no further than `status`
 /// does. Scripted maps keep the `ui_*` surface; Rhai cannot hold the type.
+/// 40 = `tile_relief_mixed`: a tile per SUB-COLUMN rather than one per
+/// cell. One tile per cell makes every border between two grounds a
+/// staircase of whole cells -- the look Warcraft III spent blending sheets
+/// fighting. Sixteen times finer, a brush can paint the join instead of
+/// snapping it to the grid.
 /// 39 = `bake_ao_in`: the ambient-occlusion bake over one cell rectangle
 /// rather than the whole grid. The bake is written INTO the voxel colours,
 /// so terrain edited after one comes out unshaded against neighbours that
@@ -300,7 +305,7 @@ pub use volume::VolumeStore;
 /// sprite belonged to an entity, entities are simulation state, and the
 /// local layer may not make one, so showing what is about to be placed
 /// meant telling the simulation it had been.
-pub const HOST_API_VERSION: u32 = 39;
+pub const HOST_API_VERSION: u32 = 40;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -1251,6 +1256,32 @@ pub trait HostBridge: Send {
         _walkable: i64,
         _tops: &[i64],
         _tile: i64,
+    ) {
+    }
+
+    /// [`tile_relief`](Self::tile_relief) with a tile **per sub-column**
+    /// rather than one for the cell.
+    ///
+    /// **What a cell-sized tile cannot do is an edge.** One tile per cell
+    /// makes every border between two grounds a staircase of whole cells,
+    /// which is the look Warcraft III's editor had and spent its blending
+    /// sheets fighting. A tile per sub-column puts the border wherever the
+    /// map wants it, sixteen times finer, and a brush can then paint the
+    /// join rather than snap it.
+    ///
+    /// `tiles` is indexed like `tops`. A one-element slice paints the
+    /// whole cell with it, which is the common case and cheaper than
+    /// handing over the same id two hundred and fifty-six times; a short
+    /// slice falls back to its first entry rather than leaving holes.
+    #[allow(clippy::too_many_arguments)] // a cell, its span, its surface, its paint
+    fn tile_relief_mixed(
+        &mut self,
+        _x: i64,
+        _y: i64,
+        _floor: i64,
+        _walkable: i64,
+        _tops: &[i64],
+        _tiles: &[i64],
     ) {
     }
 

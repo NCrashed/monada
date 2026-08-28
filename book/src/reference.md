@@ -369,6 +369,7 @@ so a dock snap or a jump drive still snaps.
 | `bake_ao_in(x0, y0, x1, y1, strength, radius)` | the same bake over one inclusive cell rectangle, floor to ceiling. A bake is written INTO the voxel colours, so terrain edited afterwards comes out unshaded against neighbours that kept theirs -- what an editor needs after a brush stroke, since relighting the whole grid for one stroke is seconds of work (requires `host_api` 39) |
 | `cell_voxels()` | world voxels across one sim cell in x/y — the sub-column grid `tile_relief` addresses |
 | `tile_relief(x, y, floor, walkable, tops, tile)` | paint one cell whose surface is not flat: each sub-column runs `floor..=tops[ly*s + lx]`, `walkable` is the single height collision and pathing see. How a column map stops looking like a staircase — and `floor` is what keeps a hollow a dip rather than a hole |
+| `tile_relief_mixed(x, y, floor, walkable, tops, tiles)` | the same, with a tile **per sub-column** rather than one for the cell. One tile per cell makes every border between two grounds a staircase of whole cells; a tile per sub-column puts the border where the map wants it, sixteen times finer, so a brush can paint a join instead of snapping it. `tiles` is indexed like `tops`; a one-element array paints the whole cell (requires `host_api` 40) |
 
 ## Selection and status — *presentation*
 

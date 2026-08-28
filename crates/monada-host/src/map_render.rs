@@ -4905,6 +4905,18 @@ impl HostBridge for MapRender {
         tops: &[i64],
         tile: i64,
     ) {
+        self.tile_relief_mixed(x, y, floor, walkable, tops, &[tile]);
+    }
+
+    fn tile_relief_mixed(
+        &mut self,
+        x: i64,
+        y: i64,
+        floor: i64,
+        walkable: i64,
+        tops: &[i64],
+        tiles: &[i64],
+    ) {
         // **The cell's column is this call's to own.** Painting a relief
         // over whatever was there leaves every voxel the new surface does
         // not reach exactly as it was -- the old shape, in the old colour,
@@ -4932,9 +4944,16 @@ impl HostBridge for MapRender {
         // and a pathfinder over sub-columns is a different engine.
         self.terrain.clear_above(x, y, floor);
         self.terrain.fill(x, y, floor, x, y, walkable);
-        let Some(cells) = self.tiles.get(tile as usize).cloned() else {
+        // Every tile this cell names, resolved once. A border cell asks
+        // for two or three of them and a plain one for a single tile, so
+        // the lookup is per cell rather than per sub-column.
+        let palette: Vec<Option<Vec<u32>>> = tiles
+            .iter()
+            .map(|&t| usize::try_from(t).ok().and_then(|i| self.tiles.get(i).cloned()))
+            .collect();
+        if palette.iter().all(Option::is_none) {
             return;
-        };
+        }
         let s = SCALE as i64;
         let g = GROUND_Z as i64;
         let world = self.world_grid();
@@ -4943,10 +4962,16 @@ impl HostBridge for MapRender {
         };
         for ly in 0..s {
             for lx in 0..s {
-                let Some(&top) = tops.get((ly * s + lx) as usize) else {
+                let i = (ly * s + lx) as usize;
+                let Some(&top) = tops.get(i) else {
                     continue; // a short slice leaves the rest unpainted
                 };
-                let color = cells[(ly * s + lx) as usize];
+                // A one-entry slice is a plain cell; a short one falls
+                // back to its first rather than leaving holes.
+                let Some(Some(cells)) = palette.get(i).or_else(|| palette.first()) else {
+                    continue;
+                };
+                let color = cells[i];
                 // World X is mirrored (see `world_of`); tile column `lx`
                 // maps across the cell's mirrored X span, row `ly` along Y.
                 let wx = (-x * s - 1 - lx) as i32;

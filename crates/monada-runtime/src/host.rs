@@ -913,6 +913,34 @@ pub trait Host: WorldRead {
         }
     }
 
+    /// [`tile_relief`](Self::tile_relief) with a tile per sub-column.
+    ///
+    /// One tile per cell makes every border between two grounds a
+    /// staircase of whole cells. A tile per sub-column puts the border
+    /// where the map wants it, sixteen times finer, so a brush can paint a
+    /// join instead of snapping it to the grid. `tiles` is indexed like
+    /// `tops`; a one-element slice paints the whole cell with it.
+    fn tile_relief_mixed(
+        &self,
+        x: i64,
+        y: i64,
+        floor: i64,
+        walkable: i64,
+        tops: &[i64],
+        tiles: &[i64],
+    ) {
+        if let Some(t) = self.terrain() {
+            t.lock()
+                .expect("terrain mutex")
+                .fill(x, y, floor, x, y, walkable);
+        }
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .tile_relief_mixed(x, y, floor, walkable, tops, tiles);
+        }
+    }
+
     /// Mark or clear a cell as impassable for navigation (building
     /// footprints, props) — an overlay the pathfinder ANDs with the
     /// heightfield walk rule.
