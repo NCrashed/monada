@@ -366,6 +366,7 @@ so a dock snap or a jump drive still snaps.
 | `set_sky(path)` | load a sky panorama from an asset |
 | `set_sky_color(color)` | flat `0xRRGGBB` background a ray that hits nothing lands on; black suits a fogged outdoor map, where the fog's known twin has no geometry over ground nobody has been near |
 | `bake_ao(strength, radius)` | bake ambient occlusion into the world grid once the terrain is painted; `strength` in hundredths, `radius` in voxels. Under a light rig the baked byte IS the ambient fill, so without it terrain meeting terrain has nothing to mark it |
+| `bake_ao_in(x0, y0, x1, y1, strength, radius)` | the same bake over one inclusive cell rectangle, floor to ceiling. A bake is written INTO the voxel colours, so terrain edited afterwards comes out unshaded against neighbours that kept theirs -- what an editor needs after a brush stroke, since relighting the whole grid for one stroke is seconds of work (requires `host_api` 39) |
 | `cell_voxels()` | world voxels across one sim cell in x/y — the sub-column grid `tile_relief` addresses |
 | `tile_relief(x, y, floor, walkable, tops, tile)` | paint one cell whose surface is not flat: each sub-column runs `floor..=tops[ly*s + lx]`, `walkable` is the single height collision and pathing see. How a column map stops looking like a staircase — and `floor` is what keeps a hollow a dip rather than a hole |
 

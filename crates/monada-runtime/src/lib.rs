@@ -284,6 +284,15 @@ pub use volume::VolumeStore;
 /// writing a widget toolkit. Legal because the local layer is already
 /// outside the state hash: a `Context` reaches no further than `status`
 /// does. Scripted maps keep the `ui_*` surface; Rhai cannot hold the type.
+/// 39 = `bake_ao_in`: the ambient-occlusion bake over one cell rectangle
+/// rather than the whole grid. The bake is written INTO the voxel colours,
+/// so terrain edited after one comes out unshaded against neighbours that
+/// kept theirs -- invisible on flat ground, where there is no occlusion to
+/// lose, and on a hill it reads as the paint having failed. An editor has
+/// to relight what it just moved, and relighting a whole map per brush
+/// stroke is seconds of work. roxlap has had the regional bake all along
+/// (`Grid::bake_bbox`, the carve-relight primitive); only the verb was
+/// whole-grid.
 /// 38 = `ghost_clear`/`ghost_model`: a translucent preview of a model, drawn
 /// for one frame. An editor's placement ghost has to be the prop's own
 /// silhouette -- that is the thing being judged -- and the gizmo outlines
@@ -291,7 +300,7 @@ pub use volume::VolumeStore;
 /// sprite belonged to an entity, entities are simulation state, and the
 /// local layer may not make one, so showing what is about to be placed
 /// meant telling the simulation it had been.
-pub const HOST_API_VERSION: u32 = 38;
+pub const HOST_API_VERSION: u32 = 39;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -1265,6 +1274,17 @@ pub trait HostBridge: Send {
     /// edited afterwards keeps the bake it had until the next call.
     /// Render-side only; the default ignores it.
     fn bake_ao(&mut self, _strength: i64, _radius: i64) {}
+
+    /// [`bake_ao`](Self::bake_ao) over one inclusive cell rectangle,
+    /// floor to ceiling.
+    ///
+    /// **What an editor needs.** A bake is written INTO the voxel
+    /// colours, so terrain repainted after one comes out unshaded while
+    /// everything around it keeps its shading — invisible on flat ground,
+    /// where there is no occlusion to lose, and glaring on a hill. Baking
+    /// the whole grid for one brush stroke is seconds of work; this is the
+    /// same relight over the cells that actually moved.
+    fn bake_ao_in(&mut self, _lo: (i64, i64), _hi: (i64, i64), _strength: i64, _radius: i64) {}
 
     /// Register a marching-squares transition sheet (a 4×4 `.png`) for terrain
     /// type `high` blended over `low` (higher type id = higher priority). Used

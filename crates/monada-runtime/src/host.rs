@@ -501,6 +501,23 @@ pub trait WorldRead {
         }
     }
 
+    /// [`bake_ao`](Self::bake_ao) over one inclusive cell rectangle.
+    ///
+    /// The bake is written into the voxel colours, so ground repainted
+    /// after one comes out unshaded against neighbours that still carry
+    /// theirs. On flat terrain there is no occlusion to lose and nothing
+    /// shows; on a hill the patch goes flat and bright, which reads as the
+    /// paint having failed rather than as the light being stale. Editing
+    /// terrain means relighting it, and relighting the whole grid for one
+    /// stroke is seconds of work.
+    fn bake_ao_in(&self, lo: (i64, i64), hi: (i64, i64), strength: i64, radius: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .bake_ao_in(lo, hi, strength, radius);
+        }
+    }
+
     /// World voxels across one sim cell in x/y, or `0` headless. What a
     /// column map needs to say anything finer than a cell.
     fn cell_voxels(&self) -> i64 {

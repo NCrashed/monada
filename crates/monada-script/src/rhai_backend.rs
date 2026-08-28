@@ -594,6 +594,16 @@ pub(crate) fn register_terrain_api(
         b.lock().expect("bridge mutex").bake_ao(strength, radius);
     });
 
+    let b = bridge.clone();
+    engine.register_fn(
+        "bake_ao_in",
+        move |x0: i64, y0: i64, x1: i64, y1: i64, strength: i64, radius: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .bake_ao_in((x0, y0), (x1, y1), strength, radius);
+        },
+    );
+
     // One cell whose surface is not flat. The feet still get a cell; only
     // the eye gets the relief.
     let b = bridge.clone();

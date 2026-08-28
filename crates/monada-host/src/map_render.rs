@@ -58,6 +58,12 @@ const WHITE_TINT: u32 = 0x00FF_FFFF;
 /// Reserved model 0: the selection-highlight marker the host draws on the
 /// locally selected entity. Map-defined models start at 1.
 const HIGHLIGHT_MODEL: usize = 0;
+/// How far above and below the datum a regional AO bake reaches, in sim
+/// z. A column map's terrain lives well inside this; the box has to clear
+/// it in both directions, because relighting half a hill shades it
+/// against air that is not there.
+const BAKE_DEPTH: i64 = 256;
+
 /// Reserved material palette id for placement ghosts, taken from the far
 /// end so that map-facing material ids, whenever there are any, can grow
 /// from 1 without meeting it. Id 0 is roxlap's locked opaque entry.
@@ -4921,6 +4927,25 @@ impl HostBridge for MapRender {
             ..roxlap_core::AoParams::default()
         };
         grid.bake(roxlap_scene::BakeMode::AmbientOcclusion(params));
+    }
+
+    fn bake_ao_in(&mut self, lo: (i64, i64), hi: (i64, i64), strength: i64, radius: i64) {
+        let world = self.world_grid();
+        let Some(grid) = self.scene.grid_mut(world) else {
+            return;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let params = roxlap_core::AoParams {
+            strength: strength.clamp(0, 100) as f32 / 100.0,
+            radius: radius.clamp(1, 8) as i32,
+            ..roxlap_core::AoParams::default()
+        };
+        // The cells' whole world span in z, not a slice of it: a bake
+        // reads the shape around a voxel, so relighting only part of a
+        // hill would shade it against air that is not there. `BAKE_DEPTH`
+        // is a column map's whole range with room to spare.
+        let (blo, bhi) = sim_box_to_world(lo.0, lo.1, -BAKE_DEPTH, hi.0, hi.1, BAKE_DEPTH);
+        grid.bake_bbox(blo, bhi, roxlap_scene::BakeMode::AmbientOcclusion(params));
     }
 
     fn transition(&mut self, low: i64, high: i64, asset_path: &str) {
