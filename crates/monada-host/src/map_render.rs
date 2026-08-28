@@ -1450,10 +1450,22 @@ fn drag_quad_sim(yaw: f64, a: (f64, f64), b: (f64, f64)) -> [(f64, f64); 4] {
 
 /// Intersect a world ray with the board plane `z = GROUND_Z`.
 fn ground_hit(origin: DVec3, dir: DVec3) -> Option<DVec3> {
+    plane_hit(origin, dir, 0)
+}
+
+/// Where a ray crosses the horizontal plane at sim height `z`, or `None`
+/// if it never does.
+///
+/// The datum is not the only plane worth asking about: a map that digs
+/// below it has ground the datum plane sits *above*, and a cursor that
+/// stopped at the datum would answer with a point in mid-air over the
+/// hollow it was pointing into.
+fn plane_hit(origin: DVec3, dir: DVec3, z: i64) -> Option<DVec3> {
     if dir.z.abs() < 1e-9 {
         return None;
     }
-    let t = (GROUND_Z - origin.z) / dir.z;
+    #[allow(clippy::cast_precision_loss)]
+    let t = (GROUND_Z - z as f64 - origin.z) / dir.z;
     (t > 0.0).then(|| origin + dir * t)
 }
 
@@ -3095,7 +3107,20 @@ impl MapRender {
         // exactly the old plane intersection; the plane stays the fallback
         // for rays that never meet painted terrain. Render-side only.
         let plane = ground_hit(origin, dir)?;
-        let t_plane = (plane - origin).length();
+        // March as far as the LOWEST ground the map has, not as far as the
+        // datum. A hollow dug below the datum is ground the datum plane
+        // sits above, so a march that stopped there never met the surface
+        // and fell back to the plane -- and the cursor answered with a
+        // point in mid-air over the hollow it was pointing into. Every
+        // brush then worked a few cells short of where it was aimed, which
+        // is the shape of "it paints hills and not hollows".
+        // One past the lowest, not level with it: the march stops when the
+        // ray gets BELOW the surface, so a cap exactly at the deepest
+        // ground is reached before that ever happens and the fallback
+        // fires on the very cell the ray was aimed at.
+        let floor = self.terrain.lowest().min(0) - 1;
+        let far = plane_hit(origin, dir, floor).unwrap_or(plane);
+        let t_plane = (far - origin).length();
         let below = |t: f64| {
             let p = origin + dir * t;
             let (sx, sy) = sim_of(p);
@@ -3111,6 +3136,8 @@ impl MapRender {
             t += step;
         }
         if t >= t_plane {
+            // Off the terrain altogether: the datum is still the honest
+            // answer for a ray that met no ground at all.
             return Some(sim_of(plane));
         }
         let (mut lo, mut hi) = ((t - step).max(0.0), t);
@@ -8448,6 +8475,51 @@ mod tests {
             "a malformed .rkc aborts the character model"
         );
     }
+    /// **A cursor has to reach ground dug below the datum.**
+    ///
+    /// The march stopped at the datum plane, so a hollow — ground the
+    /// datum sits *above* — was never met, and the pick fell back to the
+    /// plane: a point in mid-air over the hollow being pointed into.
+    /// Every brush then worked several cells short of where it was aimed,
+    /// which reads as "it paints hills and not hollows".
+    #[test]
+    fn the_cursor_reaches_into_a_hollow() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        // Flat ground with a wide pit dug well below the datum.
+        for y in 0..16 {
+            for x in 0..16 {
+                r.voxel_fill(x, y, -1, x, y, 0, 0x8040_4040);
+            }
+        }
+        let floor: i64 = -40;
+        for y in 2..11 {
+            for x in 2..11 {
+                r.voxel_clear(x, y, -1);
+                r.voxel_fill(x, y, floor - 1, x, y, floor, 0x8040_4040);
+            }
+        }
+
+        // A slanted ray, the way a camera looks: it crosses the datum
+        // inside the pit's mouth and goes on to the floor. The two answers
+        // are cells apart, which is the whole point -- a vertical ray
+        // cannot tell them apart and so cannot test this.
+        let target = world_of(FixedVec3::new(
+            Fixed::from_int(6),
+            Fixed::from_int(6),
+            #[allow(clippy::cast_possible_truncation)]
+            Fixed::from_int(floor as i32),
+        ));
+        let dir = DVec3::new(1.0, 0.0, 1.0).normalize();
+        let origin = target - dir * 400.0;
+        let (x, y) = r.ground_sim(origin, dir).expect("the ray meets ground");
+        let cell = |v: f64| (v + 0.5).floor() as i64;
+        assert_eq!(
+            (cell(x), cell(y)),
+            (6, 6),
+            "the pick landed at {x},{y}, not in the pit it was aimed at",
+        );
+    }
+
     /// **The pick and the placement must agree about where a cell is.**
     ///
     /// `world_of` seats a sim coordinate at the centre of its cell; the
