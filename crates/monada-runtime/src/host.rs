@@ -1281,6 +1281,28 @@ pub trait LocalHost: WorldRead {
                 .ghost_model(model, pos, yaw, alpha);
         }
     }
+
+    /// Whether the fog of war is showing `at` to THIS client right now.
+    ///
+    /// `true` where there is no fog, where the point is outside the fog
+    /// grid, and where the cell is lit -- so a map that never declared an
+    /// observer sees everything, which is what it drew before this
+    /// existed.
+    ///
+    /// **Here rather than on [`WorldRead`], and that is the whole point.**
+    /// Two players see different fog by design (`docs/plan.md` N3), so a
+    /// simulation that could ask this would fold a per-client answer into
+    /// a shared state -- the exact shape of a desync. The gesture layer
+    /// may ask because nothing it does with the answer is hashed.
+    ///
+    /// What it is for is everything a map draws *about* a body rather than
+    /// as one: a health bar, a name, a threat marker. The renderer culls
+    /// the body itself, and an overlay that did not ask would hang in the
+    /// dark pointing at what the fog is hiding.
+    fn point_visible(&self, at: FixedVec3) -> bool {
+        self.bridge()
+            .is_none_or(|b| b.lock().expect("bridge mutex").point_visible(at))
+    }
 }
 
 /// An inclusive box of sim cells.

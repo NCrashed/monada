@@ -5694,6 +5694,27 @@ impl HostBridge for MapRender {
         self.ghosts.actor = None;
     }
 
+    fn point_visible(&mut self, at: FixedVec3) -> bool {
+        // No fog, no mask yet, or a point off the fog grid: open ground.
+        // The same three answers the renderer's own sprite cull gives, and
+        // deliberately so -- an overlay that disagreed with the body it is
+        // about would hang in the dark or vanish over a lit one.
+        let (Some(fow), Some(gid)) = (self.fow.as_ref(), self.vision_grid()) else {
+            return true;
+        };
+        let Some(grid) = self.scene.grid(gid) else {
+            return true;
+        };
+        let Some(footprint) = grid.footprint_cells() else {
+            return true;
+        };
+        !fow.hides_sprite(
+            &grid.transform,
+            footprint,
+            entity_world_of_in(self.volume, at),
+        )
+    }
+
     fn ghost_model(&mut self, model: i64, pos: FixedVec3, yaw: Fixed, alpha: i64) {
         let Some(&kind) = usize::try_from(model)
             .ok()
@@ -8947,6 +8968,24 @@ mod tests {
     }
 
     /// Immediate mode: what a frame asked for is what a frame gets, and a
+    /// **A map with no fog sees everything, and must say so.** The
+    /// question is asked by anything a map draws about a body -- a health
+    /// bar, a name -- and answering "hidden" where there is no mask would
+    /// blank every one of them on every map that never declared an
+    /// observer, which is most of them.
+    #[test]
+    fn nothing_is_hidden_where_there_is_no_fog() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        assert!(r.fow.is_none(), "no observer was declared");
+        for at in [
+            FixedVec3::ZERO,
+            FixedVec3::new(Fixed::from_int(40), Fixed::from_int(40), Fixed::ZERO),
+            FixedVec3::new(-Fixed::from_int(9), Fixed::from_int(900), Fixed::ZERO),
+        ] {
+            assert!(r.point_visible(at));
+        }
+    }
+
     /// map that stops asking stops drawing. The actor preview outlives its
     /// frame on the renderer's side, but the REQUEST does not -- a frame
     /// that asks for nothing is what retires it.

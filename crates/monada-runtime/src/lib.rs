@@ -289,6 +289,13 @@ pub use volume::VolumeStore;
 /// staircase of whole cells -- the look Warcraft III spent blending sheets
 /// fighting. Sixteen times finer, a brush can paint the join instead of
 /// snapping it to the grid.
+/// 42 = `LocalHost::point_visible`: whether the fog is showing a point to
+/// THIS client. A map draws things ABOUT a body as well as the body --
+/// a health bar, a name, a threat marker -- and the renderer culls only
+/// the body, so an overlay hung in the dark points at exactly what the
+/// fog is hiding. On `LocalHost` and nowhere else: two players see
+/// different fog by design, so a simulation able to ask this would fold a
+/// per-client answer into shared state, which is the shape of a desync.
 /// 41 = `ghost_model` takes an actor, not only a sprite. An editor placing
 /// characters had an outline and no silhouette, which is the half of the
 /// preview that says WHAT is about to go down -- and a catalogue of
@@ -315,7 +322,7 @@ pub use volume::VolumeStore;
 /// sprite belonged to an entity, entities are simulation state, and the
 /// local layer may not make one, so showing what is about to be placed
 /// meant telling the simulation it had been.
-pub const HOST_API_VERSION: u32 = 41;
+pub const HOST_API_VERSION: u32 = 42;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -1012,6 +1019,16 @@ pub trait HostBridge: Send {
     /// place without lying to the simulation about having placed it.
     /// Ghosts cast no shadow and take no part in picking.
     fn ghost_model(&mut self, _model: i64, _pos: FixedVec3, _yaw: Fixed, _alpha: i64) {}
+
+    /// Whether the fog is showing `at` to this client. See
+    /// [`LocalHost::point_visible`](crate::LocalHost::point_visible) for
+    /// why only the local layer may ask.
+    ///
+    /// `true` by default: a host with no fog shows everything, and so does
+    /// one that has not armed a mask yet.
+    fn point_visible(&mut self, _at: FixedVec3) -> bool {
+        true
+    }
 
     /// The sim-space yaw (radians, fixed-point) from the local player /
     /// camera focus toward the cursor's ground point. Holds its last
