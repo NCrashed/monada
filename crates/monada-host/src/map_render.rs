@@ -39,8 +39,9 @@ use roxlap_formats::{OverlayColor, Rgb, VoxColor};
 use roxlap_render::gif_import::{voxel_clip_from_gif, GifImportOpts};
 use roxlap_render::{
     ActorFacing, ActorState, BillboardActorDef, BillboardActorId, BillboardMode, BillboardUp,
-    CharacterId, DynSpriteTransform, FrameParams, Line3, SceneRenderer, SpriteInstanceDesc,
-    SpriteSet, ViewCutout, VoxelClipId,
+    CharacterId, CollisionMode, DynSpriteTransform, FrameParams, Line3, ParticleEmitterDef,
+    ParticleSystem, SceneRenderer, SpawnMode, SpriteInstanceDesc, SpriteSet, VelocityDef,
+    ViewCutout, VoxelClipId,
 };
 use roxlap_scene::fow::{DeckBand, FogOfWar, FowObserver, FowTwin, VisionConfig};
 use roxlap_scene::{addr, GridId, GridTransform, RayHit, Scene};
@@ -869,6 +870,43 @@ fn rot90_cw(mut sprite: Sprite) -> Sprite {
 /// (only positions move, so the sprite frustum-cull is unaffected); the
 /// grid accepts negative coords (`roxlap-scene` addr is `div_euclid`-based).
 /// `voxel_fill` and the pick inverse mirror X to match.
+/// The particle system's own seed. Fixed rather than the world's: what a
+/// burst scatters is decoration, no peer compares it, and a session that
+/// replayed the same explosion differently would be no less correct.
+const SPARK_SEED: u64 = 0x5061_7274_6963_6c65;
+
+/// How big a particle is drawn, in voxels a side. Two is a speck at this
+/// game's zoom and a cube at a chess board's; scale on the emitter is what
+/// tunes it per burst.
+const SPARK_VOXELS: u32 = 2;
+
+/// The most pieces one burst may ask for.
+///
+/// A guard rather than a budget: the particle system has its own ceiling
+/// and drops what it cannot hold, but a map that asked for a million
+/// would spend the frame counting them first.
+const SPARK_CAP: u32 = 256;
+
+/// A particle: a small white cube. White because the emitter's tint is
+/// what colours it, so one model serves water, sparks and dust.
+fn spark_kv6() -> Kv6 {
+    Kv6::solid_cube(SPARK_VOXELS, VoxColor(0x80_FF_FF_FF))
+}
+
+/// One burst a map asked for, waiting for a frame to happen.
+struct Spark {
+    /// Where it goes off, in world space.
+    at: DVec3,
+    /// How many pieces fly out.
+    count: u32,
+    /// How fast they leave, in world units per second.
+    speed: f32,
+    /// How long they last, in seconds.
+    life: f32,
+    /// `0xRRGGBB`, tinted over a white model.
+    tint: u32,
+}
+
 fn world_of(p: FixedVec3) -> DVec3 {
     DVec3::new(
         -(p.x.to_f64() + 0.5) * SCALE,
@@ -1709,6 +1747,20 @@ pub struct MapRender {
     /// per-frame marker instances through add/remove_sprite_instance.
     /// Actor-less maps (chess) keep the static path (`set_sprites` runs
     /// every frame there and carries the marker itself).
+    /// One-shot particle bursts — a spell going off, something breaking.
+    ///
+    /// Render-side and never hashed: a map asks for a burst the way it asks
+    /// for a sound, and a headless peer draws none. Its own seed rather
+    /// than the world's, because what it scatters is not something two
+    /// peers have to agree about.
+    sparks: ParticleSystem,
+    /// The particle's own model, registered the first time one is asked
+    /// for. White, because the tint does the colouring.
+    spark_model: Option<roxlap_render::SpriteModelId>,
+    /// Bursts asked for since the last frame. A map calls `burst` from its
+    /// tick, which is not inside a frame, so they queue until there is a
+    /// renderer to register a model with.
+    spark_queue: Vec<Spark>,
     ring_model: Option<roxlap_render::SpriteModelId>,
     /// Live ring instance ids, torn down and re-issued each frame.
     ring_ids: Vec<roxlap_render::SpriteInstanceId>,
@@ -1944,6 +1996,9 @@ impl MapRender {
             highlighted: BTreeSet::new(),
             camera_grid: None,
             camera_follow: None,
+            sparks: ParticleSystem::new(SPARK_SEED),
+            spark_model: None,
+            spark_queue: Vec::new(),
             ring_model: None,
             ring_ids: Vec::new(),
             prop_targets: Vec::new(),
@@ -3608,6 +3663,50 @@ impl MapRender {
     /// create / move / restate / retire one [`BillboardActorId`] per
     /// actor-bound entity from the targets `build_instances` computed, and
     /// advance the renderer's animation + facing. Render-side only.
+    /// Let out whatever bursts were asked for, then carry every particle
+    /// already in the air one frame.
+    ///
+    /// Emitters are added and retired in the same breath: a burst is one
+    /// puff of particles and then nothing, and an emitter left behind
+    /// would be a slot held for the rest of the map. The particles it
+    /// already spawned outlive it — the system keeps the state a live
+    /// particle needs until the last of them dies.
+    fn update_sparks(&mut self, renderer: &mut SceneRenderer, dt: f64) {
+        if !self.spark_queue.is_empty() {
+            // Registered on first use rather than in `new`: most maps
+            // never throw anything, and a model costs an upload.
+            let model = *self
+                .spark_model
+                .get_or_insert_with(|| renderer.add_sprite_model(&spark_kv6()));
+            for spark in std::mem::take(&mut self.spark_queue) {
+                let id = self.sparks.add_emitter(ParticleEmitterDef {
+                    pos: [spark.at.x as f32, spark.at.y as f32, spark.at.z as f32],
+                    spawn: SpawnMode::Burst(spark.count),
+                    lifetime: spark.life..spark.life * 1.6,
+                    velocity: VelocityDef {
+                        spread: spark.speed,
+                        ..VelocityDef::default()
+                    },
+                    // Killed by the floor rather than bounced: what this
+                    // draws is a splash, and a splash that skittered would
+                    // read as gravel.
+                    collision: CollisionMode::Kill,
+                    scale: 1.0,
+                    scale_end: Some(0.3),
+                    fade_out_frac: 0.4,
+                    tint: Rgb(spark.tint),
+                    ..ParticleEmitterDef::new(model)
+                });
+                self.sparks.remove_emitter(id);
+            }
+        }
+        // Nothing in the air is the common case, and stepping an empty
+        // system every frame of every map is a cost nobody asked for.
+        if self.sparks.emitter_count() > 0 {
+            self.sparks.tick_with_scene(renderer, dt, &self.scene);
+        }
+    }
+
     fn update_actors(&mut self, renderer: &mut SceneRenderer, camera: &Camera, dt: f64) {
         if self.actors.is_empty() {
             return;
@@ -3837,6 +3936,7 @@ impl MapRender {
         }
         self.update_actors(renderer, camera, dt);
         self.update_characters(renderer, dt);
+        self.update_sparks(renderer, dt);
         self.sync_props(renderer);
         self.sync_rings(renderer);
         self.sync_ghosts(renderer);
@@ -4306,6 +4406,24 @@ impl MapRender {
 // All-integer / FixedVec3 signatures — no roxlap types cross into
 // monada-script; this impl is the host side of the wall.
 impl HostBridge for MapRender {
+    fn burst(&mut self, at: FixedVec3, count: i64, speed: Fixed, life: Fixed, color: i64) {
+        // A burst of nothing is a call a map made for no reason, and one
+        // that lasts no time is a frame nobody sees. Both are silently
+        // dropped rather than queued: this is decoration, and refusing it
+        // loudly would be worse than not drawing it.
+        let count = u32::try_from(count).unwrap_or(0).min(SPARK_CAP);
+        if count == 0 || life <= Fixed::ZERO {
+            return;
+        }
+        self.spark_queue.push(Spark {
+            at: world_of(at),
+            count,
+            speed: (speed.to_f64() * SCALE) as f32,
+            life: life.to_f64() as f32,
+            tint: (color as u32) & 0x00FF_FFFF,
+        });
+    }
+
     fn model_box(&mut self, w: i64, h: i64, d: i64, color: i64) -> i64 {
         self.sprites
             .models

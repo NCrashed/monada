@@ -263,7 +263,7 @@ pub trait WorldRead {
         if let Some(b) = self.bridge() {
             b.lock()
                 .expect("bridge mutex")
-                .entity_set_lift(entity.0 as i64, cells);
+                .entity_set_lift(entity_arg(entity), cells);
         }
     }
 
@@ -583,6 +583,24 @@ pub trait WorldRead {
 
     /// Play a one-shot sound. Identical sounds fired the same frame are
     /// de-duplicated, so a wave of attackers plays it once, not stacked.
+    /// Scatter a one-shot burst of particles at `at` — a spell going off,
+    /// something breaking.
+    ///
+    /// `count` pieces leaving at `speed` **cells per second**, each
+    /// lasting about `life` seconds, tinted `0xRRGGBB`.
+    ///
+    /// **Drawing only, like a sound.** Nothing it scatters is hashed, a
+    /// headless peer makes none, and no two peers compare them — so a map
+    /// may call it from its tick without leaving the determinism contract,
+    /// exactly as it calls `play_sound` and `entity_set_anim`.
+    fn burst(&self, at: FixedVec3, count: i64, speed: Fixed, life: Fixed, color: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .burst(at, count, speed, life, color);
+        }
+    }
+
     fn play_sound(&self, asset_path: &str) {
         if let Some(b) = self.bridge() {
             b.lock().expect("bridge mutex").play_sound(asset_path);

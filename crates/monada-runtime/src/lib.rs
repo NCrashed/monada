@@ -329,7 +329,7 @@ pub use volume::VolumeStore;
 /// sprite belonged to an entity, entities are simulation state, and the
 /// local layer may not make one, so showing what is about to be placed
 /// meant telling the simulation it had been.
-pub const HOST_API_VERSION: u32 = 43;
+pub const HOST_API_VERSION: u32 = 44;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -1206,6 +1206,15 @@ pub trait HostBridge: Send {
 
     /// Play a one-shot sound (`assets/…` path). Many different sounds mix in
     /// parallel; identical ones are de-duplicated per frame + debounced.
+    /// Scatter a one-shot burst of particles at `at`: `count` pieces
+    /// leaving at `speed` cells per second, each lasting about `life`
+    /// seconds, tinted `0xRRGGBB`.
+    ///
+    /// **Decoration, and render-side.** A headless peer draws none and a
+    /// replay does not compare them, which is why this takes no seed and
+    /// promises no particular scatter -- what it is for is telling a
+    /// player that something went off, and where.
+    fn burst(&mut self, _at: FixedVec3, _count: i64, _speed: Fixed, _life: Fixed, _color: i64) {}
     fn play_sound(&mut self, _asset_path: &str) {}
     /// [`play_sound`](Self::play_sound) with an explicit gain (`0..1`, clamped).
     fn play_sound_gain(&mut self, _asset_path: &str, _gain: Fixed) {}
