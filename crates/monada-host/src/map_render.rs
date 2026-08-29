@@ -69,6 +69,17 @@ const BAKE_DEPTH: i64 = 256;
 /// from 1 without meeting it. Id 0 is roxlap's locked opaque entry.
 const GHOST_MATERIAL: u8 = 255;
 
+/// How thick the selection ring's band is, in world voxels of a sprite a
+/// little over a cell across.
+///
+/// A hairline that says where a unit stands without drawing attention to
+/// itself -- the marker is the answer to "which one is selected", and at
+/// two and a half voxels it read as a painted circle the unit was standing
+/// in. Thin enough to be a line, thick enough to survive a shallow camera.
+///
+/// A feel parameter -- tune it against the running game.
+const RING_THICKNESS: f64 = 1.25;
+
 /// Model 0: a flat amber selection ring circling the selected entity's
 /// footprint on the ground under the sprite — the classic RTS read (a
 /// multi-selected squad shows one ring per unit). Same placement contract
@@ -77,7 +88,7 @@ const GHOST_MATERIAL: u8 = 255;
 fn selection_ring() -> Sprite {
     let d = SCALE as u32 + 4; // a hair wider than the cell
     let c = f64::from(d - 1) * 0.5;
-    let (r_out, r_in) = (c, c - 2.5);
+    let (r_out, r_in) = (c, c - RING_THICKNESS);
     let kv6 = Kv6::from_fn(d, d, 2, |x, y, _z| {
         let (dx, dy) = (f64::from(x) - c, f64::from(y) - c);
         let d2 = dx.mul_add(dx, dy * dy);
