@@ -2738,7 +2738,21 @@ impl MapRender {
             (Some(g), None) => Some(g),
             (None, f) => f,
         };
-        if let (true, Some(rot)) = (self.dynamic_layer(), rot) {
+        // **On a dynamic-layer map, EVERY model-bound entity rides the
+        // dynamic layer -- rotated or not.** The static set is uploaded
+        // exactly once there, so the static path is only correct for a map
+        // that re-uploads every frame (chess). Anything seated on it after
+        // that upload is not merely frozen, as the note above describes:
+        // an entity SPAWNED later was never in the upload at all and never
+        // appears. A spell that raises a model mid-fight is invisible, and
+        // so is a prop the editor puts down.
+        //
+        // The cost is that a still prop is torn down and re-issued each
+        // frame with the moving ones. That is the trade `sync_props`
+        // already makes, and a map's props are dozens rather than
+        // thousands.
+        if self.dynamic_layer() {
+            let rot = rot.unwrap_or(DQuat::IDENTITY);
             // The pivot-drop offset (`sync_props`) turns with `drop_rot`, not
             // the full `rot`: it exists so a hull rolled onto its side pushes
             // a resting crate sideways instead of down (the grid tipping the
