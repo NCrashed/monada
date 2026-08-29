@@ -4310,16 +4310,26 @@ impl HostBridge for MapRender {
             return -1;
         }
 
-        // Measure the *opaque* bounding box across every frame of every state /
-        // side, so transparent padding around the art doesn't shrink the
-        // character or lift it off the ground. Size and ground from that box,
-        // uniformly (so the character stays one size and grounded as it
-        // animates), instead of the raw frame `dims`.
+        // Measure the *opaque* bounding box over every frame and side of the
+        // FIRST state — the idle, by convention — so transparent padding
+        // around the art doesn't shrink the character or lift it off the
+        // ground. Size and ground every state against that one box, so the
+        // character stays one size and grounded as it animates.
+        //
+        // The first state rather than all of them, for the reason
+        // `model_character` already measures its first clip: **a death
+        // sprawl reaches past a standing figure at both ends**, and folded
+        // into the box it shrinks the idle pose and grounds it below its own
+        // feet — a character that stands smaller and floats, the moment its
+        // art gains an animation that lies down. Measured on real art: a
+        // standing hero spanned `z 23..=64` and its death `z 11..=75`, so
+        // merging left the idle 65% of its size, hanging twelve voxels up.
+        //
+        // A bigger pose still draws bigger, which is what one scale for
+        // every state means.
         let mut bb: Option<(u32, u32, u32, u32)> = None; // (min_x, max_x, min_z, max_z)
-        for (_, clips) in &actor_states {
-            for c in clips {
-                bb = merge_box(bb, opaque_box(c));
-            }
+        for c in actor_states.first().into_iter().flat_map(|(_, cs)| cs) {
+            bb = merge_box(bb, opaque_box(c));
         }
         let target_h = height_cells.to_f64() * SCALE;
         if let Some((_min_x, _max_x, min_z, max_z)) = bb {
@@ -8284,6 +8294,48 @@ mod tests {
             r.sprites.instances.is_empty(),
             "an actor is not a static sprite instance"
         );
+    }
+
+    /// **One animation must not resize and lift the rest.** A death sprawl
+    /// reaches past a standing figure at both ends; folded into the scale
+    /// box it shrinks the idle pose and grounds it below its own feet, so
+    /// a character starts standing smaller and floating the moment its art
+    /// gains an animation that lies down.
+    ///
+    /// The first state is the reference, as `model_character`'s first clip
+    /// is. A bigger pose still draws bigger — that is what one scale for
+    /// every state means.
+    #[test]
+    fn the_first_state_sizes_and_grounds_the_rest() {
+        let mut a = BTreeMap::new();
+        for side in ACTOR_SIDES {
+            // Opaque only in `z 2..=4` of an 8-tall frame: three voxels
+            // tall, feet two off the frame's own bottom.
+            a.insert(format!("char/hero/idle/{side}.gif"), padded_gif());
+            // …and a pose that reaches both lower and higher, as a sprawl
+            // does: fully opaque, `z 0..=5`.
+            a.insert(format!("char/hero/death/{side}.gif"), tiny_gif());
+        }
+        let mut r = MapRender::new(a, Some(0), &[]);
+        r.model_actor(
+            "char/hero",
+            &["idle".to_string(), "death".to_string()],
+            Fixed::from_int(2),
+        );
+
+        let target = 2.0 * SCALE;
+        for (state, clips) in &r.actors[0].states {
+            for clip in clips {
+                assert!(
+                    (f64::from(clip.voxel_world_size) - target / 3.0).abs() < 1e-4,
+                    "{state}: scaled by the sprawl, not by the idle's three voxels",
+                );
+                assert!(
+                    (clip.pivot[2] - 2.0).abs() < 1e-4,
+                    "{state}: grounded below the idle's own feet",
+                );
+            }
+        }
     }
 
     /// **A gesture with an end must not loop.** A death pose stays a
