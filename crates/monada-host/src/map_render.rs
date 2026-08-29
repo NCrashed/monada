@@ -100,6 +100,15 @@ struct Ghosts {
     targets: Vec<(usize, DVec3, f64, u8)>,
     /// Live instance ids, torn down and re-issued each frame.
     ids: Vec<roxlap_render::SpriteInstanceId>,
+    /// This frame's actor request: `(actor model index, world seat, local
+    /// yaw, alpha)`. One, because a cursor previews one thing.
+    actor: Option<(usize, DVec3, f64, u8)>,
+    /// The live actor preview, and which model it is wearing.
+    ///
+    /// Kept between frames, unlike [`ids`](Self::ids): an actor has an
+    /// animation clock and a directional clip to hold on to. See
+    /// [`MapRender::sync_ghost_actor`].
+    live: Option<(usize, BillboardActorId)>,
     /// Whether the translucent material has been registered yet. Defined
     /// on first use rather than at startup: a map that never previews
     /// anything should not put a translucent entry in the palette,
@@ -315,6 +324,7 @@ pub enum UiWidget {
 /// A model the script bound via `entity_set_model`: a static sprite (box /
 /// kv6), an animated billboard [`ActorModel`], or a rigged [`CharacterModel`]
 /// (`.rkc`). Unifies the public model-id space the script sees.
+#[derive(Clone, Copy)]
 enum ModelRef {
     /// Index into [`SpriteSet::models`].
     Sprite(usize),
@@ -3912,20 +3922,15 @@ impl MapRender {
             renderer.remove_sprite_instance(id);
         }
         let targets = std::mem::take(&mut self.ghosts.targets);
+        // First, and outside the `targets.is_empty()` gate below: an actor
+        // preview outlives the frame that asked for it, so a frame asking
+        // for nothing is exactly what has to retire it.
+        let wanted = self.ghosts.actor.take();
+        self.sync_ghost_actor(renderer, wanted);
         if targets.is_empty() {
             return;
         }
-        if !self.ghosts.material {
-            renderer.define_material(
-                GHOST_MATERIAL,
-                roxlap_formats::material::Material {
-                    alpha: 255,
-                    mode: roxlap_formats::material::BlendMode::AlphaBlend,
-                    emissive: 0,
-                },
-            );
-            self.ghosts.material = true;
-        }
+        self.ghost_material(renderer);
         for (si, pos, yaw, alpha) in targets {
             let model = if let Some(&m) = self.prop_models.get(&si) {
                 m
@@ -3962,6 +3967,94 @@ impl MapRender {
             );
             self.ghosts.ids.push(id);
         }
+    }
+
+    /// Register the translucent material the previews wear, once.
+    ///
+    /// Deferred rather than declared at startup: a non-opaque palette is
+    /// what switches the renderer onto its two-sweep sprite path, and a map
+    /// that never previews anything should not pay for it.
+    fn ghost_material(&mut self, renderer: &mut SceneRenderer) {
+        if self.ghosts.material {
+            return;
+        }
+        renderer.define_material(
+            GHOST_MATERIAL,
+            roxlap_formats::material::Material {
+                alpha: 255,
+                mode: roxlap_formats::material::BlendMode::AlphaBlend,
+                emissive: 0,
+            },
+        );
+        self.ghosts.material = true;
+    }
+
+    /// Keep the actor preview in step with what this frame asked for.
+    ///
+    /// **Kept alive between frames, unlike the sprite ghosts.** An actor
+    /// carries an animation clock and a directional clip picked from the
+    /// camera's bearing; tearing one down and rebuilding it every frame
+    /// would restart both, so an idling preview would stand frozen on its
+    /// first frame and orbiting the camera would flicker through clip
+    /// swaps. So it is created when a kind is first previewed, moved while
+    /// the cursor moves, and retired when a frame asks for nothing.
+    ///
+    /// One at a time, because a cursor previews one thing.
+    fn sync_ghost_actor(
+        &mut self,
+        renderer: &mut SceneRenderer,
+        wanted: Option<(usize, DVec3, f64, u8)>,
+    ) {
+        let Some((ai, pos, yaw, alpha)) = wanted else {
+            if let Some((_, id)) = self.ghosts.live.take() {
+                renderer.remove_billboard_actor(id);
+            }
+            return;
+        };
+        // A different kind is a different set of directional clips, so it
+        // is a different actor rather than a state change on this one.
+        if let Some((was, id)) = self.ghosts.live {
+            if was != ai {
+                renderer.remove_billboard_actor(id);
+                self.ghosts.live = None;
+            }
+        }
+        let seat = [pos.x as f32, pos.y as f32, pos.z as f32];
+        if self.ghosts.live.is_none() {
+            self.ghost_material(renderer);
+            let mode = self.sprite_mode();
+            // Absent only on the first frame, before `update_actors` has had
+            // a renderer to register the clips with.
+            let Some(reg) = self.actors.get(ai).and_then(|a| a.registered.as_ref()) else {
+                return;
+            };
+            // Whichever state the art listed first. Which one a preview
+            // should play is the map's question, not the host's, and
+            // nothing has asked it.
+            let Some(id) = renderer.add_billboard_actor(actor_def(reg, mode), seat, yaw) else {
+                return; // a malformed def: no states, or a state with no dirs
+            };
+            renderer.set_actor_material(id, GHOST_MATERIAL);
+            // A preview that darkened the ground under it would read as a
+            // character already standing there, which is the one thing it
+            // is not.
+            renderer.set_actor_shadow_flags(
+                id,
+                roxlap_render::ShadowFlags {
+                    casts: false,
+                    receives: false,
+                },
+            );
+            self.ghosts.live = Some((ai, id));
+        }
+        let Some((_, id)) = self.ghosts.live else {
+            return;
+        };
+        // Every frame, so the preview follows the cursor and a map may fade
+        // it without respawning anything.
+        let (facing, up) = actor_pose(yaw, DQuat::IDENTITY);
+        renderer.set_actor_pose(id, seat, facing, up);
+        renderer.set_actor_alpha(id, alpha);
     }
 
     /// Lift the selection markers out of the static instance list.
@@ -5553,34 +5646,51 @@ impl HostBridge for MapRender {
 
     fn ghost_clear(&mut self) {
         self.ghosts.targets.clear();
+        self.ghosts.actor = None;
     }
 
     fn ghost_model(&mut self, model: i64, pos: FixedVec3, yaw: Fixed, alpha: i64) {
-        // Only a sprite has a silhouette to preview. An actor is eight
-        // pre-drawn cards picked from a camera bearing and a character is
-        // a rigged clip: previewing either means posing an animation, and
-        // nothing has asked to.
-        let Some(&ModelRef::Sprite(si)) = usize::try_from(model)
+        let Some(&kind) = usize::try_from(model)
             .ok()
             .and_then(|i| self.model_refs.get(i))
         else {
             return;
         };
-        // Seated exactly as a real prop is, or the preview lies about the
-        // one thing it is for: `drop` puts the model's feet on the point
-        // rather than its pivot, and the world yaw mirrors the sim one
-        // because `world_of` mirrors x.
-        let drop = self.sprites.models.get(si).map_or(SCALE * 0.5, |m| {
-            f64::from(m.kv6.zsiz) - f64::from(m.kv6.zpiv)
-        });
-        let mut w = entity_world_of_in(self.volume, pos);
-        w.z -= drop;
-        self.ghosts.targets.push((
-            si,
-            w,
-            facing_to_world_yaw(yaw.to_f64()),
-            u8::try_from(alpha.clamp(0, 255)).unwrap_or(255),
-        ));
+        let alpha = u8::try_from(alpha.clamp(0, 255)).unwrap_or(255);
+        // Seated exactly as the real thing is, or the preview lies about
+        // the one thing it is for. The two kinds are seated differently
+        // because they are anchored differently, and both follow what
+        // `build_instances` does for a live entity.
+        let w = entity_world_of_in(self.volume, pos);
+        match kind {
+            ModelRef::Sprite(si) => {
+                // `drop` puts the model's feet on the point rather than its
+                // pivot, and the world yaw mirrors the sim one because
+                // `world_of` mirrors x.
+                let drop = self.sprites.models.get(si).map_or(SCALE * 0.5, |m| {
+                    f64::from(m.kv6.zsiz) - f64::from(m.kv6.zpiv)
+                });
+                let seat = DVec3::new(w.x, w.y, w.z - drop);
+                self.ghosts
+                    .targets
+                    .push((si, seat, facing_to_world_yaw(yaw.to_f64()), alpha));
+            }
+            ModelRef::Actor(ai) => {
+                // A card's pivot is already its bottom centre, so only the
+                // art's own `model_drop` correction applies (world +z is
+                // down). The yaw stays in the entity's frame: which of the
+                // eight cards to show is an angle between the viewer and
+                // the character's nose, and `update_billboard_actors`
+                // measures it there.
+                let drop = f64::from(self.actors.get(ai).map_or(0.0, |a| a.drop));
+                let seat = DVec3::new(w.x, w.y, w.z + drop);
+                self.ghosts.actor = Some((ai, seat, facing_to_world_yaw(yaw.to_f64()), alpha));
+            }
+            // A rigged character is real geometry driven by a clip:
+            // previewing one means posing an animation, and nothing has
+            // asked to.
+            ModelRef::Character(_) => {}
+        }
     }
 
     fn aim_yaw(&self) -> Fixed {
@@ -8710,29 +8820,102 @@ mod tests {
     }
 
     /// Immediate mode: what a frame asked for is what a frame gets, and a
-    /// map that stops asking stops drawing.
+    /// map that stops asking stops drawing. The actor preview outlives its
+    /// frame on the renderer's side, but the REQUEST does not -- a frame
+    /// that asks for nothing is what retires it.
     #[test]
     fn ghosts_last_exactly_as_long_as_they_are_asked_for() {
-        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let mut r = MapRender::new(hero_assets(), Some(0), &[]);
         let model = r.model_kv6("missing.kv6", 0);
+        let actor = r.model_actor("char/hero", &["idle".to_string()], Fixed::from_int(2));
         r.ghost_model(model, FixedVec3::ZERO, Fixed::ZERO, 200);
         r.ghost_model(model, FixedVec3::ZERO, Fixed::ZERO, 200);
+        r.ghost_model(actor, FixedVec3::ZERO, Fixed::ZERO, 200);
         assert_eq!(r.ghosts.targets.len(), 2);
+        assert!(r.ghosts.actor.is_some());
         r.ghost_clear();
         assert!(r.ghosts.targets.is_empty());
+        assert!(r.ghosts.actor.is_none(), "the actor request went too");
     }
 
-    /// Only a sprite has a silhouette to preview. An actor is eight cards
-    /// picked from a camera bearing -- previewing one means posing an
-    /// animation, and a magenta box in its place would be a worse answer
-    /// than nothing.
+    /// An actor previews as itself, on its own path: it is eight cards
+    /// picked from the camera's bearing rather than one posed model, so it
+    /// cannot ride the sprite instances. A rigged character has no preview
+    /// at all -- posing a clip is a question nothing has asked -- and a
+    /// magenta box in its place would be a worse answer than nothing.
     #[test]
-    fn only_a_sprite_can_be_ghosted() {
-        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
-        let actor = r.model_actor("mobs/none", &["idle".to_string()], Fixed::from_int(2));
+    fn an_actor_previews_as_an_actor_and_nothing_else_previews_at_all() {
+        let mut r = MapRender::new(hero_assets(), Some(0), &[]);
+        let actor = r.model_actor("char/hero", &["idle".to_string()], Fixed::from_int(2));
+        assert!(actor >= 0, "the actor model registered");
+
         r.ghost_model(actor, FixedVec3::ZERO, Fixed::ZERO, 255);
+        assert_eq!(r.ghosts.actor.map(|a| a.0), Some(0), "the actor model");
+        assert!(
+            r.ghosts.targets.is_empty(),
+            "an actor is not a sprite instance",
+        );
+
+        r.ghost_clear();
         r.ghost_model(9999, FixedVec3::ZERO, Fixed::ZERO, 255);
-        assert!(r.ghosts.targets.is_empty());
+        assert!(r.ghosts.actor.is_none() && r.ghosts.targets.is_empty());
+    }
+
+    /// A cursor previews one thing, so a second ask in a frame replaces the
+    /// first rather than leaving two figures standing.
+    #[test]
+    fn only_one_actor_is_previewed_at_a_time() {
+        let mut r = MapRender::new(hero_assets(), Some(0), &[]);
+        let actor = r.model_actor("char/hero", &["idle".to_string()], Fixed::from_int(2));
+        r.ghost_model(actor, FixedVec3::ZERO, Fixed::ZERO, 100);
+        r.ghost_model(
+            actor,
+            FixedVec3::new(Fixed::from_int(4), Fixed::ZERO, Fixed::ZERO),
+            Fixed::ZERO,
+            200,
+        );
+        let (_, _, _, alpha) = r.ghosts.actor.expect("one preview");
+        assert_eq!(alpha, 200, "the last ask wins");
+    }
+
+    /// **The same promise the sprite ghost keeps.** A card is anchored at
+    /// its bottom centre and a prop through its pivot, so the two are
+    /// seated by different arithmetic -- which is exactly why the actor
+    /// ghost has to be pinned against a placed actor rather than trusted to
+    /// have copied it right.
+    #[test]
+    fn an_actor_ghost_stands_and_turns_as_the_actor_will() {
+        let mut r = MapRender::new(hero_assets(), Some(0), &[]);
+        let model = r.model_actor("char/hero", &["idle".to_string()], Fixed::from_int(2));
+        let p = FixedVec3::new(Fixed::from_int(5), Fixed::from_int(2), Fixed::from_int(3));
+        let yaw = Fixed::from_f64(0.75);
+
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["hp"]);
+        let e = world.spawn(arch);
+        world.set_position(e, p);
+        r.entity_set_model(e.0 as i64, model);
+        r.entity_set_facing(e.0 as i64, yaw);
+        r.build_instances(&world);
+        let (.., placed, placed_yaw, _) = r.actor_targets[0];
+
+        r.ghost_model(model, p, yaw, 128);
+        let (ai, seat, ghost_yaw, alpha) = r.ghosts.actor.expect("a preview");
+        assert_eq!(ai, 0);
+        for (a, b) in [seat.x as f32, seat.y as f32, seat.z as f32]
+            .into_iter()
+            .zip(placed)
+        {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "the ghost and the actor disagree about where they stand: {a} against {b}",
+            );
+        }
+        assert!(
+            (ghost_yaw - placed_yaw).abs() < 1e-9,
+            "and about which way they look",
+        );
+        assert_eq!(alpha, 128);
     }
 
     /// Alpha crosses the wall as a plain number, so it has to be clamped

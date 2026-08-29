@@ -289,6 +289,16 @@ pub use volume::VolumeStore;
 /// staircase of whole cells -- the look Warcraft III spent blending sheets
 /// fighting. Sixteen times finer, a brush can paint the join instead of
 /// snapping it to the grid.
+/// 41 = `ghost_model` takes an actor, not only a sprite. An editor placing
+/// characters had an outline and no silhouette, which is the half of the
+/// preview that says WHAT is about to go down -- and a catalogue of
+/// creatures is exactly where that matters. It needed roxlap to grow
+/// `set_actor_material` / `set_actor_alpha` / `set_actor_shadow_flags`,
+/// the per-actor counterparts to the sprite-instance setters it already
+/// had. The preview is kept alive between frames rather than rebuilt like
+/// the sprite ghosts: an actor carries an animation clock and a
+/// directional clip, and respawning it per frame would freeze one and
+/// flicker the other.
 /// 39 = `bake_ao_in`: the ambient-occlusion bake over one cell rectangle
 /// rather than the whole grid. The bake is written INTO the voxel colours,
 /// so terrain edited after one comes out unshaded against neighbours that
@@ -305,7 +315,7 @@ pub use volume::VolumeStore;
 /// sprite belonged to an entity, entities are simulation state, and the
 /// local layer may not make one, so showing what is about to be placed
 /// meant telling the simulation it had been.
-pub const HOST_API_VERSION: u32 = 40;
+pub const HOST_API_VERSION: u32 = 41;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a

@@ -1262,10 +1262,18 @@ pub trait LocalHost: WorldRead {
     /// Draw `model` translucently at `pos`, turned to `yaw` radians, at
     /// `alpha` in `0..=255`.
     ///
-    /// The model id is the one [`model_kv6`](WorldRead::model_kv6) gave,
-    /// so a preview draws exactly what the placement will -- which is the
-    /// whole point of it, and what an outline of a bounding box can never
-    /// be. Ghosts cast no shadow and cannot be picked.
+    /// The model id is the one [`model_kv6`](WorldRead::model_kv6) or
+    /// [`model_actor`](WorldRead::model_actor) gave, so a preview draws
+    /// exactly what the placement will -- which is the whole point of it,
+    /// and what an outline of a bounding box can never be. Ghosts cast no
+    /// shadow and cannot be picked.
+    ///
+    /// An actor preview animates and picks its card from the camera the way
+    /// a placed one does, and there is **one at a time**: a cursor previews
+    /// one thing, so a second call in a frame replaces the first. Sprites
+    /// are not limited that way. A rigged
+    /// [`model_character`](WorldRead::model_character) has no preview --
+    /// posing a clip is a question nothing has asked.
     fn ghost_model(&self, model: i64, pos: FixedVec3, yaw: Fixed, alpha: i64) {
         if let Some(b) = self.bridge() {
             b.lock()
