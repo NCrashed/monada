@@ -353,6 +353,26 @@ struct ActorModel {
     drop: f32,
 }
 
+/// Which actor models still have to hand their clips to the renderer.
+///
+/// **Asked per model, not once for all of them.** One latch was right
+/// while every actor model was defined at `init`, and stopped being right
+/// the moment a LOCAL layer could define one: a placement preview asks for
+/// a kind's art when a designer first picks it, which is hundreds of
+/// frames after the latch was set. Its clips were then never registered
+/// and it drew nothing, silently and for good.
+///
+/// Indices rather than a filtered iterator, so the caller can hold a
+/// `&mut` on one model at a time while it registers.
+fn awaiting_clips(actors: &[ActorModel]) -> Vec<usize> {
+    actors
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.registered.is_none())
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Build a fresh actor recipe from registered directional clip ids.
 fn actor_def(
     registered: &[(&'static str, Vec<VoxelClipId>)],
@@ -1614,9 +1634,6 @@ pub struct MapRender {
     /// [`actor_targets`](Self::actor_targets) — the world pos is already
     /// seated (feet on the cell, `model_drop` applied).
     char_targets: Vec<(EntityId, usize, [f32; 3], f64)>,
-    /// Whether the actor clips have been registered with the renderer (done
-    /// once, on the first frame a renderer is available — like `sky_uploaded`).
-    clips_registered: bool,
     /// Locally selected entities (per-player UI, never networked/hashed).
     /// `highlight` replaces the set (single-select), `highlight_add` grows
     /// it (RTS box select); ascending-id order is the `highlighted_all`
@@ -1860,7 +1877,6 @@ impl MapRender {
             entity_chars: BTreeMap::new(),
             actor_targets: Vec::new(),
             char_targets: Vec::new(),
-            clips_registered: false,
             highlighted: BTreeSet::new(),
             camera_grid: None,
             camera_follow: None,
@@ -3483,17 +3499,15 @@ impl MapRender {
         }
         // Register each actor model's directional clips once (needs the
         // renderer, which doesn't exist until the first frame).
-        if !self.clips_registered {
-            for am in &mut self.actors {
-                let mut reg = Vec::with_capacity(am.states.len());
-                for (name, clips) in &am.states {
-                    let ids: Vec<VoxelClipId> =
-                        clips.iter().map(|c| renderer.add_voxel_clip(c)).collect();
-                    reg.push((*name, ids));
-                }
-                am.registered = Some(reg);
+        for i in awaiting_clips(&self.actors) {
+            let am = &mut self.actors[i];
+            let mut reg = Vec::with_capacity(am.states.len());
+            for (name, clips) in &am.states {
+                let ids: Vec<VoxelClipId> =
+                    clips.iter().map(|c| renderer.add_voxel_clip(c)).collect();
+                reg.push((*name, ids));
             }
-            self.clips_registered = true;
+            am.registered = Some(reg);
         }
 
         // Read once: the loop below borrows `entity_actors` mutably.
@@ -4278,7 +4292,10 @@ impl HostBridge for MapRender {
                 vec![c]
             };
             // roxlap's `ActorState` holds `&'static str`; intern the script's
-            // state name (actor models are defined once, at `init`).
+            // state name. Bounded by the number of model DEFINITIONS, which
+            // is content-sized -- not by frames. Models are no longer all
+            // defined at `init`: a local layer defines one when a placement
+            // preview first needs a kind's art.
             let name: &'static str = Box::leak(state.clone().into_boxed_str());
             actor_states.push((name, clips));
         }
@@ -8859,6 +8876,30 @@ mod tests {
         r.ghost_clear();
         r.ghost_model(9999, FixedVec3::ZERO, Fixed::ZERO, 255);
         assert!(r.ghosts.actor.is_none() && r.ghosts.targets.is_empty());
+    }
+
+    /// **An actor model may be defined at any time, not only at `init`.**
+    /// Registration used to sit behind one latch set on the first rendered
+    /// frame, so a model defined later -- which is exactly what a placement
+    /// preview does, when a designer first picks a kind -- never got its
+    /// clips and drew nothing, silently and for good.
+    #[test]
+    fn an_actor_defined_after_the_first_frame_still_gets_its_clips() {
+        let mut r = MapRender::new(hero_assets(), Some(0), &[]);
+        r.model_actor("char/hero", &["idle".to_string()], Fixed::from_int(2));
+        assert_eq!(awaiting_clips(&r.actors), vec![0], "nothing registered yet");
+
+        // What the first rendered frame does, without a renderer to do it.
+        r.actors[0].registered = Some(Vec::new());
+        assert!(awaiting_clips(&r.actors).is_empty());
+
+        // …and hundreds of frames later, a preview asks for a kind's art.
+        r.model_actor("char/hero", &["run".to_string()], Fixed::from_int(2));
+        assert_eq!(
+            awaiting_clips(&r.actors),
+            vec![1],
+            "the late model is still waiting, and the early one is not asked twice",
+        );
     }
 
     /// A cursor previews one thing, so a second ask in a frame replaces the
