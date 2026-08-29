@@ -581,8 +581,6 @@ pub trait WorldRead {
     // them never part of the world hash: a headless peer no-ops the lot, so
     // a match cannot desync on sound.
 
-    /// Play a one-shot sound. Identical sounds fired the same frame are
-    /// de-duplicated, so a wave of attackers plays it once, not stacked.
     /// How big a HUD texture is, in pixels — `(0, 0)` for an id that names
     /// nothing, and on a headless peer.
     ///
@@ -614,6 +612,8 @@ pub trait WorldRead {
         }
     }
 
+    /// Play a one-shot sound. Identical sounds fired the same frame are
+    /// de-duplicated, so a wave of attackers plays it once, not stacked.
     fn play_sound(&self, asset_path: &str) {
         if let Some(b) = self.bridge() {
             b.lock().expect("bridge mutex").play_sound(asset_path);

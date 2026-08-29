@@ -1204,8 +1204,6 @@ pub trait HostBridge: Send {
     // repeats, so many entities triggering the same sound at once (a wave of
     // attackers) plays it once, not stacked into a roar.
 
-    /// Play a one-shot sound (`assets/…` path). Many different sounds mix in
-    /// parallel; identical ones are de-duplicated per frame + debounced.
     /// How big a HUD texture is, in pixels — `(0, 0)` for an id that
     /// names nothing.
     ///
@@ -1226,6 +1224,8 @@ pub trait HostBridge: Send {
     /// promises no particular scatter -- what it is for is telling a
     /// player that something went off, and where.
     fn burst(&mut self, _at: FixedVec3, _count: i64, _speed: Fixed, _life: Fixed, _color: i64) {}
+    /// Play a one-shot sound (`assets/…` path). Many different sounds mix in
+    /// parallel; identical ones are de-duplicated per frame + debounced.
     fn play_sound(&mut self, _asset_path: &str) {}
     /// [`play_sound`](Self::play_sound) with an explicit gain (`0..1`, clamped).
     fn play_sound_gain(&mut self, _asset_path: &str, _gain: Fixed) {}
