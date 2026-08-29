@@ -884,12 +884,21 @@ const SPARK_VOXELS: u32 = 3;
 /// [`SCALE`] world units across, so three voxels at twice size is about
 /// two fifths of a cell -- a droplet you can see from the camera this
 /// game is played at rather than a pixel of grit. UNTUNED.
-const SPARK_SCALE: f32 = 2.0;
+const SPARK_SCALE: f32 = 1.6;
 
-/// How far a burst is lifted off the point it was asked for, in world
-/// units (smaller z is up). Half a voxel, the same nudge roxlap's own
-/// demo uses, so a burst at ground level does not start underground.
-const SPARK_LIFT: f64 = 0.5;
+/// The material particles wear: translucent, so a burst veils what is
+/// behind it rather than replacing it.
+///
+/// One below the ghosts' slot. Declared on first use for the same reason
+/// theirs is -- a non-opaque palette switches the renderer onto its
+/// two-sweep sprite path, and a map that never throws anything should not
+/// pay for it.
+const SPARK_MATERIAL: u8 = 254;
+
+/// How much of a particle shows, `0..=255`. Water rather than smoke: it
+/// wants to read as spray, and spray you cannot see past is a wall.
+/// UNTUNED.
+const SPARK_ALPHA: u8 = 150;
 
 /// The most pieces one burst may ask for.
 ///
@@ -3686,20 +3695,23 @@ impl MapRender {
         if !self.spark_queue.is_empty() {
             // Registered on first use rather than in `new`: most maps
             // never throw anything, and a model costs an upload.
-            let model = *self
-                .spark_model
-                .get_or_insert_with(|| renderer.add_sprite_model(&spark_kv6()));
+            let model = *self.spark_model.get_or_insert_with(|| {
+                renderer.define_material(
+                    SPARK_MATERIAL,
+                    roxlap_formats::material::Material {
+                        alpha: SPARK_ALPHA,
+                        mode: roxlap_formats::material::BlendMode::AlphaBlend,
+                        emissive: 0,
+                    },
+                );
+                renderer.add_sprite_model(&spark_kv6())
+            });
             for spark in std::mem::take(&mut self.spark_queue) {
                 let id = self.sparks.add_emitter(ParticleEmitterDef {
-                    // Lifted clear of the ground. A burst is asked for at
-                    // the thing that went off, which is usually standing
-                    // ON the floor, and particles born inside it are
-                    // particles the first collision sample eats.
-                    pos: [
-                        spark.at.x as f32,
-                        spark.at.y as f32,
-                        (spark.at.z - SPARK_LIFT) as f32,
-                    ],
+                    // Exactly where it was asked for. Where a burst
+                    // *looks* right is the caller's -- a thing drawn above
+                    // its own feet knows how far, and this does not.
+                    pos: [spark.at.x as f32, spark.at.y as f32, spark.at.z as f32],
                     spawn: SpawnMode::Burst(spark.count),
                     lifetime: spark.life..spark.life * 1.6,
                     velocity: VelocityDef {
@@ -3717,6 +3729,7 @@ impl MapRender {
                     scale_end: Some(SPARK_SCALE * 0.3),
                     fade_out_frac: 0.4,
                     tint: Rgb(spark.tint),
+                    material: SPARK_MATERIAL,
                     ..ParticleEmitterDef::new(model)
                 });
                 self.sparks.remove_emitter(id);
