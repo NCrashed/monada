@@ -1660,6 +1660,10 @@ pub struct MapRender {
     /// Entity → public model id, set by `entity_set_model`. Render-side, not
     /// hashed. Despawned entities are skipped (positions read live).
     models: BTreeMap<EntityId, usize>,
+    /// Entity → how far above its seat it is drawn, in world units.
+    /// Render-side and per body: `model_drop` says how a KIND sits on the
+    /// ground, this says where ONE of them floats.
+    entity_lift: BTreeMap<EntityId, f64>,
     /// Entity → the `grids` grid it rides, set by `entity_set_grid`. An entity
     /// here has its sim `position` read as grid-local and composed through the
     /// grid's transform (origin + rotation) when seated — so crew stay put on a
@@ -1929,6 +1933,7 @@ impl MapRender {
             actors: Vec::new(),
             characters: Vec::new(),
             models: BTreeMap::new(),
+            entity_lift: BTreeMap::new(),
             entity_grid: BTreeMap::new(),
             entity_yaw: BTreeMap::new(),
             entity_orient: BTreeMap::new(),
@@ -2718,6 +2723,11 @@ impl MapRender {
                 Some(&(_, pos, _)) => pos,
                 None => self.place(e, p),
             };
+            // …and where this ONE body is drawn relative to where it
+            // stands. Here rather than in `place`, which is also what the
+            // camera follows and what a fog observer sees from: a hovering
+            // body should float, not carry the view up with it.
+            let w = w - DVec3::Z * self.lift(e);
             match self.model_refs.get(model_id) {
                 Some(&ModelRef::Sprite(si)) => self.seat_sprite(e, si, w),
                 Some(&ModelRef::Actor(ai)) => {
@@ -3067,6 +3077,11 @@ impl MapRender {
         }
         let entity = best.map_or(-1, |(e, _)| e.0 as i64);
         (point, entity)
+    }
+
+    /// How far above where it stands `e` is drawn, in world units.
+    fn lift(&self, e: EntityId) -> f64 {
+        self.entity_lift.get(&e).copied().unwrap_or(0.0)
     }
 
     /// How tall `e` is drawn, in world units, or a fallback where its
@@ -5784,6 +5799,21 @@ impl HostBridge for MapRender {
     fn ghost_clear(&mut self) {
         self.ghosts.targets.clear();
         self.ghosts.actor = None;
+    }
+
+    fn entity_set_lift(&mut self, entity: i64, cells: Fixed) {
+        let Ok(id) = u64::try_from(entity) else {
+            return;
+        };
+        let lift = cells.to_f64() * SCALE;
+        // Zero is the common case and the default, so it is stored as an
+        // absence: a map that lifts one body should not grow a map entry
+        // per entity that never leaves the ground.
+        if lift == 0.0 {
+            self.entity_lift.remove(&EntityId(id));
+        } else {
+            self.entity_lift.insert(EntityId(id), lift);
+        }
     }
 
     fn point_visible(&mut self, at: FixedVec3) -> bool {
@@ -9060,6 +9090,49 @@ mod tests {
     }
 
     /// Immediate mode: what a frame asked for is what a frame gets, and a
+    /// **A lift moves the drawing and nothing else.** It is what a hover
+    /// or a bob is made of, so it may be driven per client per frame --
+    /// which is only safe because the body goes on standing, walking and
+    /// being reached exactly where it did.
+    #[test]
+    fn a_lift_floats_a_body_without_moving_it() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let model = r.model_kv6("missing.kv6", 0);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["hp"]);
+        let e = world.spawn(arch);
+        let at = FixedVec3::new(Fixed::from_int(4), Fixed::from_int(4), Fixed::ZERO);
+        world.set_position(e, at);
+        r.entity_set_model(e.0 as i64, model);
+
+        let seat = |r: &mut MapRender| {
+            r.build_instances(&world);
+            r.sprites
+                .instances
+                .iter()
+                .find(|i| i.model != HIGHLIGHT_MODEL)
+                .expect("the body got a sprite")
+                .pos[2]
+        };
+        let grounded = seat(&mut r);
+
+        // Half a cell up. World +z is down, so drawn higher is a SMALLER z.
+        r.entity_set_lift(e.0 as i64, Fixed::from_ratio(1, 2));
+        let floating = seat(&mut r);
+        assert!(
+            (f64::from(grounded - floating) - SCALE * 0.5).abs() < 1e-3,
+            "drawn at {floating} rather than half a cell above {grounded}",
+        );
+        // …and it still stands where it stood.
+        assert_eq!(world.position(e), Some(at));
+
+        // Back to nothing, and the entry goes with it rather than piling
+        // up one per body that never leaves the ground.
+        r.entity_set_lift(e.0 as i64, Fixed::ZERO);
+        assert!(r.entity_lift.is_empty());
+        assert!((seat(&mut r) - grounded).abs() < 1e-3);
+    }
+
     /// **A body is clicked where it is drawn, not where it stands.**
     /// Picking measured the cursor's GROUND point against an entity's
     /// seat, so only the feet answered: a figure drawn more than a cell

@@ -247,6 +247,26 @@ pub trait WorldRead {
         })
     }
 
+    /// Float ONE body above where it stands, in cells. Positive lifts.
+    ///
+    /// **Per entity, where [`model_drop`](Self::model_drop) is per kind.**
+    /// A kind's drop says how its art sits on the ground and is the same
+    /// for every one of them; this says where a single body is drawn
+    /// relative to its own feet, which is what a hover, a bob or a hop
+    /// needs — the same thing in unison across a swarm reads as
+    /// clockwork.
+    ///
+    /// Drawing only. It moves nothing: the body stands, walks, is picked
+    /// and is reached exactly where it did, so a map may drive this from
+    /// its local layer per client without touching a hashed byte.
+    fn entity_set_lift(&self, entity: EntityId, cells: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .entity_set_lift(entity.0 as i64, cells);
+        }
+    }
+
     /// Nudge a model's sprites down (`cells > 0`) or up, on top of the
     /// pivot-computed grounding — art whose visible feet are not at its
     /// trimmed bottom, corrected without re-authoring the GIFs.

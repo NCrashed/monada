@@ -289,6 +289,13 @@ pub use volume::VolumeStore;
 /// staircase of whole cells -- the look Warcraft III spent blending sheets
 /// fighting. Sixteen times finer, a brush can paint the join instead of
 /// snapping it to the grid.
+/// 43 = `entity_set_lift`: float ONE body above where it stands, for
+/// drawing only. `model_drop` already said how a KIND sits on the ground
+/// and is the same for every one of them -- so a hover, a bob or a hop
+/// had nowhere to go, and doing it in unison across a swarm reads as
+/// clockwork. It moves nothing: the body stands, walks, is picked and is
+/// reached where it did, which is what lets a map drive it from the local
+/// layer per client without touching a hashed byte.
 /// 42 = `LocalHost::point_visible`: whether the fog is showing a point to
 /// THIS client. A map draws things ABOUT a body as well as the body --
 /// a health bar, a name, a threat marker -- and the renderer culls only
@@ -322,7 +329,7 @@ pub use volume::VolumeStore;
 /// sprite belonged to an entity, entities are simulation state, and the
 /// local layer may not make one, so showing what is about to be placed
 /// meant telling the simulation it had been.
-pub const HOST_API_VERSION: u32 = 42;
+pub const HOST_API_VERSION: u32 = 43;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -1019,6 +1026,10 @@ pub trait HostBridge: Send {
     /// place without lying to the simulation about having placed it.
     /// Ghosts cast no shadow and take no part in picking.
     fn ghost_model(&mut self, _model: i64, _pos: FixedVec3, _yaw: Fixed, _alpha: i64) {}
+
+    /// Float one body above where it stands, in cells. Drawing only; see
+    /// [`WorldRead::entity_set_lift`](crate::WorldRead::entity_set_lift).
+    fn entity_set_lift(&mut self, _entity: i64, _cells: Fixed) {}
 
     /// Whether the fog is showing `at` to this client. See
     /// [`LocalHost::point_visible`](crate::LocalHost::point_visible) for
