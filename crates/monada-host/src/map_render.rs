@@ -878,7 +878,18 @@ const SPARK_SEED: u64 = 0x5061_7274_6963_6c65;
 /// How big a particle is drawn, in voxels a side. Two is a speck at this
 /// game's zoom and a cube at a chess board's; scale on the emitter is what
 /// tunes it per burst.
-const SPARK_VOXELS: u32 = 2;
+const SPARK_VOXELS: u32 = 3;
+
+/// …and how much bigger than its authored size it is drawn. A cell is
+/// [`SCALE`] world units across, so three voxels at twice size is about
+/// two fifths of a cell -- a droplet you can see from the camera this
+/// game is played at rather than a pixel of grit. UNTUNED.
+const SPARK_SCALE: f32 = 2.0;
+
+/// How far a burst is lifted off the point it was asked for, in world
+/// units (smaller z is up). Half a voxel, the same nudge roxlap's own
+/// demo uses, so a burst at ground level does not start underground.
+const SPARK_LIFT: f64 = 0.5;
 
 /// The most pieces one burst may ask for.
 ///
@@ -3680,19 +3691,30 @@ impl MapRender {
                 .get_or_insert_with(|| renderer.add_sprite_model(&spark_kv6()));
             for spark in std::mem::take(&mut self.spark_queue) {
                 let id = self.sparks.add_emitter(ParticleEmitterDef {
-                    pos: [spark.at.x as f32, spark.at.y as f32, spark.at.z as f32],
+                    // Lifted clear of the ground. A burst is asked for at
+                    // the thing that went off, which is usually standing
+                    // ON the floor, and particles born inside it are
+                    // particles the first collision sample eats.
+                    pos: [
+                        spark.at.x as f32,
+                        spark.at.y as f32,
+                        (spark.at.z - SPARK_LIFT) as f32,
+                    ],
                     spawn: SpawnMode::Burst(spark.count),
                     lifetime: spark.life..spark.life * 1.6,
                     velocity: VelocityDef {
                         spread: spark.speed,
                         ..VelocityDef::default()
                     },
-                    // Killed by the floor rather than bounced: what this
-                    // draws is a splash, and a splash that skittered would
-                    // read as gravel.
-                    collision: CollisionMode::Kill,
-                    scale: 1.0,
-                    scale_end: Some(0.3),
+                    // **Through the floor rather than killed on it.** A
+                    // burst goes off at ground level by definition, and a
+                    // splash that the ground eats is a splash nobody ever
+                    // sees -- which is exactly how this shipped the first
+                    // time. They fade before they have sunk far enough to
+                    // notice.
+                    collision: CollisionMode::None,
+                    scale: SPARK_SCALE,
+                    scale_end: Some(SPARK_SCALE * 0.3),
                     fade_out_frac: 0.4,
                     tint: Rgb(spark.tint),
                     ..ParticleEmitterDef::new(model)
@@ -3700,9 +3722,13 @@ impl MapRender {
                 self.sparks.remove_emitter(id);
             }
         }
-        // Nothing in the air is the common case, and stepping an empty
-        // system every frame of every map is a cost nobody asked for.
-        if self.sparks.emitter_count() > 0 {
+        // **Particles, not emitters.** A burst's emitter is retired the
+        // instant it is added -- it has already spawned everything it ever
+        // will -- and `emitter_count` does not count a retired one. Asking
+        // it whether there is work left me never stepping the system at
+        // all, so no particle was ever handed to the renderer and none of
+        // this drew anything.
+        if self.sparks.particle_count() > 0 {
             self.sparks.tick_with_scene(renderer, dt, &self.scene);
         }
     }
