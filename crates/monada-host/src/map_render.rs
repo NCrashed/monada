@@ -4253,8 +4253,15 @@ impl HostBridge for MapRender {
         for state in states {
             // One-shot states hold their last frame instead of looping (a
             // death pose stays a corpse; a swing doesn't restart mid-play).
+            //
+            // `cast` joins them: a spell is a gesture with an end, and a
+            // looping one leaves a caster winding up forever after the
+            // spell has left.
             let mut opts = GifImportOpts::default();
-            if matches!(state.as_str(), "death" | "attack" | "dodge" | "hurt") {
+            if matches!(
+                state.as_str(),
+                "death" | "attack" | "dodge" | "hurt" | "cast"
+            ) {
                 opts.loop_mode = LoopMode::Once;
             }
             // Directional: all 8 compass GIFs present → one clip per facing.
@@ -8276,6 +8283,46 @@ mod tests {
         assert!(
             r.sprites.instances.is_empty(),
             "an actor is not a static sprite instance"
+        );
+    }
+
+    /// **A gesture with an end must not loop.** A death pose stays a
+    /// corpse and a swing does not restart mid-play; a cast is the same
+    /// shape of thing, and left looping it leaves a caster winding up
+    /// forever after the spell has gone.
+    #[test]
+    fn a_gesture_holds_its_last_frame_and_a_cycle_repeats() {
+        let mut a = BTreeMap::new();
+        for state in ["idle", "run", "cast", "death"] {
+            for side in ACTOR_SIDES {
+                a.insert(format!("char/hero/{state}/{side}.gif"), tiny_gif());
+            }
+        }
+        let mut r = MapRender::new(a, Some(0), &[]);
+        r.model_actor(
+            "char/hero",
+            &[
+                "idle".to_string(),
+                "run".to_string(),
+                "cast".to_string(),
+                "death".to_string(),
+            ],
+            Fixed::from_int(2),
+        );
+
+        let modes: Vec<(&str, bool)> = r.actors[0]
+            .states
+            .iter()
+            .map(|(name, clips)| (*name, clips[0].loop_mode == LoopMode::Once))
+            .collect();
+        assert_eq!(
+            modes,
+            vec![
+                ("idle", false),
+                ("run", false),
+                ("cast", true),
+                ("death", true),
+            ],
         );
     }
 
