@@ -1187,6 +1187,20 @@ struct PosTrack {
     age: f64,
 }
 
+/// The field-explicit twin of [`MapRender::drawn_at`], for a caller already
+/// pushing into another of its fields — the same split `place_in` exists for.
+fn drawn_in(
+    tracks: &BTreeMap<EntityId, PosTrack>,
+    tick_dt: Option<f64>,
+    e: EntityId,
+    p: FixedVec3,
+) -> FixedVec3 {
+    match (tick_dt, tracks.get(&e)) {
+        (Some(step), Some(track)) => p + track.drawn(step) - track.curr,
+        _ => p,
+    }
+}
+
 impl PosTrack {
     /// Where this entity is on screen right now, `step` seconds to a tick.
     fn drawn(&self, step: f64) -> FixedVec3 {
@@ -2712,13 +2726,17 @@ impl MapRender {
         let Some(step) = self.tick_dt else {
             return;
         };
-        // What is drawn, or seen from — an entity nobody looks at needs no
-        // track, and tracking the whole world would grow this without bound.
+        // What is drawn, seen from, or ringed — an entity nobody looks at
+        // needs no track, and tracking the whole world would grow this
+        // without bound. A selection marker is here because it is drawn at
+        // its entity's position and must agree with the body it marks, even
+        // where that body has no model of its own.
         let shown: BTreeSet<EntityId> = self
             .models
             .keys()
             .copied()
             .chain(self.vision_entities.iter().copied())
+            .chain(self.highlighted.iter().copied())
             .collect();
         self.entity_tracks.retain(|e, _| shown.contains(e));
         for e in shown {
@@ -2774,10 +2792,7 @@ impl MapRender {
     /// `p` unchanged where nothing is tracked: an untracked entity, or a map
     /// with no tick rate to interpolate over.
     fn drawn_at(&self, e: EntityId, p: FixedVec3) -> FixedVec3 {
-        match (self.tick_dt, self.entity_tracks.get(&e)) {
-            (Some(step), Some(track)) => p + track.drawn(step) - track.curr,
-            _ => p,
-        }
+        drawn_in(&self.entity_tracks, self.tick_dt, e, p)
     }
 
     /// The sim-space facing yaw the script last set on an entity, whichever
@@ -3046,6 +3061,11 @@ impl MapRender {
         // volume map's z convention the inlined `world_of` used to drop.
         for &h in &self.highlighted {
             if let Some(p) = world.position(h) {
+                // Through the SMOOTHED position, like the body it rings. A
+                // marker left on the tick-exact point leads its own body by
+                // up to a tick, and a ring sliding around underneath the
+                // thing it marks is the judder back in a smaller place.
+                let p = drawn_in(&self.entity_tracks, self.tick_dt, h, p);
                 let w = place_in(
                     &self.entity_grid,
                     &self.grid_anchors,
@@ -9302,6 +9322,44 @@ mod tests {
         assert!(
             (walker_x(&r) - r.entity_world_of(to).x).abs() < 1e-9,
             "with no tick to interpolate across, the move lands at once"
+        );
+    }
+
+    /// A selection marker is drawn through the same smoothed position as the
+    /// body it rings.
+    ///
+    /// Left on the tick-exact point it LEADS that body by up to a tick, and
+    /// a ring sliding around underneath the thing it marks is the judder
+    /// back in a smaller place — which is exactly how it was found.
+    #[test]
+    fn a_selection_marker_rides_the_body_it_rings() {
+        let from = FixedVec3::new(Fixed::from_int(4), Fixed::ZERO, Fixed::ZERO);
+        let to = FixedVec3::new(Fixed::from_int(5), Fixed::ZERO, Fixed::ZERO);
+        let (mut r, mut world, body) = walker(Some(30), from);
+        r.highlight(body.0 as i64);
+        r.build_instances(&world);
+
+        world.set_position(body, to);
+        r.build_instances(&world);
+        r.advance_entity_tracks(TICK / 2.0);
+        r.build_instances(&world);
+
+        let ring = f64::from(
+            r.sprites
+                .instances
+                .iter()
+                .find(|i| i.model == HIGHLIGHT_MODEL)
+                .expect("the body is ringed")
+                .pos[0],
+        );
+        assert!(
+            (ring - walker_x(&r)).abs() < 1e-9,
+            "the ring sits on the body it marks: {ring} vs {}",
+            walker_x(&r)
+        );
+        assert!(
+            (ring - r.entity_world_of(to).x).abs() > 1e-6,
+            "and not on the point the tick left, which is what led it"
         );
     }
 
