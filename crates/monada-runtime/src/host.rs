@@ -1224,6 +1224,33 @@ pub trait LocalHost: WorldRead {
     fn pick_ground(&self) -> Option<FixedVec3>;
     /// The entity under the cursor, or `None`.
     fn pick_entity(&self) -> Option<EntityId>;
+
+    /// Where `entity` is DRAWN this frame, rather than where the tick left
+    /// it: the position smoothed across the tick it arrived on.
+    ///
+    /// **Local only, and that is the point.** A drawn position depends on
+    /// how far into a tick this client's frame fell, so two peers disagree
+    /// about it by design — which is why it is here and not on
+    /// [`WorldRead`], where a `tick` could reach it and desync the match.
+    /// What it is for is presentation that has to AGREE with the picture:
+    /// a camera easing toward a hero it follows must ease toward the hero
+    /// on screen, or the body shakes against a world sliding smoothly
+    /// behind it.
+    ///
+    /// Falls back to [`entity_position`](WorldRead::entity_position) where
+    /// there is nothing smoothed to report — a headless peer, a map with no
+    /// declared tick rate, an entity nothing draws — so a caller always gets
+    /// a usable point.
+    fn entity_drawn_position(&self, entity: EntityId) -> FixedVec3 {
+        i64::try_from(entity.0)
+            .ok()
+            .and_then(|id| {
+                self.bridge()
+                    .and_then(|b| b.lock().expect("bridge mutex").entity_drawn(id))
+            })
+            .unwrap_or_else(|| self.entity_position(entity))
+    }
+
     /// The grid the cursor ray first meets, or `None` — the question a
     /// map asks when its world is geometry rather than a ground plane.
     fn pick_grid(&self) -> Option<i64>;

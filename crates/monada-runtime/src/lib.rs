@@ -329,7 +329,25 @@ pub use volume::VolumeStore;
 /// sprite belonged to an entity, entities are simulation state, and the
 /// local layer may not make one, so showing what is about to be placed
 /// meant telling the simulation it had been.
-pub const HOST_API_VERSION: u32 = 45;
+/// 44 = `burst`: a one-shot scatter of particles where a map asks for one.
+/// Decoration, and render-side: a headless peer draws none and a replay
+/// does not compare them, so it takes no seed and promises no particular
+/// scatter. What it is for is telling a player that something went off,
+/// and where.
+/// 45 = `ui_texture_size`: how big a HUD texture is. `ui_image` draws at
+/// native size, so centring a picture inside a frame takes both sizes and
+/// a map had no way to learn either -- it could only lay out art whose
+/// dimensions were written into its code, which makes swapping an icon for
+/// one of another size a rebuild.
+/// 46 = `LocalHost::entity_drawn_position`: where a body is DRAWN this
+/// frame, not where the tick left it. Map entities are drawn from the live
+/// world, so at 30 Hz on a 144 Hz display they step -- which nothing
+/// noticed while the camera stepped with them. A camera that eases every
+/// frame turns that into the followed body shaking against a world sliding
+/// smoothly behind it, so a map easing toward a hero has to ease toward
+/// the hero on screen. Local only: the answer depends on where in a tick
+/// this client's frame fell, so peers disagree by design.
+pub const HOST_API_VERSION: u32 = 46;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -1203,6 +1221,15 @@ pub trait HostBridge: Send {
     // COALESCES identical one-shots fired the same frame and rate-limits rapid
     // repeats, so many entities triggering the same sound at once (a wave of
     // attackers) plays it once, not stacked into a roar.
+
+    /// Where `entity` is DRAWN right now, in its own sim frame — its
+    /// tick-exact position eased across the tick it arrived on.
+    ///
+    /// `None` where there is nothing to answer with: a headless peer, a map
+    /// with no declared tick rate, or an entity nothing draws.
+    fn entity_drawn(&mut self, _entity: i64) -> Option<FixedVec3> {
+        None
+    }
 
     /// How big a HUD texture is, in pixels — `(0, 0)` for an id that
     /// names nothing.

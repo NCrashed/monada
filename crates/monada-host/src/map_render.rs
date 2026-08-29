@@ -1160,6 +1160,44 @@ fn is_pose_jump(a: (DVec3, DQuat), b: (DVec3, DQuat)) -> bool {
         || a.1.dot(b.1).abs() < POSE_SNAP_DOT
 }
 
+/// One entity's draw-position track — what turns a 30 Hz sim into a picture
+/// that moves every frame (docs/plans/ship-physics.md §4.3, the S-6 slice).
+///
+/// [`PoseTrack`] is the grid twin, and this is the same argument one step
+/// further in: smoothing the hull fixes a rider STANDING on it, and this
+/// fixes one that walks. Both were the same bug from the start — a position
+/// written once a tick and drawn as written — and the hull half was simply
+/// the half the ship demo could see.
+///
+/// Held in the entity's OWN frame (sim coordinates, before `place` composes
+/// the grid), so a crew member walking a turning deck gets both smoothings,
+/// composed in the right order, without either knowing about the other.
+///
+/// Render-side only. `World::position` stays tick-exact, so every hashed
+/// decision is bit-identical to what it was before smoothing existed.
+#[derive(Clone, Copy)]
+struct PosTrack {
+    /// Where the entity was DRAWN when `curr` arrived — deliberately not the
+    /// previous sim position, for [`PoseTrack`]'s reason: a frame that runs
+    /// several catch-up ticks would otherwise rewind past what was on screen.
+    prev: FixedVec3,
+    /// The tick-exact position.
+    curr: FixedVec3,
+    /// Seconds since `curr` arrived. `>= tick_dt` means fully arrived.
+    age: f64,
+}
+
+impl PosTrack {
+    /// Where this entity is on screen right now, `step` seconds to a tick.
+    fn drawn(&self, step: f64) -> FixedVec3 {
+        if self.age >= step {
+            return self.curr; // arrived — and the common case, so say so first
+        }
+        let a = Fixed::from_f64((self.age / step).clamp(0.0, 1.0));
+        self.prev + (self.curr - self.prev) * a
+    }
+}
+
 /// How many world voxels one sim cell spans along z inside a grid with this
 /// cell shape: `SCALE` for a cubic grid, `1` for the column convention. The one
 /// place the two conventions differ, so the z formulas can be written once.
@@ -1722,6 +1760,11 @@ pub struct MapRender {
     /// Render-side and per body: `model_drop` says how a KIND sits on the
     /// ground, this says where ONE of them floats.
     entity_lift: BTreeMap<EntityId, f64>,
+    /// Per-entity draw-position smoothing ([`PosTrack`]). Only entities the
+    /// map draws or sees from are tracked, and a track is dropped as its
+    /// entity despawns — so this is the size of what is on screen, not of
+    /// the world.
+    entity_tracks: BTreeMap<EntityId, PosTrack>,
     /// Entity → the `grids` grid it rides, set by `entity_set_grid`. An entity
     /// here has its sim `position` read as grid-local and composed through the
     /// grid's transform (origin + rotation) when seated — so crew stay put on a
@@ -2006,6 +2049,7 @@ impl MapRender {
             characters: Vec::new(),
             models: BTreeMap::new(),
             entity_lift: BTreeMap::new(),
+            entity_tracks: BTreeMap::new(),
             entity_grid: BTreeMap::new(),
             entity_yaw: BTreeMap::new(),
             entity_orient: BTreeMap::new(),
@@ -2636,6 +2680,106 @@ impl MapRender {
         }
     }
 
+    /// Age every entity's draw-position track by `dt` seconds — the twin of
+    /// [`advance_grid_poses`](Self::advance_grid_poses), called beside it and
+    /// for the same reason.
+    ///
+    /// Ageing is split from where a new target is DETECTED (`build_instances`,
+    /// below) because entity positions have no single writer to hang a track
+    /// off the way `set_grid_pose` does: they live in the `World`, so the
+    /// track has to compare against it — and compare against an age this
+    /// frame has already moved.
+    ///
+    /// A no-op on a map with no declared tick rate. With no tick to
+    /// interpolate across, positions land whole exactly as they always did,
+    /// which is what keeps every turn-based map and every host test that
+    /// places an entity and reads it back on the next line unmoved.
+    pub fn advance_entity_tracks(&mut self, dt: f64) {
+        if self.tick_dt.is_none() {
+            return;
+        }
+        for track in self.entity_tracks.values_mut() {
+            track.age += dt;
+        }
+    }
+
+    /// Point every drawn entity's track at what the world says now, and
+    /// forget the ones that are gone.
+    ///
+    /// At the head of `build_instances`, which is the only place holding a
+    /// `World` to compare against.
+    fn track_positions(&mut self, world: &World) {
+        let Some(step) = self.tick_dt else {
+            return;
+        };
+        // What is drawn, or seen from — an entity nobody looks at needs no
+        // track, and tracking the whole world would grow this without bound.
+        let shown: BTreeSet<EntityId> = self
+            .models
+            .keys()
+            .copied()
+            .chain(self.vision_entities.iter().copied())
+            .collect();
+        self.entity_tracks.retain(|e, _| shown.contains(e));
+        for e in shown {
+            let Some(p) = world.position(e) else {
+                self.entity_tracks.remove(&e); // despawned
+                continue;
+            };
+            let Some(track) = self.entity_tracks.get(&e).copied() else {
+                // Fresh: arrived by definition. A spawn must not ease in from
+                // wherever the last holder of this id happened to stand.
+                self.entity_tracks.insert(
+                    e,
+                    PosTrack {
+                        prev: p,
+                        curr: p,
+                        age: f64::MAX,
+                    },
+                );
+                continue;
+            };
+            if track.curr == p {
+                continue; // no tick landed on this entity — keep easing
+            }
+            let now = track.drawn(step);
+            // The jump rule, measured where it means something: `place`
+            // composes both points through the entity's own frame, so the
+            // threshold is one distance in world voxels whatever z convention
+            // the entity's grid keeps. A teleport, a spawn onto a used id, or
+            // an attach that rebases the local position all land here and
+            // snap, rather than drawing a streak across the tick.
+            let snap = self.place(e, now).distance_squared(self.place(e, p))
+                > POSE_SNAP_DIST * POSE_SNAP_DIST;
+            self.entity_tracks.insert(
+                e,
+                PosTrack {
+                    prev: now,
+                    curr: p,
+                    age: if snap { f64::MAX } else { 0.0 },
+                },
+            );
+        }
+    }
+
+    /// `p` in `e`'s own frame, moved by however far `e` is DRAWN from where
+    /// this tick left it.
+    ///
+    /// Where `p` is the entity's own position — which is every caller in
+    /// `build_instances` — this IS the drawn position. Written as a shift so
+    /// that a point named in the entity's frame rather than at it (the turret
+    /// mount `camera_focus_entity` leaves the door open for) rides along
+    /// instead of collapsing onto the body.
+    ///
+    /// `p` unchanged where nothing is tracked: an untracked entity, or a map
+    /// with no tick rate to interpolate over.
+    fn drawn_at(&self, e: EntityId, p: FixedVec3) -> FixedVec3 {
+        match (self.tick_dt, self.entity_tracks.get(&e)) {
+            (Some(step), Some(track)) => p + track.drawn(step) - track.curr,
+            _ => p,
+        }
+    }
+
     /// The sim-space facing yaw the script last set on an entity, whichever
     /// animated model kind it is bound to (`0` for an entity with neither).
     /// The fog observer reads it through here so a crew member rigged as a
@@ -2788,12 +2932,15 @@ impl MapRender {
         // one is dropped rather than freezing the fog at its last pose, so
         // the list is shorter than `vision_entities` and cannot be indexed
         // in parallel with it.
+        // Smoothed first, so everything below composes from one answer about
+        // where each entity is this frame.
+        self.track_positions(world);
         self.observer_poses = self
             .vision_entities
             .clone()
             .into_iter()
             .filter_map(|e| {
-                let p = world.position(e)?;
+                let p = self.drawn_at(e, world.position(e)?);
                 let yaw = self.entity_facing(e);
                 Some((e, self.place(e, p), yaw))
             })
@@ -2805,6 +2952,7 @@ impl MapRender {
             let Some(p) = world.position(e) else {
                 continue; // despawned (e.g. captured / killed)
             };
+            let p = self.drawn_at(e, p);
             // The observer entity is usually model-bound too, so reuse the
             // seat we already composed for `observer_pose` above instead of
             // running `place` (a quaternion rotate) a second time this frame.
@@ -3204,7 +3352,11 @@ impl MapRender {
         // centre exactly as before.
         let mut orbit = self.camera;
         if let Some((e, p)) = self.camera_follow {
-            orbit.center = self.place(e, p);
+            // Through the SMOOTHED position, for §4.4's reason applied to the
+            // rider rather than the hull: a camera pinned to the tick while
+            // the body it follows is drawn between ticks makes that body
+            // shake against a world sliding smoothly behind it.
+            orbit.center = self.place(e, self.drawn_at(e, p));
         }
         let mut cam = orbit.to_roxlap();
         // Ride a grid (`camera_grid`): turn the WHOLE orbit frame — the eye
@@ -5992,6 +6144,12 @@ impl HostBridge for MapRender {
         } else {
             self.entity_lift.insert(EntityId(id), lift);
         }
+    }
+
+    fn entity_drawn(&mut self, entity: i64) -> Option<FixedVec3> {
+        let id = EntityId(u64::try_from(entity).ok()?);
+        let step = self.tick_dt?;
+        Some(self.entity_tracks.get(&id)?.drawn(step))
     }
 
     fn point_visible(&mut self, at: FixedVec3) -> bool {
@@ -9028,6 +9186,163 @@ mod tests {
         assert!(
             focus.distance(stale) > 1.0,
             "and that is not where the tick left it"
+        );
+    }
+
+    /// Seat one body, one model, no grid: the fixture the rider-smoothing
+    /// tests share. Returns the render, the world and the entity.
+    fn walker(hz: Option<u32>, at: FixedVec3) -> (MapRender, World, EntityId) {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        if let Some(hz) = hz {
+            r.set_tick_hz(hz);
+        }
+        let model = r.model_box(2, 2, 2, 0x8055_5555);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&["walk"]);
+        let body = world.spawn(arch);
+        world.set_position(body, at);
+        r.entity_set_model(body.0 as i64, model);
+        (r, world, body)
+    }
+
+    /// Where the one body in a `walker` map is drawn, along x.
+    fn walker_x(r: &MapRender) -> f64 {
+        let i = r
+            .sprites
+            .instances
+            .iter()
+            .find(|i| i.model != HIGHLIGHT_MODEL)
+            .expect("the body is drawn");
+        f64::from(i.pos[0])
+    }
+
+    /// The rider half of the same smoothing (§4.3, the S-6 slice): a body
+    /// that WALKS is drawn between the ticks it steps on.
+    ///
+    /// Smoothing the hull alone was only ever half the fix, and the missing
+    /// half stayed invisible while the camera stepped along with the body.
+    /// A camera that eases every frame turns it into the followed body
+    /// shaking against a world sliding smoothly behind it.
+    #[test]
+    fn a_walking_body_is_drawn_between_the_ticks_it_steps_on() {
+        let from = FixedVec3::new(Fixed::from_int(4), Fixed::ZERO, Fixed::ZERO);
+        let to = FixedVec3::new(Fixed::from_int(5), Fixed::ZERO, Fixed::ZERO);
+        let (mut r, mut world, body) = walker(Some(30), from);
+
+        // The frame it appears on: drawn where it stands. A spawn must not
+        // ease in from wherever the last holder of that id happened to be.
+        r.build_instances(&world);
+        let (a, b) = (r.entity_world_of(from).x, r.entity_world_of(to).x);
+        assert!(
+            (walker_x(&r) - a).abs() < 1e-9,
+            "a fresh body is drawn where it stands"
+        );
+
+        // One tick of walking. The frame it lands on still draws the old
+        // spot: that is where the body was when the new position arrived.
+        world.set_position(body, to);
+        r.build_instances(&world);
+        assert!(
+            (walker_x(&r) - a).abs() < 1e-9,
+            "the tick lands, and the picture starts from what was on screen"
+        );
+
+        // Half a tick later it is half way, and provably neither end.
+        r.advance_entity_tracks(TICK / 2.0);
+        r.build_instances(&world);
+        let mid = walker_x(&r);
+        assert!(
+            mid > a.min(b) && mid < a.max(b),
+            "drawn between the two ticks: {mid} not inside ({a}, {b})"
+        );
+        assert!(
+            (mid - (a + b) / 2.0).abs() < 0.5,
+            "and about half way across: {mid}"
+        );
+
+        // …and it arrives, rather than trailing for ever.
+        r.advance_entity_tracks(TICK);
+        r.build_instances(&world);
+        assert!((walker_x(&r) - b).abs() < 1e-9, "arrived by the tick after");
+    }
+
+    /// A body that was PUT somewhere — a teleport, a spawn onto a reused id,
+    /// an attach that rebases its local position — lands whole. Easing it
+    /// would draw a streak through places it was never in.
+    #[test]
+    fn a_body_that_is_put_somewhere_lands_whole() {
+        let from = FixedVec3::new(Fixed::from_int(4), Fixed::ZERO, Fixed::ZERO);
+        let (mut r, mut world, body) = walker(Some(30), from);
+        r.build_instances(&world);
+
+        // Well past POSE_SNAP_DIST (two cells).
+        let far = FixedVec3::new(Fixed::from_int(40), Fixed::ZERO, Fixed::ZERO);
+        world.set_position(body, far);
+        r.build_instances(&world);
+        assert!(
+            (walker_x(&r) - r.entity_world_of(far).x).abs() < 1e-9,
+            "a long move lands immediately, got {}",
+            walker_x(&r)
+        );
+    }
+
+    /// A map that never declared a tick rate places bodies whole, exactly as
+    /// it did before smoothing existed. This is what keeps every turn-based
+    /// map — and every host test that moves an entity and reads it back on
+    /// the next line — byte for byte unmoved.
+    #[test]
+    fn a_map_with_no_tick_rate_places_bodies_whole() {
+        let from = FixedVec3::new(Fixed::from_int(4), Fixed::ZERO, Fixed::ZERO);
+        let to = FixedVec3::new(Fixed::from_int(5), Fixed::ZERO, Fixed::ZERO);
+        let (mut r, mut world, body) = walker(None, from);
+        r.build_instances(&world);
+
+        world.set_position(body, to);
+        r.build_instances(&world);
+        assert!(
+            (walker_x(&r) - r.entity_world_of(to).x).abs() < 1e-9,
+            "with no tick to interpolate across, the move lands at once"
+        );
+    }
+
+    /// A camera following a body composes its focus through where that body
+    /// is DRAWN. Left on the tick-exact point while the body eases, the body
+    /// shakes against a smoothly sliding world — §4.4's trap, one frame in
+    /// from the hull.
+    #[test]
+    fn a_followed_focus_tracks_the_drawn_body() {
+        let from = FixedVec3::new(Fixed::from_int(4), Fixed::ZERO, Fixed::ZERO);
+        let to = FixedVec3::new(Fixed::from_int(5), Fixed::ZERO, Fixed::ZERO);
+        let (mut r, mut world, body) = walker(Some(30), from);
+        r.build_instances(&world);
+
+        // The tick: the body steps, then the map aims at it.
+        world.set_position(body, to);
+        r.build_instances(&world);
+        r.camera_focus_entity(body.0 as i64, to);
+        let stale = r.camera.center;
+
+        r.advance_entity_tracks(TICK / 2.0);
+        r.build_instances(&world);
+
+        // `to_roxlap` puts the eye `dist` behind the focus along `forward`,
+        // so the focus is recoverable from the camera the renderer is handed.
+        let cam = r.camera();
+        let fwd = DVec3::from_array(cam.forward);
+        let focus = DVec3::from_array(cam.pos) + fwd * r.camera.dist;
+        let (a, b) = (r.entity_world_of(from).x, r.entity_world_of(to).x);
+        assert!(
+            focus.x > a.min(b) && focus.x < a.max(b),
+            "the focus rides the drawn body: {} not inside ({a}, {b})",
+            focus.x
+        );
+        assert!(
+            (focus.x - walker_x(&r)).abs() < 1e-6,
+            "and it is exactly where the body is drawn"
+        );
+        assert!(
+            (focus.x - stale.x).abs() > 1e-6,
+            "which is not where the tick left it"
         );
     }
 

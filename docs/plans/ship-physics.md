@@ -1,10 +1,10 @@
 # Plan: the ship is a rigid body — a hull that flies, and riders that don't judder
 
-Status: **DONE, S-0 – S-5, 2026-08-11** — render-rate pose smoothing (§4), the
+Status: **DONE, S-0 – S-6, 2026-08-29** — render-rate pose smoothing (§4), the
 ship map on the physics gate, freeform body shapes, a grid driven by a body,
-engines that push and turn it (`host_api` 23), and a demo that flies. What
-remains is §8's optional S-6 (interpolating riders' own motion), the live
-display pass §9 owes, and whatever the open questions in §10 turn into.
+engines that push and turn it (`host_api` 23), a demo that flies, and rider
+interpolation (S-6, `host_api` 46). What remains is the live display pass §9
+owes, and whatever the open questions in §10 turn into.
 Requested by the people extending the ship demo
 (`crates/monada-ship`), who are stuck at the first step: making the hull itself
 a physics body, with everything standing on it inheriting the pose smoothly.
@@ -160,7 +160,7 @@ exact about where the stepping comes from. Four candidates; only two are real.
 3. **A rider's own motion still steps.** Real but separate: a walking crew
    member's hull-local position moves 30 times a second, and `build_instances`
    reads the live world. Standing riders are perfectly smooth once (1) is fixed;
-   walking ones are exactly as smooth as they are today. Deferred to S-6.
+   walking ones are exactly as smooth as they are today. Done in S-6.
 4. **The camera.** Real, and a trap: `camera_focus_entity` composes the focus
    point through the grid at **tick** time and stores a world point
    (`map_render.rs:4165`). Interpolating the hull without fixing this makes the
@@ -516,13 +516,30 @@ verb along, so the fix ships with `every_control_reaches_the_command`: a fake
 bridge that holds keys, one `local_tick`, and an assertion on every bit of the
 mask, including two held at once. `ship@` did not move, which is the same fact
 from the other side.
-- **S-6 (optional, separate) — rider interpolation.** §4.3: pass
-  `(prev_pos, curr_pos, alpha)` into `build_instances` and lerp a rider's local
-  position. The host already keeps both vectors for circle scenes
-  (`lib.rs:1638-1642`); map scenes return an empty snapshot today
-  (`positions`, `lib.rs:676`), so this is a real slice, not a flag. Needs a
-  teleport rule of its own: `entity_attach` / `entity_detach` change frames, and
-  interpolating across that smears a crate from the deck into space.
+- **S-6 — rider interpolation. DONE (2026-08-29).** §4.3. `PosTrack` per drawn
+  entity, `advance_entity_tracks(dt)` beside `advance_grid_poses`, targets
+  detected in `build_instances`, and the followed camera composed through the
+  drawn position rather than the tick's. Four host tests. `host_api` 46 adds
+  `LocalHost::entity_drawn_position` so a map easing a camera toward a body
+  eases toward the body ON SCREEN. Worth keeping:
+  - **Built as S-0's twin, not as the sketch above.** The plan proposed
+    plumbing `(prev_pos, curr_pos, alpha)` from the host: `MapSim::advance`
+    swallows its accumulator remainder and every map path passes `alpha = 1.0`,
+    so that meant a signature change through three call sites and two sim
+    flavours. `PoseTrack` needed none of it — `tick_dt` and `dt` are already in
+    `MapRender` — and reusing the shipped shape means one idiom to understand
+    rather than two that smooth differently.
+  - **The track is kept in the entity's OWN frame**, before `place` composes
+    the grid, so hull smoothing and rider smoothing compose in the right order
+    without either knowing about the other.
+  - **The teleport rule fell out** rather than needing `entity_attach` hooks:
+    the snap test measures `place(now)` against `place(target)`, so a frame
+    change that rebases a local position reads as the long move it is. A frame
+    change that does NOT move the position needs no rule at all — the track is
+    frame-local, and `place` recomposes fresh every frame.
+  - **Not covered: `entity_set_lift`.** A bob or a hop still steps at the tick
+    rate. It has a single writer, so it is `set_grid_pose`'s shape exactly if
+    it turns out to show.
 
 ## 9. Traps found while reading, worth not rediscovering
 

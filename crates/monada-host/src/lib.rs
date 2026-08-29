@@ -1632,10 +1632,12 @@ impl App {
         // composing everything from a single transform is supposed to make
         // impossible.
         if let SceneKind::Map(render) = &self.scene {
-            render
-                .lock()
-                .expect("render mutex")
-                .advance_grid_poses(dt);
+            let mut render = render.lock().expect("render mutex");
+            render.advance_grid_poses(dt);
+            // The rider half of the same smoothing: a hull that eases while
+            // the crew walking it still steps is only half a fix, and the
+            // camera follows the crew.
+            render.advance_entity_tracks(dt);
         }
         // The physics body mirror (volume maps, plan §1d) syncs beside the
         // sprite rebuild on every path; `dt` drives its render-side wheel
