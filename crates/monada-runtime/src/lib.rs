@@ -329,7 +329,7 @@ pub use volume::VolumeStore;
 /// sprite belonged to an entity, entities are simulation state, and the
 /// local layer may not make one, so showing what is about to be placed
 /// meant telling the simulation it had been.
-pub const HOST_API_VERSION: u32 = 44;
+pub const HOST_API_VERSION: u32 = 45;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -1206,6 +1206,17 @@ pub trait HostBridge: Send {
 
     /// Play a one-shot sound (`assets/…` path). Many different sounds mix in
     /// parallel; identical ones are de-duplicated per frame + debounced.
+    /// How big a HUD texture is, in pixels — `(0, 0)` for an id that
+    /// names nothing.
+    ///
+    /// `ui_image` draws at native size, so a HUD that wants a picture
+    /// **centred** in a frame has to know how big both are. Without this a
+    /// map can only lay out art whose dimensions it has hard-coded, which
+    /// makes swapping in an icon of a different size a code change.
+    fn ui_texture_size(&mut self, _tex: i64) -> (i64, i64) {
+        (0, 0)
+    }
+
     /// Scatter a one-shot burst of particles at `at`: `count` pieces
     /// leaving at `speed` cells per second, each lasting about `life`
     /// seconds, tinted `0xRRGGBB`.

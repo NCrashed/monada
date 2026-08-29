@@ -5480,6 +5480,13 @@ impl HostBridge for MapRender {
 
     // --- HUD / UI overlay (screen-space, render-side only) ----------------
 
+    fn ui_texture_size(&mut self, tex: i64) -> (i64, i64) {
+        usize::try_from(tex)
+            .ok()
+            .and_then(|id| self.ui_textures.get(id))
+            .map_or((0, 0), |&(_, w, h)| (i64::from(w), i64::from(h)))
+    }
+
     fn ui_texture(&mut self, asset_path: &str) -> i64 {
         let Some(bytes) = self.assets.get(asset_path) else {
             eprintln!("monada-host: ui_texture: missing asset {asset_path:?}");

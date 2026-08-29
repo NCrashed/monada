@@ -583,6 +583,19 @@ pub trait WorldRead {
 
     /// Play a one-shot sound. Identical sounds fired the same frame are
     /// de-duplicated, so a wave of attackers plays it once, not stacked.
+    /// How big a HUD texture is, in pixels — `(0, 0)` for an id that names
+    /// nothing, and on a headless peer.
+    ///
+    /// `ui_image` draws at native size, so centring a picture in a frame
+    /// takes both sizes. A map that had to hard-code them could not have
+    /// its art swapped without a rebuild, which is the whole point of the
+    /// asset indirection.
+    fn ui_texture_size(&self, tex: i64) -> (i64, i64) {
+        self.bridge().map_or((0, 0), |b| {
+            b.lock().expect("bridge mutex").ui_texture_size(tex)
+        })
+    }
+
     /// Scatter a one-shot burst of particles at `at` — a spell going off,
     /// something breaking.
     ///
