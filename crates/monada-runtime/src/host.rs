@@ -1301,7 +1301,7 @@ pub trait LocalHost: WorldRead {
     /// dark pointing at what the fog is hiding.
     fn point_visible(&self, at: FixedVec3) -> bool {
         self.bridge()
-            .is_none_or(|b| b.lock().expect("bridge mutex").point_visible(at))
+            .map_or(true, |b| b.lock().expect("bridge mutex").point_visible(at))
     }
 }
 

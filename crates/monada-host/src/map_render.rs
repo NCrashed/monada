@@ -127,8 +127,17 @@ struct Ghosts {
     /// its two-sweep sprite path.
     material: bool,
 }
-/// Max world-xy distance from a click to an entity for it to be picked.
+/// How wide of a body's standing line a click still counts, in world
+/// units — three quarters of a cell either side.
 const PICK_RADIUS: f64 = 12.0;
+
+/// How tall a body is assumed to be when nothing says otherwise, in world
+/// units.
+///
+/// A model-bound entity whose model has no measured height -- a plain box
+/// -- still has to be clickable above its feet. Half a cell is the old
+/// behaviour's reach, so nothing that used to be pickable stops being so.
+const PICK_FALLBACK_TALL: f64 = SCALE * 0.5;
 /// Strongest per-face grid darkening a sun can apply, to the face pointing
 /// fully away from the sun (voxlap side-shade units out of the 0x80
 /// brightness reference). Kept gentle so the board reads bright — only
@@ -362,6 +371,10 @@ struct ActorModel {
     /// actor: positive lowers the sprite (world +z is down). Corrects art whose
     /// visible feet aren't at the trimmed opaque bottom.
     drop: f32,
+    /// How tall it is drawn, in world units -- the height its first
+    /// state was sized to. What a cursor has to be able to hit: a body is
+    /// a standing card, not the cell under it.
+    tall: f32,
 }
 
 /// Which actor models still have to hand their clips to the renderer.
@@ -382,6 +395,39 @@ fn awaiting_clips(actors: &[ActorModel]) -> Vec<usize> {
         .filter(|(_, a)| a.registered.is_none())
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Closest approach between a ray and a segment: the squared distance,
+/// and how far along the ray it happens.
+///
+/// What picking a standing body needs. A ray-versus-cylinder would do as
+/// well, but this stays right when the camera looks straight down the
+/// body's own axis -- where a cylinder's quadratic goes degenerate and the
+/// pick blinks out at exactly the angle a top-down game spends its time
+/// at.
+fn ray_to_segment(origin: DVec3, dir: DVec3, from: DVec3, to: DVec3) -> (f64, f64) {
+    let span = to - from;
+    let offset = origin - from;
+    let dir_dir = dir.dot(dir);
+    let dir_span = dir.dot(span);
+    let span_span = span.dot(span);
+    let dir_offset = dir.dot(offset);
+    let span_offset = span.dot(offset);
+    let det = dir_dir * span_span - dir_span * dir_span;
+    // How far along the segment the closest point sits. Parallel, or a
+    // segment of no length, both mean its near end.
+    let along_span = if det.abs() < 1e-9 || span_span < 1e-9 {
+        0.0
+    } else {
+        (dir_dir * span_offset - dir_span * dir_offset) / det
+    };
+    // The segment is a segment, not a line: past either end is that end,
+    // which is what makes a head and a pair of feet the ends of a body
+    // rather than the middle of an infinite pole.
+    let along_span = along_span.clamp(0.0, 1.0);
+    let along_ray = (along_span * dir_span - dir_offset) / dir_dir.max(1e-9);
+    let gap = offset + dir * along_ray - span * along_span;
+    (gap.dot(gap), along_ray)
 }
 
 /// Build a fresh actor recipe from registered directional clip ids.
@@ -588,6 +634,8 @@ struct CharacterModel {
     /// positive lowers, negative lifts (world +z is down) — the knob for a
     /// hovering character that should float above its cell.
     drop: f32,
+    /// How tall it is drawn, in world units. See `ActorModel::tall`.
+    tall: f32,
     /// Clip names `entity_set_anim` asked for that this character doesn't
     /// have, so the warning is printed once per name, not once per frame.
     warned: BTreeSet<String>,
@@ -2976,25 +3024,66 @@ impl MapRender {
                 )
             })
         };
-        let Some((point, hit)) = found else {
-            return (FixedVec3::ZERO, -1);
-        };
+        // A ray that met no ground still answers about bodies: one
+        // standing on a ledge against the sky is a thing a player points
+        // at, and the ground point it does not have is reported as none
+        // the way it always was.
+        let point = found.map_or(FixedVec3::ZERO, |(p, _)| p);
+        // **A body is a standing card, not the cell under it.** Measuring
+        // the cursor's GROUND point against an entity's seat meant only
+        // the feet could be clicked: a figure drawn a cell and a third
+        // tall stands entirely outside the radius, so aiming at the chest
+        // -- which is what a player aims at -- missed.
+        //
+        // So the ray is tested against the line the body stands on, from
+        // its feet to the top of its drawn height, and the nearest hit
+        // ALONG THE RAY wins. Depth order rather than ground distance is
+        // also the honest answer where two bodies overlap on screen: the
+        // one in front is the one being pointed at.
         let mut best: Option<(EntityId, f64)> = None;
         for &e in self.models.keys() {
             let Some(p) = world.position(e) else { continue };
             // Compose through the grid the entity rides (rotation + origin), the
             // same seat `build_instances` renders it at — hit-testing against the
             // bare `world_of(p)` mis-picks on a moved/rotated hull.
-            let w = self.place(e, p);
-            let d2 = (w.x - hit.x).powi(2) + (w.y - hit.y).powi(2);
-            if best.map_or(true, |(_, b)| d2 < b) {
-                best = Some((e, d2));
+            let seat = self.place(e, p);
+            // The column runs from the floor of the cell it stands in to
+            // the top of its art. The cell, not the seat, because a model
+            // is anchored at its own pivot and `model_drop` moves that on
+            // purpose -- so the seat is where a body STANDS, not where its
+            // art begins. Clicking the ground at its feet went on picking
+            // it before this, and still does.
+            //
+            // World +z is down, so up is -z.
+            let floor = seat + DVec3::Z * (SCALE * 0.5);
+            let head = seat - DVec3::Z * self.drawn_height(e);
+            let (d2, along) = ray_to_segment(origin, dir, floor, head);
+            if d2 > PICK_RADIUS * PICK_RADIUS || along <= 0.0 {
+                continue;
+            }
+            if best.map_or(true, |(_, nearest)| along < nearest) {
+                best = Some((e, along));
             }
         }
-        let entity = best
-            .filter(|&(_, d2)| d2 <= PICK_RADIUS * PICK_RADIUS)
-            .map_or(-1, |(e, _)| e.0 as i64);
+        let entity = best.map_or(-1, |(e, _)| e.0 as i64);
         (point, entity)
+    }
+
+    /// How tall `e` is drawn, in world units, or a fallback where its
+    /// model never measured itself.
+    fn drawn_height(&self, e: EntityId) -> f64 {
+        let tall = self
+            .models
+            .get(&e)
+            .and_then(|&m| self.model_refs.get(m))
+            .and_then(|&r| match r {
+                // A `.kv6` is authored one voxel to a world unit, so its
+                // own box is its height.
+                ModelRef::Sprite(si) => self.sprites.models.get(si).map(|m| f64::from(m.kv6.zsiz)),
+                ModelRef::Actor(ai) => self.actors.get(ai).map(|a| f64::from(a.tall)),
+                ModelRef::Character(ci) => self.characters.get(ci).map(|c| f64::from(c.tall)),
+            });
+        tall.filter(|&t| t > 0.0).unwrap_or(PICK_FALLBACK_TALL)
     }
 
     /// Commands the map queued this trigger, for the host to route.
@@ -4380,6 +4469,8 @@ impl HostBridge for MapRender {
             states: actor_states,
             registered: None,
             drop: 0.0,
+            #[allow(clippy::cast_possible_truncation)]
+            tall: target_h as f32,
         });
         self.push_model_ref(ModelRef::Actor(self.actors.len() - 1))
     }
@@ -4431,6 +4522,7 @@ impl HostBridge for MapRender {
             scale,
             lift: (bottom * f64::from(scale)) as f32,
             drop: 0.0,
+            tall: (native_h * f64::from(scale)) as f32,
             warned: BTreeSet::new(),
         });
         self.push_model_ref(ModelRef::Character(self.characters.len() - 1))
@@ -8968,6 +9060,74 @@ mod tests {
     }
 
     /// Immediate mode: what a frame asked for is what a frame gets, and a
+    /// **A body is clicked where it is drawn, not where it stands.**
+    /// Picking measured the cursor's GROUND point against an entity's
+    /// seat, so only the feet answered: a figure drawn more than a cell
+    /// tall stands entirely outside the radius, and aiming at the chest --
+    /// which is what a player aims at -- missed.
+    #[test]
+    fn a_body_is_picked_by_its_art_and_not_only_by_its_feet() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        // Two cells tall, so the top of it is well clear of its own cell.
+        let tall = r.model_box(8, 8, (SCALE * 2.0) as i64, 0x80a8_b48c);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&[]);
+        let unit = world.spawn(arch);
+        let at = FixedVec3::new(Fixed::from_int(10), Fixed::from_int(10), Fixed::ZERO);
+        world.set_position(unit, at);
+        r.entity_set_model(unit.0 as i64, tall);
+
+        // A shallow eye, as this camera is, looking at the body's HEAD --
+        // a cell and a half up, which is chest-to-head on a figure this
+        // size and nowhere near the cell it stands on.
+        let feet = entity_world_of_in(false, at);
+        let head = feet - DVec3::Z * (SCALE * 1.5);
+        let eye = head + DVec3::new(-260.0, -260.0, -150.0);
+        let dir = (head - eye).normalize();
+
+        assert_eq!(
+            r.pick(&world, eye, dir).1,
+            unit.0 as i64,
+            "a click on the body missed it",
+        );
+
+        // …and a ray that goes nowhere near it still misses, or the fix
+        // would be "pick everything".
+        let wide = (head + DVec3::new(0.0, 400.0, 0.0) - eye).normalize();
+        assert_eq!(r.pick(&world, eye, wide).1, -1);
+    }
+
+    /// The nearest body ALONG THE RAY wins. Two of them overlapping on
+    /// screen is the case ground distance answered wrongly: it would hand
+    /// back whichever stood nearer the cursor's ground point, which is the
+    /// one BEHIND when you are looking down a line of them.
+    #[test]
+    fn the_body_in_front_is_the_one_picked() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let box_model = r.model_box(8, 8, SCALE as i64, 0x80a8_b48c);
+        let mut world = World::new(0);
+        let arch = world.register_archetype(&[]);
+
+        let near = world.spawn(arch);
+        let far = world.spawn(arch);
+        let near_at = FixedVec3::new(Fixed::from_int(10), Fixed::from_int(10), Fixed::ZERO);
+        let far_at = FixedVec3::new(Fixed::from_int(12), Fixed::from_int(12), Fixed::ZERO);
+        world.set_position(near, near_at);
+        world.set_position(far, far_at);
+        r.entity_set_model(near.0 as i64, box_model);
+        r.entity_set_model(far.0 as i64, box_model);
+
+        // Down the line joining them, from beyond the near one.
+        let (a, b) = (
+            entity_world_of_in(false, near_at),
+            entity_world_of_in(false, far_at),
+        );
+        let dir = (b - a).normalize();
+        let eye = a - dir * 300.0 - DVec3::Z * 200.0;
+        let dir = ((a - DVec3::Z * (SCALE * 0.5)) - eye).normalize();
+        assert_eq!(r.pick(&world, eye, dir).1, near.0 as i64);
+    }
+
     /// **A map with no fog sees everything, and must say so.** The
     /// question is asked by anything a map draws about a body -- a health
     /// bar, a name -- and answering "hidden" where there is no mask would
