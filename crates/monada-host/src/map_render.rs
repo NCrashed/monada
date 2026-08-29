@@ -7777,16 +7777,21 @@ mod tests {
         // instance is frozen at its frame-0 spot forever. Routing on "is the
         // grid turning" left exactly that ghost — the hull is unturned on frame
         // 0, so the crate was baked in and then also drawn posed.
+        //
+        // The world-frame crate rides the dynamic layer for the same reason,
+        // not a weaker one: the single upload cannot hold an entity that
+        // spawns later or moves later, and the renderer has no way to know
+        // which entity that will be.
         r.build_instances(&world);
         assert_eq!(
             r.prop_targets.len(),
-            1,
-            "a grid-bound prop is posed even before the hull turns"
+            2,
+            "every model-bound prop is posed on a dynamic-layer map"
         );
         assert_eq!(
             r.sprites.instances.len(),
-            1,
-            "only the world-frame crate is placed statically"
+            0,
+            "and nothing is baked into the one static upload"
         );
 
         // Roll the hull onto a tilted axis — now the stowed crate must be posed.
@@ -7796,14 +7801,19 @@ mod tests {
             Fixed::from_f64(0.7),
         );
         r.build_instances(&world);
-        assert_eq!(r.prop_targets.len(), 1, "the crate ON the hull is posed");
-        assert_eq!(
-            r.sprites.instances.len(),
-            1,
-            "the crate in the world frame stays on the static path"
-        );
+        assert_eq!(r.prop_targets.len(), 2, "both crates are posed");
 
-        let (si, seat, rot, drop_rot, drop) = r.prop_targets[0];
+        // Which target is the stowed one is not a question about ordering.
+        // Picked by where it rides -- the rolled hull has carried it well
+        // away from the world-frame crate they were both spawned on -- so
+        // the basis assertions below still have something to prove.
+        let stowed_seat = r.place(stowed, p);
+        let (si, seat, rot, drop_rot, drop) = r
+            .prop_targets
+            .iter()
+            .copied()
+            .find(|&(_, seat, ..)| (seat - stowed_seat).length() < 1e-9)
+            .expect("the crate on the hull is posed where it rides");
         assert_eq!(si, crate_model as usize, "posed with its own sprite model");
         let grid_rot = r
             .scene
