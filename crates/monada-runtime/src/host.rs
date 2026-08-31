@@ -691,6 +691,13 @@ pub trait WorldRead {
         }
     }
 
+    /// Pin the next widget over a world point. See [`HostBridge::ui_pin`].
+    fn ui_pin(&self, at: FixedVec3) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").ui_pin(at);
+        }
+    }
+
     /// Draw a label.
     fn ui_text(&self, x: i64, y: i64, text: &str, size: i64) {
         if let Some(b) = self.bridge() {

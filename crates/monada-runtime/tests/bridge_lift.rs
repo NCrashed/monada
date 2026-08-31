@@ -128,6 +128,9 @@ impl HostBridge for Recorder {
     fn ui_image(&mut self, tex: i64, x: i64, y: i64) {
         self.note(format!("ui_image {tex} @{x},{y}"));
     }
+    fn ui_pin(&mut self, at: FixedVec3) {
+        self.note(format!("ui_pin {},{},{}", at.x, at.y, at.z));
+    }
     fn ui_text_wrap(&mut self, x: i64, y: i64, text: &str, _s: i64, _w: i64, _c: i64) {
         self.note(format!("ui_text_wrap {x},{y} {text}"));
     }
@@ -181,6 +184,7 @@ fn a_native_map_paints_a_tileset_and_animates_an_actor() {
     host.play_music("assets/music/field.ogg");
     host.stop_music();
     let panel = host.ui_texture("assets/ui/panel.png");
+    host.ui_pin(FixedVec3::new(Fixed::from(3), Fixed::from(4), Fixed::from(5)));
     host.ui_image(panel, 8, 8);
     host.ui_text_wrap(8, 40, "the dead are those you talk to", 12, 200, 0x00FF_FFFF);
 
@@ -202,6 +206,7 @@ fn a_native_map_paints_a_tileset_and_animates_an_actor() {
             "play_music assets/music/field.ogg",
             "stop_music",
             "ui_texture assets/ui/panel.png",
+            "ui_pin 3,4,5",
             "ui_image 4 @8,8",
             "ui_text_wrap 8,40 the dead are those you talk to",
         ]

@@ -347,7 +347,7 @@ pub use volume::VolumeStore;
 /// smoothly behind it, so a map easing toward a hero has to ease toward
 /// the hero on screen. Local only: the answer depends on where in a tick
 /// this client's frame fell, so peers disagree by design.
-pub const HOST_API_VERSION: u32 = 46;
+pub const HOST_API_VERSION: u32 = 47;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -1494,6 +1494,12 @@ pub trait HostBridge: Send {
     fn ui_scale(&mut self, _factor: Fixed) {}
     /// Begin a fresh HUD frame (drop the previous widget list).
     fn ui_clear(&mut self) {}
+    /// Pin the NEXT widget to a point in the world: its `x`/`y` become an
+    /// offset from where that point lands on screen, and it is dropped when
+    /// the point is behind the camera. One-shot, so pinning cannot leak into
+    /// the widgets after it. The map cannot project the point itself -- it
+    /// never sees the camera the renderer settles on.
+    fn ui_pin(&mut self, _at: FixedVec3) {}
     /// Draw texture `tex` with its top-left at `(x, y)`.
     fn ui_image(&mut self, _tex: i64, _x: i64, _y: i64) {}
     /// Draw texture `tex` clipped to the left `frac` (0..1) of its width — the

@@ -284,6 +284,19 @@ pub enum MusicCmd {
     Play(String),
 }
 
+/// One HUD widget the map described this frame, and where it goes.
+///
+/// A widget is placed in screen points unless the map pinned it with
+/// `ui_pin`, in which case `over` is a point in the world, the widget's
+/// `x`/`y` are an offset from where that point lands, and the host drops the
+/// widget when it projects behind the camera. The map cannot do this
+/// projection itself: it never sees the camera the renderer ends up with.
+#[derive(Clone)]
+pub struct Placed {
+    pub over: Option<[f32; 3]>,
+    pub widget: UiWidget,
+}
+
 /// One HUD widget the map described this frame (screen points, top-left
 /// origin). Texture fields index [`MapRender::ui_textures`]. Each widget
 /// captures the `ui_scale` in effect when it was pushed, so a map can mix sizes
@@ -340,6 +353,22 @@ pub enum UiWidget {
         bit: u64,
         scale: f32,
     },
+}
+
+impl UiWidget {
+    /// Where the widget sits, mutably. Every kind carries the same pair, so a
+    /// pinned widget can be slid onto its world point without the painter
+    /// having to know which kind it is.
+    pub fn spot(&mut self) -> (&mut i32, &mut i32) {
+        match self {
+            Self::Image { x, y, .. }
+            | Self::ImageClip { x, y, .. }
+            | Self::Text { x, y, .. }
+            | Self::TextWrap { x, y, .. }
+            | Self::Anim { x, y, .. }
+            | Self::Button { x, y, .. } => (x, y),
+        }
+    }
 }
 
 /// A model the script bound via `entity_set_model`: a static sprite (box /
@@ -1906,7 +1935,10 @@ pub struct MapRender {
     /// The HUD widget list the map rebuilt this tick (immediate mode: cleared
     /// by `ui_clear`, appended by `ui_image`/`ui_text`/`ui_button`). The host
     /// paints it via egui each frame and reports button clicks back.
-    ui_widgets: Vec<UiWidget>,
+    ui_widgets: Vec<Placed>,
+    /// The world point `ui_pin` set for the next widget, if any. One-shot: the
+    /// push that follows takes it, so pinning never leaks into later widgets.
+    ui_pin: Option<[f32; 3]>,
     /// The viewport size (screen points) the host last rendered at, so the map
     /// can lay the HUD out relative to the window (`ui_width`/`ui_height`).
     ui_viewport: (i64, i64),
@@ -2099,6 +2131,7 @@ impl MapRender {
             sprites_uploaded: false,
             ui_textures: Vec::new(),
             ui_widgets: Vec::new(),
+            ui_pin: None,
             ui_viewport: (0, 0),
             ui_scale: 1.0,
             sounds_pending: Vec::new(),
@@ -3809,8 +3842,14 @@ impl MapRender {
 
     /// The HUD widget list the map rebuilt this tick, for the host's egui pass.
     #[must_use]
-    pub fn ui_widgets(&self) -> &[UiWidget] {
+    pub fn ui_widgets(&self) -> &[Placed] {
         &self.ui_widgets
+    }
+
+    /// Append a widget, consuming any pending `ui_pin`.
+    fn stack(&mut self, widget: UiWidget) {
+        let over = self.ui_pin.take();
+        self.ui_widgets.push(Placed { over, widget });
     }
 
     /// A HUD texture's RGBA8 pixels + dimensions, by the id `ui_texture`
@@ -5542,36 +5581,36 @@ impl HostBridge for MapRender {
         if palette.iter().all(Option::is_none) {
             return;
         }
-        let s = SCALE as i64;
-        let g = GROUND_Z as i64;
+        let span = SCALE as i64;
+        let base = GROUND_Z as i64;
         let world = self.world_grid();
         let Some(grid) = self.scene.grid_mut(world) else {
             return;
         };
-        for ly in 0..s {
-            for lx in 0..s {
-                let i = (ly * s + lx) as usize;
-                let Some(&top) = tops.get(i) else {
+        for ly in 0..span {
+            for lx in 0..span {
+                let slot = (ly * span + lx) as usize;
+                let Some(&top) = tops.get(slot) else {
                     continue; // a short slice leaves the rest unpainted
                 };
                 // A one-entry slice is a plain cell; a short one falls
                 // back to its first rather than leaving holes.
-                let Some(Some(cells)) = palette.get(i).or_else(|| palette.first()) else {
+                let Some(Some(cells)) = palette.get(slot).or_else(|| palette.first()) else {
                     continue;
                 };
-                let color = cells[i];
+                let color = cells[slot];
                 // World X is mirrored (see `world_of`); tile column `lx`
-                // maps across the cell's mirrored X span, row `ly` along Y.
-                let wx = (-x * s - 1 - lx) as i32;
-                let wy = (y * s + ly) as i32;
+                // maps across the cell'span mirrored X span, row `ly` along Y.
+                let wx = (-x * span - 1 - lx) as i32;
+                let wy = (y * span + ly) as i32;
                 // One span, not one call per voxel. A sub-column is a
                 // single colour by construction, and `set_rect` decomposes
                 // per chunk — the per-voxel loop this replaces was tens of
                 // millions of calls on a map of any size, which is minutes
                 // of startup.
                 grid.set_rect(
-                    IVec3::new(wx, wy, (g - top) as i32),
-                    IVec3::new(wx, wy, (g - floor) as i32),
+                    IVec3::new(wx, wy, (base - top) as i32),
+                    IVec3::new(wx, wy, (base - floor) as i32),
                     Some(VoxColor(color)),
                 );
             }
@@ -5725,7 +5764,7 @@ impl HostBridge for MapRender {
 
     fn ui_anim(&mut self, gif: i64, x: i64, y: i64) {
         if let Ok(gif) = usize::try_from(gif) {
-            self.ui_widgets.push(UiWidget::Anim {
+            self.stack(UiWidget::Anim {
                 gif,
                 x: x as i32,
                 y: y as i32,
@@ -5747,11 +5786,20 @@ impl HostBridge for MapRender {
 
     fn ui_clear(&mut self) {
         self.ui_widgets.clear();
+        self.ui_pin = None;
+    }
+
+    fn ui_pin(&mut self, at: FixedVec3) {
+        self.ui_pin = Some([
+            at.x.to_f64() as f32,
+            at.y.to_f64() as f32,
+            at.z.to_f64() as f32,
+        ]);
     }
 
     fn ui_image(&mut self, tex: i64, x: i64, y: i64) {
         if let Ok(tex) = usize::try_from(tex) {
-            self.ui_widgets.push(UiWidget::Image {
+            self.stack(UiWidget::Image {
                 tex,
                 x: x as i32,
                 y: y as i32,
@@ -5763,7 +5811,7 @@ impl HostBridge for MapRender {
     fn ui_image_clip(&mut self, tex: i64, x: i64, y: i64, frac: Fixed) {
         if let Ok(tex) = usize::try_from(tex) {
             let frac = frac.to_f64().clamp(0.0, 1.0) as f32;
-            self.ui_widgets.push(UiWidget::ImageClip {
+            self.stack(UiWidget::ImageClip {
                 tex,
                 x: x as i32,
                 y: y as i32,
@@ -5774,7 +5822,7 @@ impl HostBridge for MapRender {
     }
 
     fn ui_text(&mut self, x: i64, y: i64, text: &str, size: i64) {
-        self.ui_widgets.push(UiWidget::Text {
+        self.stack(UiWidget::Text {
             x: x as i32,
             y: y as i32,
             text: text.to_string(),
@@ -5784,7 +5832,7 @@ impl HostBridge for MapRender {
     }
 
     fn ui_text_wrap(&mut self, x: i64, y: i64, text: &str, size: i64, width: i64, color: i64) {
-        self.ui_widgets.push(UiWidget::TextWrap {
+        self.stack(UiWidget::TextWrap {
             x: x as i32,
             y: y as i32,
             text: text.to_string(),
@@ -5804,7 +5852,7 @@ impl HostBridge for MapRender {
         ) else {
             return;
         };
-        self.ui_widgets.push(UiWidget::Button {
+        self.stack(UiWidget::Button {
             tex,
             hover,
             pressed,
@@ -6177,10 +6225,10 @@ impl HostBridge for MapRender {
         // The same three answers the renderer's own sprite cull gives, and
         // deliberately so -- an overlay that disagreed with the body it is
         // about would hang in the dark or vanish over a lit one.
-        let (Some(fow), Some(gid)) = (self.fow.as_ref(), self.vision_grid()) else {
+        let (Some(fow), Some(eye)) = (self.fow.as_ref(), self.vision_grid()) else {
             return true;
         };
-        let Some(grid) = self.scene.grid(gid) else {
+        let Some(grid) = self.scene.grid(eye) else {
             return true;
         };
         let Some(footprint) = grid.footprint_cells() else {
@@ -6343,6 +6391,41 @@ mod tests {
     //! frame computes for `update_actors` to apply.
     use super::*;
     use monada_sim::World;
+
+    /// `ui_pin` binds the next widget and only the next one.
+    ///
+    /// A pin that stayed set would silently drag every later widget in the
+    /// frame onto the same world point -- and the HUD is rebuilt from
+    /// scratch each frame, so the damage would be invisible in the source
+    /// and total on screen. The one-shot take is the whole contract.
+    #[test]
+    fn a_pin_binds_one_widget_and_lets_the_next_one_go() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        let tex = 0;
+        r.ui_pin(FixedVec3::new(
+            Fixed::from_int(3),
+            Fixed::from_int(4),
+            Fixed::from_int(5),
+        ));
+        r.ui_image(tex, 2, 2);
+        r.ui_image(tex, 9, 9);
+
+        let placed = r.ui_widgets();
+        assert_eq!(placed.len(), 2);
+        assert_eq!(
+            placed[0].over,
+            Some([3.0, 4.0, 5.0]),
+            "the pinned widget carries the world point"
+        );
+        assert_eq!(placed[1].over, None, "and the pin does not outlive it");
+
+        // A pin left dangling by a map that never drew must not survive into
+        // the next frame's first widget either.
+        r.ui_pin(FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ZERO));
+        r.ui_clear();
+        r.ui_image(tex, 1, 1);
+        assert_eq!(r.ui_widgets()[0].over, None);
+    }
 
     /// Dust is decoration, and decoration gets a ceiling.
     ///

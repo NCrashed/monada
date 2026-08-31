@@ -1340,18 +1340,37 @@ impl App {
         };
         let render = render.clone();
         let size = ctx.content_rect().size();
-        let widgets = {
+        let (mut widgets, camera) = {
             let mut r = render.lock().expect("render mutex");
             r.set_ui_viewport(size.x as i64, size.y as i64);
-            r.ui_widgets().to_vec()
+            (r.ui_widgets().to_vec(), r.camera())
         };
         if widgets.is_empty() {
             return;
         }
 
+        // Widgets the map pinned over a world point are placed here, where the
+        // renderer -- and so the projection it last drew with -- is in reach.
+        // An anchor behind the camera drops its widget rather than smearing it
+        // along an edge.
+        if widgets.iter().any(|w| w.over.is_some()) {
+            let ppp = ctx.pixels_per_point();
+            let renderer = self.renderer.as_ref();
+            widgets.retain_mut(|w| {
+                let Some(over) = w.over else { return true };
+                let Some((px, py)) = renderer.and_then(|r| r.project_point(&camera, over)) else {
+                    return false;
+                };
+                let (x, y) = w.widget.spot();
+                *x += (px / ppp) as i32;
+                *y += (py / ppp) as i32;
+                true
+            });
+        }
+
         let mut clicked_bits = 0u64;
         for (i, w) in widgets.iter().enumerate() {
-            match w {
+            match &w.widget {
                 map_render::UiWidget::Image { tex, x, y, scale } => {
                     if let Some(h) = self.ui_handle(ctx, &render, *tex) {
                         Self::ui_area(ctx, i, *x, *y, |ui| {
