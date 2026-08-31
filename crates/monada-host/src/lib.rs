@@ -2077,11 +2077,18 @@ impl ApplicationHandler for App {
                     renderer.resize(size.width, size.height);
                 }
             }
+            // **Auto-repeat is not a press.** The OS re-sends `Pressed` while
+            // a key is held, and `action(id, down)` is an EDGE -- so a map
+            // that starts something on the press starts it again every
+            // repeat, which is a hold that can never get anywhere. Held
+            // actions read the state rather than the edge and lose nothing
+            // by this.
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(code),
                         state,
+                        repeat: false,
                         ..
                     },
                 ..
