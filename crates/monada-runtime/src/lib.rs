@@ -475,7 +475,15 @@ pub trait ScriptBackend {
 /// enters [`World`] or the desync hash.
 pub trait HostBridge: Send {
     /// Define a procedural box sprite model; returns its model id.
-    fn model_box(&mut self, w: i64, h: i64, d: i64, color: i64) -> i64;
+    ///
+    /// The default answers `0` and draws nothing, which is what
+    /// [`NullBridge`] and every recording test double already answer. A
+    /// bridge that DRAWS must still implement it -- the default is here so
+    /// a double that only wants to watch one verb does not have to copy
+    /// forty lines of stubs to get at it, not to make drawing optional.
+    fn model_box(&mut self, _w: i64, _h: i64, _d: i64, _color: i64) -> i64 {
+        0
+    }
     /// Define a procedural box sprite model with each of its 6 local
     /// faces painted a distinct colour (`x`/`neg_x`/`y`/`neg_y`/`z`/
     /// `neg_z`, in the box's own local axes — the same local X/Y/Z
@@ -483,26 +491,34 @@ pub trait HostBridge: Send {
     /// aid: it makes an orientation visible without relying on
     /// directional shading alone to tell one side from another. Returns
     /// its model id.
+    /// Defaults as [`model_box`](Self::model_box) does.
     #[allow(clippy::too_many_arguments)]
     fn model_box_sides(
         &mut self,
-        w: i64,
-        h: i64,
-        d: i64,
-        x: i64,
-        neg_x: i64,
-        y: i64,
-        neg_y: i64,
-        z: i64,
-        neg_z: i64,
-    ) -> i64;
+        _w: i64,
+        _h: i64,
+        _d: i64,
+        _x: i64,
+        _neg_x: i64,
+        _y: i64,
+        _neg_y: i64,
+        _z: i64,
+        _neg_z: i64,
+    ) -> i64 {
+        0
+    }
     /// Define a sprite model from a KV6 asset in the map archive (by its
     /// archive-relative path), turned `turns` quarter-steps clockwise about
     /// the vertical axis (so a map can face asymmetric art whichever way it
     /// needs — e.g. opposing sides facing each other); returns its model id.
-    fn model_kv6(&mut self, asset_path: &str, turns: i64) -> i64;
+    ///
+    /// Defaults as [`model_box`](Self::model_box) does.
+    fn model_kv6(&mut self, _asset_path: &str, _turns: i64) -> i64 {
+        0
+    }
     /// Bind an entity to a base render model (render-side, not hashed).
-    fn entity_set_model(&mut self, entity: i64, model: i64);
+    /// The default ignores it.
+    fn entity_set_model(&mut self, _entity: i64, _model: i64) {}
     /// Bind an entity to a `grid_spawn` grid (by its handle), so it rides
     /// that grid's transform: its sim `position` is read as grid-local and
     /// composed through the grid's origin + rotation when rendered — a crew
@@ -522,10 +538,24 @@ pub trait HostBridge: Send {
     /// `color` is roxlap-packed `0xBB_RR_GG_BB` — the HIGH byte is
     /// brightness, not alpha: `0x0080_8080` is a *black* voxel,
     /// `0x8080_8080` a mid-grey one.
+    ///
+    /// The default paints nothing, as [`model_box`](Self::model_box)
+    /// defines nothing.
     #[allow(clippy::too_many_arguments)]
-    fn voxel_fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64, color: i64);
-    /// Paint a single voxel into the world grid, in sim coordinates.
-    fn voxel_set(&mut self, x: i64, y: i64, z: i64, color: i64);
+    fn voxel_fill(
+        &mut self,
+        _x0: i64,
+        _y0: i64,
+        _z0: i64,
+        _x1: i64,
+        _y1: i64,
+        _z1: i64,
+        _color: i64,
+    ) {
+    }
+    /// Paint a single voxel into the world grid, in sim coordinates. The
+    /// default paints nothing.
+    fn voxel_set(&mut self, _x: i64, _y: i64, _z: i64, _color: i64) {}
     /// Cut column `(x, y)` down to below sim-`z`: everything at and above
     /// `z` becomes air, in the render grid AND the collision store — so
     /// movers, `nav_path` and the eye agree the space opened (a felled
@@ -722,17 +752,22 @@ pub trait HostBridge: Send {
     /// Mark `entity` as the locally selected one (a highlight overlay),
     /// REPLACING any current selection (single-select semantics — the
     /// chess-era contract).
-    fn highlight(&mut self, entity: i64);
+    /// The default ignores it.
+    fn highlight(&mut self, _entity: i64) {}
     /// ADD `entity` to the local selection (multi-select, e.g. an RTS box
     /// select) without touching what is already selected. The default
     /// ignores it.
     fn highlight_add(&mut self, _entity: i64) {}
     /// Clear the local selection.
-    fn highlight_clear(&mut self);
+    /// The default ignores it.
+    fn highlight_clear(&mut self) {}
     /// The locally selected entity, or `-1`. With a multi-selection this
     /// is its first (lowest-id) member — single-select maps never see the
     /// difference.
-    fn highlighted(&self) -> i64;
+    /// The default answers `-1`: nothing selected.
+    fn highlighted(&self) -> i64 {
+        -1
+    }
     /// Every locally selected entity (ascending id). The group-order side
     /// of multi-select: a map iterates this to submit one command per
     /// selected unit. The default is empty.
@@ -760,9 +795,11 @@ pub trait HostBridge: Send {
         Vec::new()
     }
     /// Set the HUD status line.
-    fn status(&mut self, text: &str);
+    /// The default ignores it.
+    fn status(&mut self, _text: &str) {}
     /// Aim the camera at a point (sim coordinates).
-    fn camera_focus(&mut self, point: FixedVec3);
+    /// The default ignores it.
+    fn camera_focus(&mut self, _point: FixedVec3) {}
     /// Aim the camera at an entity's `point` (sim coordinates), composed through
     /// the grid the entity rides — so following a crew member on a moving or
     /// rotating hull tracks its true world seat, not the un-transformed cell.
@@ -778,7 +815,8 @@ pub trait HostBridge: Send {
     /// Orient the camera: `yaw`/`pitch` in radians — the orbit angles the
     /// view should start at. Lets a map face the scene its own way instead
     /// of inheriting the host's default angle.
-    fn camera_angle(&mut self, yaw: Fixed, pitch: Fixed);
+    /// The default ignores it.
+    fn camera_angle(&mut self, _yaw: Fixed, _pitch: Fixed) {}
 
     /// Set the camera's orbit distance from its focus point (world voxels) —
     /// how close the view sits. The host clamps it to a sane range. The
@@ -907,7 +945,8 @@ pub trait HostBridge: Send {
 
     /// Queue a sim command for the host to route through the command path
     /// after the current trigger returns (never applied re-entrantly).
-    fn submit_command(&mut self, verb: i64, target: i64, arg: FixedVec3);
+    /// The default drops it -- a bridge with no session to submit into.
+    fn submit_command(&mut self, _verb: i64, _target: i64, _arg: FixedVec3) {}
 
     /// The local peer's player id, or `None` when there is no single local
     /// player (a single-window "hotseat" session that drives every side).
@@ -915,7 +954,10 @@ pub trait HostBridge: Send {
     /// comparing this against its own side-to-move; the engine attaches no
     /// meaning to it. The script-side sentinel (`None` → a negative id)
     /// lives in exactly one place — the `local_player` host-fn registration.
-    fn local_player(&self) -> Option<i64>;
+    /// The default answers `None`, which every reader treats as hotseat.
+    fn local_player(&self) -> Option<i64> {
+        None
+    }
 
     // --- local-layer input queries (docs/plans/input-bindings.md) ---------
     // Served to the map's *local* script layer only ([`LocalBackend`]) —
@@ -1075,7 +1117,8 @@ pub trait HostBridge: Send {
     /// Declare the map's directional "sun": `dir` is the direction the
     /// light travels, `intensity` its strength. The host shades the map's
     /// sprites and grid from it. Render-side only.
-    fn set_light(&mut self, dir: FixedVec3, intensity: Fixed);
+    /// The default ignores it.
+    fn set_light(&mut self, _dir: FixedVec3, _intensity: Fixed) {}
 
     /// Ask for real cast shadows from the `set_light` sun, `strength` deep
     /// (`0..1`; `0` turns them off again). Off by default.
@@ -1120,7 +1163,8 @@ pub trait HostBridge: Send {
 
     /// Load a sky panorama from an `assets/` image and render it behind the
     /// scene. Render-side only.
-    fn set_sky(&mut self, asset_path: &str);
+    /// The default ignores it.
+    fn set_sky(&mut self, _asset_path: &str) {}
 
     /// Set the flat background colour a ray that hits nothing lands on,
     /// as `0x00RR_GGBB`. The host's default is a daylight blue.
@@ -1638,47 +1682,12 @@ pub type SharedBridge = Arc<Mutex<dyn HostBridge + Send>>;
 /// `init` paints a board / defines models run with no window.
 pub struct NullBridge;
 
-impl HostBridge for NullBridge {
-    fn model_box(&mut self, _w: i64, _h: i64, _d: i64, _color: i64) -> i64 {
-        0
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn model_box_sides(
-        &mut self,
-        _w: i64,
-        _h: i64,
-        _d: i64,
-        _x: i64,
-        _neg_x: i64,
-        _y: i64,
-        _neg_y: i64,
-        _z: i64,
-        _neg_z: i64,
-    ) -> i64 {
-        0
-    }
-    fn model_kv6(&mut self, _asset_path: &str, _turns: i64) -> i64 {
-        0
-    }
-    fn entity_set_model(&mut self, _entity: i64, _model: i64) {}
-    #[allow(clippy::too_many_arguments)]
-    fn voxel_fill(&mut self, _x0: i64, _y0: i64, _z0: i64, _x1: i64, _y1: i64, _z1: i64, _c: i64) {}
-    fn voxel_set(&mut self, _x: i64, _y: i64, _z: i64, _color: i64) {}
-    fn highlight(&mut self, _entity: i64) {}
-    fn highlight_clear(&mut self) {}
-    fn highlighted(&self) -> i64 {
-        -1
-    }
-    fn status(&mut self, _text: &str) {}
-    fn camera_focus(&mut self, _point: FixedVec3) {}
-    fn camera_angle(&mut self, _yaw: Fixed, _pitch: Fixed) {}
-    fn submit_command(&mut self, _verb: i64, _target: i64, _arg: FixedVec3) {}
-    fn local_player(&self) -> Option<i64> {
-        None
-    }
-    fn set_light(&mut self, _dir: FixedVec3, _intensity: Fixed) {}
-    fn set_sky(&mut self, _asset_path: &str) {}
-}
+// Empty on purpose, and only lately so: every body this used to carry is
+// now the trait's own default, because this is where those defaults were
+// copied from. What is left is the name -- which is worth keeping, since
+// "a bridge that does nothing" reads better at a call site than a bare
+// struct nobody can tell the intent of.
+impl HostBridge for NullBridge {}
 
 /// A UI/HUD-side event a script pushes via `ui_emit_event` (DESIGN.md
 /// §3.3). Render-side only: the host drains it for display, it never
