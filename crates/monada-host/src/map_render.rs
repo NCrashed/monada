@@ -5790,11 +5790,13 @@ impl HostBridge for MapRender {
     }
 
     fn ui_pin(&mut self, at: FixedVec3) {
-        self.ui_pin = Some([
-            at.x.to_f64() as f32,
-            at.y.to_f64() as f32,
-            at.z.to_f64() as f32,
-        ]);
+        // **Stored in world space, not sim space.** The map speaks cells and
+        // the projection speaks voxels -- and world X is mirrored besides --
+        // so a sim position handed to the renderer lands somewhere else
+        // entirely. Converted here, where the map's z convention is known,
+        // rather than at paint time where it is not.
+        let w = entity_world_of_in(self.volume, at);
+        self.ui_pin = Some([w.x as f32, w.y as f32, w.z as f32]);
     }
 
     fn ui_image(&mut self, tex: i64, x: i64, y: i64) {
@@ -6412,11 +6414,16 @@ mod tests {
 
         let placed = r.ui_widgets();
         assert_eq!(placed.len(), 2);
-        assert_eq!(
-            placed[0].over,
-            Some([3.0, 4.0, 5.0]),
-            "the pinned widget carries the world point"
-        );
+        let over = placed[0].over.expect("the pinned widget carries a point");
+        // **In the space the renderer draws in, not the one the map speaks.**
+        // Asserted as the mirror and the scale rather than as three numbers:
+        // a pin that passed sim cells straight through would land the widget
+        // a screen away, and that is the shape of the mistake -- x flips
+        // sign, y grows by a cell's worth of voxels, and z counts DOWN from
+        // the deck.
+        assert!(over[0] < 0.0, "world x is mirrored: {over:?}");
+        assert!(over[1] > 4.0, "world y is scaled: {over:?}");
+        assert!(over[2] < GROUND_Z as f32, "world z counts down: {over:?}");
         assert_eq!(placed[1].over, None, "and the pin does not outlive it");
 
         // A pin left dangling by a map that never drew must not survive into
