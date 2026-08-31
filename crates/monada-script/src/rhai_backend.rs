@@ -644,6 +644,13 @@ pub(crate) fn register_terrain_api(
         },
     );
 
+    register_terrain_queries(engine, terrain);
+}
+
+/// The read half of the terrain API: what the store can be asked, as opposed
+/// to what it can be told. Split out of [`register_terrain_api`] for length
+/// alone -- the two halves are registered together and always have been.
+fn register_terrain_queries(engine: &mut Engine, terrain: &SharedTerrain) {
     // Collision queries (sim coords). Deterministic: the store is a pure
     // function of the map's own paint calls, so every peer answers
     // identically — safe to feed hashed `tick()` decisions.
