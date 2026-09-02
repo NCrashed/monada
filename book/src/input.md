@@ -40,6 +40,12 @@ shape. The host resolves the actual keys through its binding table, so a
 player can rebind any of them (press `F2` in the host for the rebind panel,
 or edit `bindings.toml`); the map only ever refers to actions by `id`.
 
+The host keeps a few actions of its own in the same table, above whatever a
+map declares: `Esc` quits, `F1` shows the debug overlay, `F2` opens the
+rebind panel, and `F11` toggles borderless fullscreen. `Alt`+`Enter` toggles
+fullscreen too; it is a chord rather than a binding, since a table entry is
+one key or one button and has nowhere to write a modifier.
+
 ## The local layer
 
 The map's script has two scopes. The simulation scope you have already met —

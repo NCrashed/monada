@@ -148,6 +148,14 @@ pub enum Action {
     DebugHud,
     /// Toggle the key-bindings panel.
     OpenBindings,
+    /// Toggle borderless fullscreen.
+    ///
+    /// Alt+Enter does the same and is not in this table: an input here is
+    /// one key or one button, with nowhere to write the modifier. The
+    /// host checks that chord ahead of the table, and this is the
+    /// rebindable half -- so a keyboard where the chord is taken by the
+    /// window manager still has a way in.
+    Fullscreen,
     OrbitLeft,
     OrbitRight,
     OrbitUp,
@@ -170,10 +178,11 @@ pub enum Action {
 }
 
 /// Every base action, in template / documentation order.
-const ALL_ACTIONS: [Action; 19] = [
+const ALL_ACTIONS: [Action; 20] = [
     Action::Quit,
     Action::DebugHud,
     Action::OpenBindings,
+    Action::Fullscreen,
     Action::OrbitLeft,
     Action::OrbitRight,
     Action::OrbitUp,
@@ -200,6 +209,7 @@ impl Action {
             Action::Quit => "ui.quit",
             Action::DebugHud => "ui.debug_hud",
             Action::OpenBindings => "ui.bindings",
+            Action::Fullscreen => "ui.fullscreen",
             Action::OrbitLeft => "camera.orbit_left",
             Action::OrbitRight => "camera.orbit_right",
             Action::OrbitUp => "camera.orbit_up",
@@ -229,6 +239,7 @@ impl Action {
             Action::Quit => "Quit",
             Action::DebugHud => "Debug overlay",
             Action::OpenBindings => "Key bindings",
+            Action::Fullscreen => "Fullscreen",
             Action::OrbitLeft => "Camera left",
             Action::OrbitRight => "Camera right",
             Action::OrbitUp => "Camera up",
@@ -254,6 +265,7 @@ impl Action {
             Action::Quit
             | Action::DebugHud
             | Action::OpenBindings
+            | Action::Fullscreen
             | Action::OrbitLeft
             | Action::OrbitRight
             | Action::OrbitUp
@@ -280,6 +292,7 @@ impl Action {
             Action::Quit => &[PhysInput::Key(KeyCode::Escape)],
             Action::DebugHud => &[PhysInput::Key(KeyCode::F1)],
             Action::OpenBindings => &[PhysInput::Key(KeyCode::F2)],
+            Action::Fullscreen => &[PhysInput::Key(KeyCode::F11)],
             Action::OrbitLeft => &[PhysInput::Key(KeyCode::ArrowLeft)],
             Action::OrbitRight => &[PhysInput::Key(KeyCode::ArrowRight)],
             Action::OrbitUp => &[PhysInput::Key(KeyCode::ArrowUp)],
@@ -1116,6 +1129,24 @@ mod tests {
         assert_eq!(base_of(b.resolve(REAL, click)), Some(Action::Attack));
         // Unbound keys resolve to nothing (A/D in turn-based).
         assert_eq!(b.resolve(TURN, key(KeyCode::KeyA)), None);
+    }
+
+    /// Fullscreen is a global action with a plain key of its own, so the
+    /// chord the host answers to (Alt+Enter) is not the only way in --
+    /// and so it is rebindable where a window manager has taken it.
+    #[test]
+    fn fullscreen_is_a_global_action_on_a_key_of_its_own() {
+        let b = base();
+        for stack in [TURN, REAL, REPLAY] {
+            assert_eq!(
+                b.resolve(stack, key(KeyCode::F11)),
+                Some(ActionRef::Base(Action::Fullscreen)),
+                "{stack:?}",
+            );
+        }
+        // A plain Return is not it: the chord is the host's, and the key
+        // by itself stays free for a map to bind.
+        assert_eq!(b.resolve(REAL, key(KeyCode::Enter)), None);
     }
 
     #[test]

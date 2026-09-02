@@ -70,8 +70,8 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::PhysicalKey;
-use winit::window::{Window, WindowId};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+use winit::window::{Fullscreen, Window, WindowId};
 
 /// Fixed simulation step (25 Hz, the WC3-parity default — DESIGN.md §3.1).
 const TICK_DT: f64 = 1.0 / 25.0;
@@ -207,6 +207,12 @@ pub fn run(config: RunConfig) {
     }
     let mut app = App::new(config);
     event_loop.run_app(&mut app).expect("winit: run_app");
+}
+
+/// Whether a key is the Return one, wherever on the board it sits. The
+/// numpad's is a different code and the same key to anyone pressing it.
+fn is_enter(code: KeyCode) -> bool {
+    matches!(code, KeyCode::Enter | KeyCode::NumpadEnter)
 }
 
 /// Which camera-control keys are currently held. A flat set of bools is
@@ -766,6 +772,11 @@ struct App {
     /// The label of the slot a just-completed rebind took its key from, if
     /// any — shown once in the panel so the displacement isn't silent.
     rebind_notice: Option<String>,
+    /// Which modifiers are held, for the one chord the host answers to
+    /// (Alt+Enter). The binding table holds single inputs and has nowhere
+    /// to write a modifier, so this is tracked beside it rather than in
+    /// it — see [`Action::Fullscreen`].
+    modifiers: ModifiersState,
     /// Real-time gameplay input (WASD / dodge / attack), sampled per frame
     /// and injected per tick into a fixed-rate map.
     input: Input,
@@ -852,6 +863,7 @@ impl App {
             rebind_open: false,
             capturing: None,
             rebind_notice: None,
+            modifiers: ModifiersState::empty(),
             input: Input::default(),
             cursor: (0.0, 0.0),
             fps: 0.0,
@@ -2077,6 +2089,10 @@ impl ApplicationHandler for App {
                     renderer.resize(size.width, size.height);
                 }
             }
+            // Which modifiers are held. Only the fullscreen chord reads
+            // this; every other input is a single key or button and
+            // resolves through the binding table.
+            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             // **Auto-repeat is not a press.** The OS re-sends `Pressed` while
             // a key is held, and `action(id, down)` is an EDGE -- so a map
             // that starts something on the press starts it again every
@@ -2110,6 +2126,15 @@ impl ApplicationHandler for App {
                     // Esc closes the open panel rather than quitting the app.
                     self.rebind_open = false;
                     self.rebind_notice = None;
+                } else if pressed && self.modifiers.alt_key() && is_enter(code) {
+                    // **The one chord the host knows.** Alt+Enter is what
+                    // every windowed game answers to for fullscreen, and
+                    // the binding table cannot hold it: an entry there is
+                    // one input, with nowhere to write a modifier. So it
+                    // is checked here, ahead of the table -- which also
+                    // keeps a plain Enter free for whatever a map binds
+                    // it to. `ui.fullscreen` is the rebindable half.
+                    self.toggle_fullscreen();
                 } else if !consumed {
                     self.dispatch_input(event_loop, PhysInput::Key(code), pressed);
                 }
@@ -2313,6 +2338,22 @@ impl App {
         }
     }
 
+    /// Go fullscreen, or come back.
+    ///
+    /// **Borderless rather than exclusive.** It takes the monitor it is
+    /// already on (`None` = the current one), changes no video mode, and
+    /// alt-tabs away without a mode switch -- which is what somebody
+    /// toggling this while working on a map wants. The size change
+    /// arrives as an ordinary `Resized`, so the renderer and egui follow
+    /// by the path they already take.
+    fn toggle_fullscreen(&mut self) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let full = window.fullscreen().is_none();
+        window.set_fullscreen(full.then(|| Fullscreen::Borderless(None)));
+    }
+
     /// Execute a resolved action. Held actions (camera / move axis)
     /// track `down`; one-shot actions fire on press only.
     fn apply_action(&mut self, event_loop: &ActiveEventLoop, action: ActionRef, down: bool) {
@@ -2346,6 +2387,8 @@ impl App {
             }
             // F1 toggles the debug overlay (tick / FPS / status / lockstep).
             Action::DebugHud if down => self.debug_hud = !self.debug_hud,
+            // F11, and Alt+Enter beside it (`window_event`).
+            Action::Fullscreen if down => self.toggle_fullscreen(),
             // F2 toggles the key-bindings panel; closing cancels any capture.
             Action::OpenBindings if down => {
                 self.rebind_open = !self.rebind_open;
