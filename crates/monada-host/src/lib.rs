@@ -36,7 +36,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use glam::DVec3;
 use monada_fixed::{Fixed, FixedVec3};
@@ -207,6 +207,53 @@ pub fn run(config: RunConfig) {
     }
     let mut app = App::new(config);
     event_loop.run_app(&mut app).expect("winit: run_app");
+}
+
+/// Frame-time accounting for `MONADA_PROFILE`.
+///
+/// **A log that only prints what crossed 20 ms cannot tell 8 ms from
+/// 19.** The slow frames go out one by one because a stutter is a single
+/// frame and wants its own breakdown; this is the rest of the story, a
+/// line a second saying what the frames actually cost. Tuning anything
+/// by the slow-frame log alone means tuning by how often it goes quiet.
+struct FrameLog {
+    /// When the second being summarised started.
+    since: Instant,
+    frames: u32,
+    total: Duration,
+    worst: Duration,
+}
+
+impl FrameLog {
+    fn new(now: Instant) -> FrameLog {
+        FrameLog {
+            since: now,
+            frames: 0,
+            total: Duration::ZERO,
+            worst: Duration::ZERO,
+        }
+    }
+
+    /// Fold one frame in, and answer the summary once a second is up.
+    fn record(&mut self, now: Instant, frame: Duration) -> Option<String> {
+        self.frames += 1;
+        self.total += frame;
+        self.worst = self.worst.max(frame);
+        let span = now.saturating_duration_since(self.since);
+        if span < Duration::from_secs(1) {
+            return None;
+        }
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        let line = format!(
+            "[profile] {:5.1} fps — frame {:5.1} ms avg, {:5.1} ms worst, over {} frames",
+            f64::from(self.frames) / span.as_secs_f64(),
+            ms(self.total) / f64::from(self.frames),
+            ms(self.worst),
+            self.frames,
+        );
+        *self = FrameLog::new(now);
+        Some(line)
+    }
 }
 
 /// Whether a key is the Return one, wherever on the board it sits. The
@@ -807,7 +854,7 @@ struct App {
     /// Slow-frame breakdown to stderr (set `MONADA_PROFILE=1`): any frame
     /// over 20 ms logs how the time split across sim / scene-sync / render /
     /// present, to localize stutter without a profiler attached.
-    profile: bool,
+    profile: Option<FrameLog>,
 }
 
 impl App {
@@ -874,7 +921,9 @@ impl App {
             epoch: Instant::now(),
             debug_hud: false,
             debug_done: false,
-            profile: std::env::var_os("MONADA_PROFILE").is_some_and(|v| !v.is_empty() && v != "0"),
+            profile: std::env::var_os("MONADA_PROFILE")
+                .is_some_and(|v| !v.is_empty() && v != "0")
+                .then(|| FrameLog::new(Instant::now())),
         }
     }
 
@@ -1981,14 +2030,15 @@ impl App {
             None => renderer.present(),
         }
 
-        if self.profile {
+        let elapsed = self.epoch.elapsed();
+        if let Some(log) = self.profile.as_mut() {
             let total = t0.elapsed();
             if total.as_secs_f64() > 0.020 {
                 let t_present = total.saturating_sub(t_pre_present);
                 eprintln!(
                     "[profile] t={:7.2}s frame {:6.1}ms — sim {:6.1} sync {:6.1} \
                      hud {:6.1} render {:6.1} present {:6.1}",
-                    self.epoch.elapsed().as_secs_f64(),
+                    elapsed.as_secs_f64(),
                     total.as_secs_f64() * 1e3,
                     t_sim.as_secs_f64() * 1e3,
                     t_sync.as_secs_f64() * 1e3,
@@ -1996,6 +2046,11 @@ impl App {
                     t_render.as_secs_f64() * 1e3,
                     t_present.as_secs_f64() * 1e3,
                 );
+            }
+            // …and what the frames cost when none of them crossed the
+            // line, which is the half a slow-frame log cannot say.
+            if let Some(summary) = log.record(Instant::now(), total) {
+                eprintln!("{summary}");
             }
         }
 
