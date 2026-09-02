@@ -2381,6 +2381,15 @@ impl MapRender {
             // Ranges are sim cells; grid columns are SCALE finer.
             cfg.range = range as f32 * SCALE as f32;
             cfg.peripheral_range = peripheral as f32 * SCALE as f32;
+            // **The mask is kept at the grain the map thinks in.** A
+            // column map's voxels are a texture -- what a body stands on
+            // is a cell, `SCALE` columns across -- so a per-column mask
+            // asks the shadowcast for SCALE² times the cells it needs
+            // and re-runs the lot whenever an observer crosses a
+            // sixteenth of a cell. A cubic hull is the other case: there
+            // a cell IS a voxel, a crewman leans round a doorframe, and
+            // the span stays one.
+            cfg.cell_span = if cubic { 1 } else { SCALE as u32 };
             cfg.unseen_occludes = self.shroud_unseen;
             cfg.memory_decay = 2.0;
             self.fow = Some(FogOfWar::new(cfg));
@@ -2397,25 +2406,18 @@ impl MapRender {
         // does. De-rotating here by `grid_rot_inv` (as this used to) cancels the
         // twin's rotation and pins the cone to one world direction while the hull
         // spins under it. `world_of` mirrors sim +x → world -x (hence `-cos`).
-        // **The fog is asked from the cell a body stands in, not from the
-        // point it is drawn at**, and a full circle is not asked which way
-        // it faces. Both are about how OFTEN roxlap recomputes, not about
-        // what it answers: the shadowcast is skipped while the observer's
-        // key holds, and that key is (cell, facing, eye) — so an observer
-        // fed the smoothed draw position crosses a column every frame and
-        // pays a whole LOS pass for a wiggle that moves the rim by a
-        // sixteenth of a cell. On a 64-cell map with a ten-cell sight that
-        // pass is ~80k columns per observer and it was the frame.
+        // **A full circle is not asked which way it faces, and the eye is
+        // asked in quarter-cells.** Both are about how OFTEN roxlap
+        // recomputes, not about what it answers: the shadowcast is
+        // skipped while the observer's key holds, and that key is (cell,
+        // facing, eye). The cell is the mask's own business now
+        // (`VisionConfig::cell_span`); these two are the host's.
         //
-        // A column map's cell is `SCALE` columns across; a cubic hull's is
-        // one voxel, so there it quantises to nothing and the hull keeps
-        // the granularity it had.
-        let cell_cols = if cubic { 1.0 } else { SCALE };
-        // …and the eye to a quarter of a cell. A body thrown into the air
-        // is still standing where it stood -- the toss is the sim moving
-        // it, not the player learning anything -- so the fog should not
-        // re-cast twice a frame on the way up and again on the way down.
-        // Fine enough that a ramp (12 voxels a level) still steps the eye.
+        // The eye, because a body thrown into the air is still standing
+        // where it stood -- the toss is the sim moving it, not the player
+        // learning anything -- and following it re-cast twice a frame on
+        // the way up and again on the way down. A quarter of a cell is
+        // fine enough that a ramp (12 voxels a level) still steps it.
         let eye_step = if cubic { 1.0 } else { SCALE / 4.0 };
         let observers: Vec<FowObserver> = self
             .observer_poses
@@ -2431,9 +2433,8 @@ impl MapRender {
                 } else {
                     DVec3::new(-(yaw.cos()), yaw.sin(), 0.0)
                 };
-                let stand = |v: f64| (v / cell_cols).floor() * cell_cols + cell_cols * 0.5;
                 FowObserver {
-                    cell: IVec2::new(stand(feet.x).floor() as i32, stand(feet.y).floor() as i32),
+                    cell: IVec2::new(feet.x.floor() as i32, feet.y.floor() as i32),
                     facing: Vec2::new(facing_local.x as f32, facing_local.y as f32),
                     deck: 0,
                     // Eye near HEAD height above the feet (z-down ⇒ a smaller grid-z).
@@ -8764,6 +8765,45 @@ mod tests {
         // Clearing the observer detaches the twin cleanly.
         r.vision_observer(-1);
         assert!(r.update_fow(0.016).is_none(), "no observer → no fog");
+    }
+
+    /// **The mask is kept at the grain the map thinks in.** A column
+    /// map's cell is `SCALE` columns of texture and the fog costs
+    /// `span²` per pass; a cubic hull's cell IS a voxel, and a crewman
+    /// leaning round a doorframe wants every one of them.
+    #[test]
+    fn a_column_map_fogs_by_the_cell_and_a_hull_by_the_voxel() {
+        let stand = |cubic: bool| {
+            let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+            let grid = if cubic {
+                let g = r.grid_spawn_cubic(0, 0, 0);
+                r.voxel_fill_in(g, 0, 0, 0, 8, 8, 0, 0x8055_5f6b);
+                Some(g)
+            } else {
+                r.voxel_fill(0, 0, 0, 8, 8, 0, 0x8055_5f6b); // auto world grid
+                None
+            };
+            r.vision_config(360, 6, 6);
+            r.deck_clip(0, 3);
+
+            let mut world = World::new(0);
+            let arch = world.register_archetype(&["deck"]);
+            let e = world.spawn(arch);
+            world.set_position(
+                e,
+                FixedVec3::new(Fixed::from_int(4), Fixed::from_int(4), Fixed::ZERO),
+            );
+            if let Some(g) = grid {
+                r.entity_set_grid(e.0 as i64, g);
+            }
+            r.vision_observer(e.0 as i64);
+            r.build_instances(&world);
+            let _ = r.update_fow(0.016);
+            r.fow.as_ref().expect("the fog armed").cell_span()
+        };
+
+        assert_eq!(stand(false), SCALE as u32, "a column map fogs by the cell");
+        assert_eq!(stand(true), 1, "a hull fogs by the voxel");
     }
 
     /// The box-select drag quad follows the SCREEN, not world N/S/E/W. Locks
