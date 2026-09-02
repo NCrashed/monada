@@ -2082,15 +2082,6 @@ impl ApplicationHandler for App {
             } else {
                 BackendPreference::Cpu
             },
-            // Keep the whole scene at GPU mip-0. The default `gpu_mip_scan_dist`
-            // (64 world units) LODs distant chunks to coarser mips — and those
-            // coarse chunks do NOT apply a grid's `z_clip`, so a deck cutaway
-            // (`deck_clip`) only cuts within a ~64-unit circle around the camera
-            // and the cut-away ceiling reappears beyond it (a circle centred on
-            // the camera nadir, growing with zoom-out — the ship demo's GPU-only
-            // "hole in the ceiling"). monada's scenes are small, so mip-0
-            // everywhere costs nothing; revisit if a map ever needs LOD.
-            gpu_mip_scan_dist: 8192.0,
             ..RenderOptions::default()
         };
         // roxlap-render is now decoupled from winit: it takes any
