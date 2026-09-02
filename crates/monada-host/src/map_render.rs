@@ -2509,6 +2509,44 @@ impl MapRender {
         out
     }
 
+    /// Keep the GPU's scene LOD measured against how far the eye already
+    /// stands.
+    ///
+    /// **"Far" is not an absolute number of voxels.** A chunk marches at
+    /// `floor(log2(t / d))`, where `t` is how far along the ray it sits
+    /// and `d` is roxlap's scan distance — so a hull camera five metres
+    /// off its subject and a strategy camera a hundred metres off it
+    /// cannot share a `d`. roxlap's default (64 world units) is the
+    /// hull's; feed the same number to an isometric map and the ENTIRE
+    /// scene sits past it, so every chunk marches at the coarsest mip in
+    /// the ladder. That reads as a blurred, half-resolution world — and
+    /// it is fast for exactly the wrong reason.
+    ///
+    /// The camera's own orbit distance is the honest scale: mip-0 reaches
+    /// twice it (the ladder's first step is at `2d`), which covers the
+    /// ground a top-down view is looking at, and coarsens only what is
+    /// further from the eye than the subject is again.
+    ///
+    /// `ROXLAP_GPU_MIP_SCAN_DIST` is a user's escape hatch on a shipped
+    /// binary, and a host that wrote this every frame would quietly take
+    /// it away — so an env override leaves the knob alone.
+    fn drive_mip_scan(&self, renderer: &mut SceneRenderer) {
+        if let Some(dist) = self.mip_scan_dist() {
+            renderer.set_gpu_mip_scan_dist(dist);
+        }
+    }
+
+    /// …and the number itself, so the rule can be checked without a GPU.
+    /// `None` where the env has taken the knob.
+    #[must_use]
+    fn mip_scan_dist(&self) -> Option<f32> {
+        if std::env::var_os("ROXLAP_GPU_MIP_SCAN_DIST").is_some() {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        Some(self.camera.dist.max(1.0) as f32)
+    }
+
     /// Apply one input edge to a declared action's live value (the host's
     /// binding dispatch; `index` is the manifest declaration order).
     pub fn action_set(&mut self, index: usize, part: Part, down: bool) {
@@ -4309,6 +4347,7 @@ impl MapRender {
         });
         // Style the fog twin (the dimmed last-seen grid the mask paints over).
         frame.fow = fow_twin.map(|g| (g, self.fow.as_ref().expect("fow mask present")));
+        self.drive_mip_scan(renderer);
         renderer.render(&mut self.scene, camera, &frame);
 
         self.draw_drag_rect(renderer, camera);
@@ -8765,6 +8804,36 @@ mod tests {
         // Clearing the observer detaches the twin cleanly.
         r.vision_observer(-1);
         assert!(r.update_fow(0.016).is_none(), "no observer → no fog");
+    }
+
+    /// **The scene's LOD is measured against the camera, not against a
+    /// constant.** A chunk marches at `floor(log2(t / d))`; roxlap's
+    /// default `d` is a hull camera's 64 world units, and an isometric
+    /// map watching from sixteen hundred sits wholly past it — every
+    /// chunk at the ladder's coarsest mip, a blurred world, fast for the
+    /// wrong reason. Pinned as the rule rather than the number: mip 0
+    /// has to reach past the ground a top-down view is looking at.
+    #[test]
+    fn scene_lod_keeps_the_ground_a_top_down_camera_watches_at_mip_zero() {
+        let mut r = MapRender::new(BTreeMap::new(), None, &[]);
+        // necromy's opening frame: a 64-cell field (1024 world voxels
+        // across, so ~1450 corner to corner) seen from 1600 away.
+        r.camera_dist(Fixed::from_int(1600));
+        let d = r.mip_scan_dist().expect("no env override in tests");
+        assert_eq!(d as i32, 1600, "the camera's own distance is the scale");
+
+        // The ladder's first step is at 2d, and the far corner of that
+        // field sits at the camera distance plus its own diagonal.
+        let mip = |t: f32| (t.max(d) / d).log2().floor() as i32;
+        assert_eq!(mip(1600.0 + 1450.0), 0, "the far corner is still mip 0");
+        // …and something twice as far from the eye as the subject does
+        // coarsen, or this would be LOD in name only.
+        assert!(mip(1600.0 * 2.5) >= 1);
+
+        // Zoomed in, the same rule keeps the near ground sharp while the
+        // rest of the map — well outside a 10° cone — coarsens.
+        r.camera_dist(Fixed::from_int(60));
+        assert_eq!(r.mip_scan_dist().map(|d| d as i32), Some(60));
     }
 
     /// **The mask is kept at the grain the map thinks in.** A column
