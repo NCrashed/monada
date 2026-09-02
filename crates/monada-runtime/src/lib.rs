@@ -1502,6 +1502,21 @@ pub trait HostBridge: Send {
     fn ui_pin(&mut self, _at: FixedVec3) {}
     /// Draw texture `tex` with its top-left at `(x, y)`.
     fn ui_image(&mut self, _tex: i64, _x: i64, _y: i64) {}
+    /// …and the same picture with the two things a **marker** needs and a
+    /// HUD panel does not: `tint` (`0xAARRGGBB`, multiplied over the
+    /// texture) and `turn` (radians clockwise about the image's own
+    /// centre).
+    ///
+    /// The colour is what lets one arrow in the assets mean several
+    /// things — a move and an attack are the same picture in different
+    /// paint — and the alpha is what lets a mark fade rather than blink
+    /// out. The angle is what lets several copies of one arrow point at
+    /// the same spot from different sides.
+    ///
+    /// A rotated image is drawn as a mesh rather than a rectangle, so it
+    /// may spill outside the box its size claims. That is what a turned
+    /// picture does, and the caller lays out for it.
+    fn ui_mark(&mut self, _tex: i64, _x: i64, _y: i64, _tint: i64, _turn: Fixed) {}
     /// Draw texture `tex` clipped to the left `frac` (0..1) of its width — the
     /// health-bar-style fill.
     fn ui_image_clip(&mut self, _tex: i64, _x: i64, _y: i64, _frac: Fixed) {}

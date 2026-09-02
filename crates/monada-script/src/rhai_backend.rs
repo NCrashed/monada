@@ -1143,6 +1143,13 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     });
     let b = bridge.clone();
     engine.register_fn(
+        "ui_mark",
+        move |tex: i64, x: i64, y: i64, tint: i64, turn: Fixed| {
+            b.lock().expect("bridge mutex").ui_mark(tex, x, y, tint, turn);
+        },
+    );
+    let b = bridge.clone();
+    engine.register_fn(
         "ui_image_clip",
         move |tex: i64, x: i64, y: i64, frac: Fixed| {
             b.lock()

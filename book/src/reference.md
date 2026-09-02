@@ -410,6 +410,7 @@ Positions are screen points from the top-left.
 | `ui_gif(path)` | register an animated HUD image; returns an id, or `-1` |
 | `ui_anim(gif, x, y)` | draw an animated image's current frame |
 | `ui_image(tex, x, y)` | draw a texture |
+| `ui_mark(tex, x, y, tint, turn)` | draw a texture tinted `0xAARRGGBB` and turned `turn` radians clockwise about its centre |
 | `ui_image_clip(tex, x, y, frac)` | draw a texture clipped to its left `frac` (health bars) |
 | `ui_text(x, y, text, size)` | draw a line of text |
 | `ui_text_wrap(x, y, text, size, width, color)` | draw word-wrapped text |

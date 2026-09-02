@@ -1532,11 +1532,33 @@ impl App {
         let mut clicked_bits = 0u64;
         for (i, w) in widgets.iter().enumerate() {
             match &w.widget {
-                map_render::UiWidget::Image { tex, x, y, scale } => {
+                map_render::UiWidget::Image {
+                    tex,
+                    x,
+                    y,
+                    scale,
+                    tint,
+                    turn,
+                } => {
                     if let Some(h) = self.ui_handle(ctx, &render, *tex) {
+                        let (tint, turn) = (*tint, *turn);
                         Self::ui_area(ctx, i, *x, *y, |ui| {
                             let sz = tex_points(&h) * *scale;
-                            ui.add(egui::Image::new(&h).fit_to_exact_size(sz));
+                            let mut img = egui::Image::new(&h)
+                                .fit_to_exact_size(sz)
+                                .tint(egui::Color32::from_rgba_unmultiplied(
+                                    (tint >> 16) as u8,
+                                    (tint >> 8) as u8,
+                                    tint as u8,
+                                    (tint >> 24) as u8,
+                                ));
+                            if turn != 0.0 {
+                                // About its own middle, which is the only
+                                // origin a caller placing a picture by its
+                                // corner can predict.
+                                img = img.rotate(turn, egui::Vec2::splat(0.5));
+                            }
+                            ui.add(img);
                         });
                     }
                 }

@@ -56,6 +56,9 @@ const GROUND_Z: f64 = 100.0;
 /// The no-op actor tint (`0x00RR_GGBB` colour multiply): white leaves the art
 /// unchanged. `entity_set_tint` overrides it (e.g. red for a damage flash).
 const WHITE_TINT: u32 = 0x00FF_FFFF;
+/// …and the no-op HUD tint, which carries an alpha the actor one does
+/// not: a mark fades by dropping it, so "unchanged" has to say opaque.
+const WHITE_MARK: u32 = 0xFFFF_FFFF;
 /// Reserved model 0: the selection-highlight marker the host draws on the
 /// locally selected entity. Map-defined models start at 1.
 const HIGHLIGHT_MODEL: usize = 0;
@@ -308,6 +311,14 @@ pub enum UiWidget {
         x: i32,
         y: i32,
         scale: f32,
+        /// `0xAARRGGBB`, multiplied over the texture. Opaque white for an
+        /// ordinary HUD image; a marker paints one arrow per meaning with
+        /// it, and fades on the alpha.
+        tint: u32,
+        /// Radians clockwise about the image's own centre. Drawn as a
+        /// mesh, so a turned picture may spill outside the box its size
+        /// claims -- which is what the caller lays out for.
+        turn: f32,
     },
     /// A texture clipped to the left `frac` (0..1) of its width (bar fill).
     ImageClip {
@@ -5880,6 +5891,24 @@ impl HostBridge for MapRender {
                 x: x as i32,
                 y: y as i32,
                 scale: self.ui_scale,
+                tint: WHITE_MARK,
+                turn: 0.0,
+            });
+        }
+    }
+
+    fn ui_mark(&mut self, tex: i64, x: i64, y: i64, tint: i64, turn: Fixed) {
+        if let Ok(tex) = usize::try_from(tex) {
+            self.stack(UiWidget::Image {
+                tex,
+                x: x as i32,
+                y: y as i32,
+                scale: self.ui_scale,
+                // Anything that does not fit a colour word is drawn as it
+                // was authored, which is what a caller that passed
+                // rubbish most likely wanted to see.
+                tint: u32::try_from(tint).unwrap_or(WHITE_MARK),
+                turn: turn.to_f32(),
             });
         }
     }

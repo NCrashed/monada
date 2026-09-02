@@ -744,6 +744,15 @@ pub trait WorldRead {
         }
     }
 
+    /// …and the same tinted `0xAARRGGBB` and turned `turn` radians
+    /// clockwise about its own centre: one arrow in the assets, painted
+    /// and pointed per meaning.
+    fn ui_mark(&self, tex: i64, x: i64, y: i64, tint: i64, turn: Fixed) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").ui_mark(tex, x, y, tint, turn);
+        }
+    }
+
     /// Draw `tex` clipped to the left `frac` (`0..1`) of its width — the
     /// health-bar fill.
     fn ui_image_clip(&self, tex: i64, x: i64, y: i64, frac: Fixed) {
