@@ -4754,10 +4754,14 @@ impl HostBridge for MapRender {
             // `cast` joins them: a spell is a gesture with an end, and a
             // looping one leaves a caster winding up forever after the
             // spell has left.
+            //
+            // …and `decay`, which is a corpse going to bone: what it holds
+            // is what the body IS from then on, and a looping one would
+            // have a skeleton rot back into a carcass every two seconds.
             let mut opts = GifImportOpts::default();
             if matches!(
                 state.as_str(),
-                "death" | "attack" | "dodge" | "hurt" | "cast"
+                "death" | "decay" | "attack" | "dodge" | "hurt" | "cast"
             ) {
                 opts.loop_mode = LoopMode::Once;
             }
@@ -8951,11 +8955,13 @@ mod tests {
     /// **A gesture with an end must not loop.** A death pose stays a
     /// corpse and a swing does not restart mid-play; a cast is the same
     /// shape of thing, and left looping it leaves a caster winding up
-    /// forever after the spell has gone.
+    /// forever after the spell has gone. So is `decay`: what it holds is
+    /// the skeleton the body has become, and a looping one would rot it
+    /// back into a carcass every two seconds.
     #[test]
     fn a_gesture_holds_its_last_frame_and_a_cycle_repeats() {
         let mut a = BTreeMap::new();
-        for state in ["idle", "run", "cast", "death"] {
+        for state in ["idle", "run", "cast", "death", "decay"] {
             for side in ACTOR_SIDES {
                 a.insert(format!("char/hero/{state}/{side}.gif"), tiny_gif());
             }
@@ -8968,6 +8974,7 @@ mod tests {
                 "run".to_string(),
                 "cast".to_string(),
                 "death".to_string(),
+                "decay".to_string(),
             ],
             Fixed::from_int(2),
         );
@@ -8984,6 +8991,7 @@ mod tests {
                 ("run", false),
                 ("cast", true),
                 ("death", true),
+                ("decay", true),
             ],
         );
     }
