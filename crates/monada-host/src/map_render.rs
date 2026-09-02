@@ -2397,14 +2397,43 @@ impl MapRender {
         // does. De-rotating here by `grid_rot_inv` (as this used to) cancels the
         // twin's rotation and pins the cone to one world direction while the hull
         // spins under it. `world_of` mirrors sim +x → world -x (hence `-cos`).
+        // **The fog is asked from the cell a body stands in, not from the
+        // point it is drawn at**, and a full circle is not asked which way
+        // it faces. Both are about how OFTEN roxlap recomputes, not about
+        // what it answers: the shadowcast is skipped while the observer's
+        // key holds, and that key is (cell, facing, eye) — so an observer
+        // fed the smoothed draw position crosses a column every frame and
+        // pays a whole LOS pass for a wiggle that moves the rim by a
+        // sixteenth of a cell. On a 64-cell map with a ten-cell sight that
+        // pass is ~80k columns per observer and it was the frame.
+        //
+        // A column map's cell is `SCALE` columns across; a cubic hull's is
+        // one voxel, so there it quantises to nothing and the hull keeps
+        // the granularity it had.
+        let cell_cols = if cubic { 1.0 } else { SCALE };
+        // …and the eye to a quarter of a cell. A body thrown into the air
+        // is still standing where it stood -- the toss is the sim moving
+        // it, not the player learning anything -- so the fog should not
+        // re-cast twice a frame on the way up and again on the way down.
+        // Fine enough that a ramp (12 voxels a level) still steps the eye.
+        let eye_step = if cubic { 1.0 } else { SCALE / 4.0 };
         let observers: Vec<FowObserver> = self
             .observer_poses
             .iter()
             .map(|&(_, feet, yaw)| {
                 let feet = grid_rot_inv * (feet - grid_origin);
-                let facing_local = DVec3::new(-(yaw.cos()), yaw.sin(), 0.0);
+                // A full circle sees the same set whichever way it is
+                // turned, so it must not be keyed on a turn: `for_decks`
+                // + a 360 cone drops the taper, and every direction is
+                // then the same answer. Anything narrower keeps its own.
+                let facing_local = if self.vision_cfg.0 >= 360 {
+                    DVec3::new(1.0, 0.0, 0.0)
+                } else {
+                    DVec3::new(-(yaw.cos()), yaw.sin(), 0.0)
+                };
+                let stand = |v: f64| (v / cell_cols).floor() * cell_cols + cell_cols * 0.5;
                 FowObserver {
-                    cell: IVec2::new(feet.x.floor() as i32, feet.y.floor() as i32),
+                    cell: IVec2::new(stand(feet.x).floor() as i32, stand(feet.y).floor() as i32),
                     facing: Vec2::new(facing_local.x as f32, facing_local.y as f32),
                     deck: 0,
                     // Eye near HEAD height above the feet (z-down ⇒ a smaller grid-z).
@@ -2427,7 +2456,8 @@ impl MapRender {
                     // top (feet − 16), so the riser blocks and the run fogs from below
                     // again. `-(SCALE + 2·EYE_HALF)` = `-20` lifts the whole band clear
                     // of it — still under the ~22-tall crew's head, i.e. the same ~83%.
-                    eye_z: feet.z as i32 - if cubic { SCALE as i32 + 4 } else { 16 },
+                    eye_z: ((feet.z / eye_step).floor() * eye_step) as i32
+                        - if cubic { SCALE as i32 + 4 } else { 16 },
                 }
             })
             .collect();
