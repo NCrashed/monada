@@ -42,9 +42,11 @@ or edit `bindings.toml`); the map only ever refers to actions by `id`.
 
 The host keeps a few actions of its own in the same table, above whatever a
 map declares: `Esc` quits, `F1` shows the debug overlay, `F2` opens the
-rebind panel, and `F11` toggles borderless fullscreen. `Alt`+`Enter` toggles
-fullscreen too; it is a chord rather than a binding, since a table entry is
-one key or one button and has nowhere to write a modifier.
+rebind panel, `F3` steps the scene's render resolution (1:1 / 1:2 / 1:3 of
+the window — see [`render_scale`](anatomy.md)), and `F11` toggles borderless
+fullscreen. `Alt`+`Enter` toggles fullscreen too; it is a chord rather than a
+binding, since a table entry is one key or one button and has nowhere to
+write a modifier.
 
 ## The local layer
 

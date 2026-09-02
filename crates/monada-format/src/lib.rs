@@ -236,6 +236,22 @@ pub struct Manifest {
     /// Absent for maps that predate the binding system.
     #[serde(default, rename = "action", skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionDecl>,
+    /// The map's own pixel grid: march the scene at `1/n` of the window
+    /// and nearest-upscale it back. Absent (or `1`) is the window's own
+    /// resolution, which is what every map had before this.
+    ///
+    /// **An art decision, not a performance setting.** A game drawn as
+    /// pixel art has a resolution it is composed for, and a raycaster
+    /// costs exactly what it is asked for in pixels — so a map that
+    /// wants a coarse grid gets a cheaper frame as a consequence rather
+    /// than as a compromise. The player still overrides it, at launch
+    /// (`MONADA_RENDER_SCALE`) or with the `ui.render_scale` key.
+    ///
+    /// A whole divisor, because the upscale is nearest: a fraction that
+    /// does not divide the window evenly spreads a row of doubled pixels
+    /// through the picture and shimmers as the camera moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_scale: Option<u32>,
 }
 
 impl Manifest {

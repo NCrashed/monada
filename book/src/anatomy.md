@@ -48,6 +48,14 @@ Two optional fields appear in later chapters: `[[action]]` tables declare
 [rebindable inputs](input.md), and `local_entry` names a separate script for
 the map's [local, unsynchronized layer](input.md).
 
+One more is a look: `render_scale = 2` marches the scene at half the window
+and nearest-upscales it back, which is the pixel grid a game drawn as pixel
+art is composed for — and, since the renderer is a per-pixel raycaster, most
+of what decides whether it holds a frame rate full-screen. A whole divisor
+only (`1`, `2`, `3`), because a fraction that does not divide the window
+evenly spreads doubled pixels through the picture. The player overrides it
+with `MONADA_RENDER_SCALE` or the `ui.render_scale` key.
+
 ## The tick model
 
 `sim_hz` decides *when* the simulation advances, and it is the single most

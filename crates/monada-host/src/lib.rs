@@ -256,6 +256,86 @@ impl FrameLog {
     }
 }
 
+/// How much smaller than the window the scene may be marched, as the
+/// divisor `ui.render_scale` cycles through.
+///
+/// **Whole divisors, because the upscale is nearest.** A raycaster costs
+/// what it is asked for in pixels, and at 1080p a map can want a third
+/// of them; the frame is then blown back up to the window with no
+/// filtering. A fraction that does not divide the window evenly spreads
+/// a row of doubled pixels through the picture and shimmers as the
+/// camera moves, which is the one thing pixel art must not do -- so the
+/// choices are 1:1, 1:2 and 1:3 and nothing between.
+const RENDER_DIVS: [u32; 3] = [1, 2, 3];
+
+/// …and the least the software marcher runs at whatever is asked. Its
+/// cost scales with the pixel count and it cannot hold a window's native
+/// resolution on the volume maps.
+const CPU_RENDER_DIV: u32 = 2;
+
+/// Which divisor the session opens at: the player's if they said
+/// (`MONADA_RENDER_SCALE=2` being "march a quarter of the pixels"),
+/// else the map's own pixel grid (`Manifest::render_scale`), else the
+/// window's resolution.
+///
+/// A number neither offers is dropped with a word rather than refusing
+/// to start — a stale config or a map written against a longer ladder
+/// is not a reason to leave somebody without a game.
+fn starting_render_div(map_div: Option<u32>) -> u32 {
+    let offered = |d: u32, what: &str| {
+        if RENDER_DIVS.contains(&d) {
+            return Some(d);
+        }
+        eprintln!("monada-host: {what} asks to render at 1/{d}, which is not one of {RENDER_DIVS:?}");
+        None
+    };
+    let env = std::env::var("MONADA_RENDER_SCALE")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .map(|v| {
+            v.parse::<u32>()
+                .ok()
+                .and_then(|d| offered(d, "MONADA_RENDER_SCALE"))
+        });
+    match env {
+        Some(Some(d)) => d,
+        // Set but unusable: the player still MEANT to override the map,
+        // so fall to the window rather than to the map's own grid.
+        Some(None) => 1,
+        None => map_div.and_then(|d| offered(d, "the map")).unwrap_or(1),
+    }
+}
+
+/// The divisor after this one, wrapping — what the key cycles through.
+fn next_render_div(current: u32) -> u32 {
+    let at = RENDER_DIVS.iter().position(|&d| d == current);
+    RENDER_DIVS[at.map_or(0, |i| (i + 1) % RENDER_DIVS.len())]
+}
+
+#[cfg(test)]
+mod render_scale_tests {
+    use super::{next_render_div, RENDER_DIVS};
+
+    /// The cycle comes home, and it only ever lands on a whole divisor —
+    /// the upscale is nearest, so anything else spreads a row of doubled
+    /// pixels through the picture and shimmers as the camera moves.
+    #[test]
+    fn the_render_scale_cycles_through_whole_divisors() {
+        let mut seen = vec![RENDER_DIVS[0]];
+        let mut at = RENDER_DIVS[0];
+        for _ in 0..RENDER_DIVS.len() {
+            at = next_render_div(at);
+            assert!(RENDER_DIVS.contains(&at), "{at} is not a listed divisor");
+            seen.push(at);
+        }
+        assert_eq!(seen.first(), seen.last(), "the cycle comes home");
+        assert_eq!(seen.len(), RENDER_DIVS.len() + 1, "and visits each once");
+        // A value from nowhere (a stale config, a future divisor) starts
+        // the cycle rather than falling off it.
+        assert_eq!(next_render_div(7), RENDER_DIVS[0]);
+    }
+}
+
 /// Whether a key is the Return one, wherever on the board it sits. The
 /// numpad's is a different code and the same key to anyone pressing it.
 fn is_enter(code: KeyCode) -> bool {
@@ -824,6 +904,10 @@ struct App {
     /// to write a modifier, so this is tracked beside it rather than in
     /// it — see [`Action::Fullscreen`].
     modifiers: ModifiersState,
+    /// How much smaller than the window the scene is marched
+    /// ([`RENDER_DIVS`]), cycled by `ui.render_scale` and seeded from
+    /// `MONADA_RENDER_SCALE`.
+    render_div: u32,
     /// Real-time gameplay input (WASD / dodge / attack), sampled per frame
     /// and injected per tick into a fixed-rate map.
     input: Input,
@@ -868,6 +952,15 @@ impl App {
             ),
             _ => (String::new(), Vec::new()),
         };
+        // The map's own pixel grid, unless the player said otherwise at
+        // launch. Both are divisors of the window, and the key cycles
+        // from wherever this lands.
+        let map_div = match &config {
+            RunConfig::Map { run, .. } | RunConfig::Replay { run, .. } => {
+                run.map.manifest.render_scale
+            }
+            _ => None,
+        };
         let bindings = Bindings::load(&map_name, &map_actions);
         let sim = match config {
             RunConfig::Local => Self::new_local(),
@@ -911,6 +1004,7 @@ impl App {
             capturing: None,
             rebind_notice: None,
             modifiers: ModifiersState::empty(),
+            render_div: starting_render_div(map_div),
             input: Input::default(),
             cursor: (0.0, 0.0),
             fps: 0.0,
@@ -1347,7 +1441,13 @@ impl App {
                 SceneKind::Map(render) => render.lock().expect("render mutex").action_lines(),
                 SceneKind::Circle(_) => Vec::new(),
             };
-            build_hud(&ctx, tick, fps, &hud, &map_actions);
+            // …and what the scene itself is marched at (F3), which is the
+            // number a dropped frame rate is usually about.
+            let marched = self
+                .renderer
+                .as_ref()
+                .map_or((0, 0), SceneRenderer::render_dims);
+            build_hud(&ctx, tick, fps, &hud, &map_actions, marched, self.render_div);
         }
         // The map's own scripted HUD (health bar / panels / buttons), painted
         // over the status window; button clicks feed the next tick's command.
@@ -2093,12 +2193,11 @@ impl ApplicationHandler for App {
         } else {
             // The software marcher's cost scales with the pixel count and
             // it can't hold the window's native resolution on the volume
-            // maps. Half the logical resolution (a quarter of the rays,
-            // nearest-upscaled to the window, RP.0) keeps it playable;
-            // the GPU backend stays at native.
-            renderer.set_render_resolution(RenderResolution::Scale(0.5));
+            // maps, whatever the player asked for.
+            self.render_div = self.render_div.max(CPU_RENDER_DIV);
             eprintln!("monada-host: CPU backend (rendering at half resolution)");
         }
+        Self::apply_render_div(&mut renderer, self.render_div);
 
         // egui input bridge bound to this window (clipboard / display
         // handle, initial scale factor).
@@ -2297,6 +2396,8 @@ fn build_hud(
     fps: f32,
     hud: &HudState,
     map_actions: &[(String, String)],
+    marched: (u32, u32),
+    render_div: u32,
 ) {
     egui::Window::new("monada")
         .title_bar(false)
@@ -2305,6 +2406,16 @@ fn build_hud(
         .show(ctx, |ui| {
             ui.label(format!("tick {tick}"));
             ui.label(format!("fps  {fps:.0}"));
+            ui.label(format!(
+                "res  {}x{}{}",
+                marched.0,
+                marched.1,
+                if render_div > 1 {
+                    format!(" (1/{render_div})")
+                } else {
+                    String::new()
+                },
+            ));
             match hud {
                 HudState::Local { selected } => {
                     match selected {
@@ -2384,6 +2495,31 @@ impl App {
         }
     }
 
+    /// The finest the active backend will actually run: the software
+    /// marcher cannot hold a native window whatever the player picks.
+    fn render_floor(&self) -> u32 {
+        match self.renderer.as_ref() {
+            Some(r) if r.adapter_info().is_none() => CPU_RENDER_DIV,
+            _ => 1,
+        }
+    }
+
+    /// March the scene at `1/div` of the window and let the blit take it
+    /// back up, nearest.
+    ///
+    /// **A divisor of one is not the same call as a scale of one.**
+    /// `Native` is the pre-RP path — logical == swapchain, a straight
+    /// blit — so a map that never asks for less pays nothing for the
+    /// question, not even a resolve that copies.
+    fn apply_render_div(renderer: &mut SceneRenderer, div: u32) {
+        renderer.set_render_resolution(if div <= 1 {
+            RenderResolution::Native
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            RenderResolution::Scale(1.0 / div as f32)
+        });
+    }
+
     /// Go fullscreen, or come back.
     ///
     /// **Borderless rather than exclusive.** It takes the monitor it is
@@ -2435,6 +2571,22 @@ impl App {
             Action::DebugHud if down => self.debug_hud = !self.debug_hud,
             // F11, and Alt+Enter beside it (`window_event`).
             Action::Fullscreen if down => self.toggle_fullscreen(),
+            // F3 steps the scene's own resolution down and back round. A
+            // key rather than only a launch flag: how coarse is too
+            // coarse is a thing you judge by flipping between them while
+            // looking at the same frame, which is the same argument the
+            // sprite-facing toggle is here for.
+            Action::RenderScale if down => {
+                self.render_div = next_render_div(self.render_div).max(self.render_floor());
+                if let Some(renderer) = self.renderer.as_mut() {
+                    Self::apply_render_div(renderer, self.render_div);
+                    eprintln!(
+                        "monada-host: rendering at 1/{} of the window ({:?})",
+                        self.render_div,
+                        renderer.render_dims(),
+                    );
+                }
+            }
             // F2 toggles the key-bindings panel; closing cancels any capture.
             Action::OpenBindings if down => {
                 self.rebind_open = !self.rebind_open;

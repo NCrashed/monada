@@ -156,6 +156,8 @@ pub enum Action {
     /// rebindable half -- so a keyboard where the chord is taken by the
     /// window manager still has a way in.
     Fullscreen,
+    /// Step the scene's own render resolution down and back round.
+    RenderScale,
     OrbitLeft,
     OrbitRight,
     OrbitUp,
@@ -178,11 +180,12 @@ pub enum Action {
 }
 
 /// Every base action, in template / documentation order.
-const ALL_ACTIONS: [Action; 20] = [
+const ALL_ACTIONS: [Action; 21] = [
     Action::Quit,
     Action::DebugHud,
     Action::OpenBindings,
     Action::Fullscreen,
+    Action::RenderScale,
     Action::OrbitLeft,
     Action::OrbitRight,
     Action::OrbitUp,
@@ -210,6 +213,7 @@ impl Action {
             Action::DebugHud => "ui.debug_hud",
             Action::OpenBindings => "ui.bindings",
             Action::Fullscreen => "ui.fullscreen",
+            Action::RenderScale => "ui.render_scale",
             Action::OrbitLeft => "camera.orbit_left",
             Action::OrbitRight => "camera.orbit_right",
             Action::OrbitUp => "camera.orbit_up",
@@ -240,6 +244,7 @@ impl Action {
             Action::DebugHud => "Debug overlay",
             Action::OpenBindings => "Key bindings",
             Action::Fullscreen => "Fullscreen",
+            Action::RenderScale => "Render scale",
             Action::OrbitLeft => "Camera left",
             Action::OrbitRight => "Camera right",
             Action::OrbitUp => "Camera up",
@@ -266,6 +271,7 @@ impl Action {
             | Action::DebugHud
             | Action::OpenBindings
             | Action::Fullscreen
+            | Action::RenderScale
             | Action::OrbitLeft
             | Action::OrbitRight
             | Action::OrbitUp
@@ -293,6 +299,7 @@ impl Action {
             Action::DebugHud => &[PhysInput::Key(KeyCode::F1)],
             Action::OpenBindings => &[PhysInput::Key(KeyCode::F2)],
             Action::Fullscreen => &[PhysInput::Key(KeyCode::F11)],
+            Action::RenderScale => &[PhysInput::Key(KeyCode::F3)],
             Action::OrbitLeft => &[PhysInput::Key(KeyCode::ArrowLeft)],
             Action::OrbitRight => &[PhysInput::Key(KeyCode::ArrowRight)],
             Action::OrbitUp => &[PhysInput::Key(KeyCode::ArrowUp)],
@@ -1129,6 +1136,17 @@ mod tests {
         assert_eq!(base_of(b.resolve(REAL, click)), Some(Action::Attack));
         // Unbound keys resolve to nothing (A/D in turn-based).
         assert_eq!(b.resolve(TURN, key(KeyCode::KeyA)), None);
+    }
+
+    /// The scene's own resolution is a key, not only a launch flag: how
+    /// coarse is too coarse is judged by flipping between them while
+    /// looking at the same frame.
+    #[test]
+    fn render_scale_is_a_global_action() {
+        assert_eq!(
+            base().resolve(REAL, key(KeyCode::F3)),
+            Some(ActionRef::Base(Action::RenderScale)),
+        );
     }
 
     /// Fullscreen is a global action with a plain key of its own, so the
