@@ -413,6 +413,7 @@ Positions are screen points from the top-left.
 | `ui_mark(tex, x, y, tint, turn)` | draw a texture tinted `0xAARRGGBB` and turned `turn` radians clockwise about its centre |
 | `ui_image_clip(tex, x, y, frac)` | draw a texture clipped to its left `frac` (health bars) |
 | `ui_text(x, y, text, size)` | draw a line of text |
+| `ui_text_tint(x, y, text, size, tint)` | draw a line of text in `0xAARRGGBB` |
 | `ui_text_wrap(x, y, text, size, width, color)` | draw word-wrapped text |
 | `ui_button(tex, hover, pressed, x, y, bit)` | draw an image button; a click OR-s `bit` into the input |
 | `ui_width()` | the viewport width in points, or `0` |

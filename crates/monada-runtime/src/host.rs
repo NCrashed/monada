@@ -705,6 +705,16 @@ pub trait WorldRead {
         }
     }
 
+    /// …and the same line in `0xAARRGGBB`, alpha and all: a word that
+    /// means something by its colour, and fades rather than blinking off.
+    fn ui_text_tint(&self, x: i64, y: i64, text: &str, size: i64, tint: i64) {
+        if let Some(b) = self.bridge() {
+            b.lock()
+                .expect("bridge mutex")
+                .ui_text_tint(x, y, text, size, tint);
+        }
+    }
+
     /// Draw word-wrapped `text` within `width` points, in `0xRRGGBB` —
     /// the dialogue paragraph.
     fn ui_text_wrap(&self, x: i64, y: i64, text: &str, size: i64, width: i64, color: i64) {

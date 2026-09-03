@@ -1168,6 +1168,15 @@ pub(crate) fn register_bridge_api(engine: &mut Engine, bridge: &SharedBridge) {
     );
     let b = bridge.clone();
     engine.register_fn(
+        "ui_text_tint",
+        move |x: i64, y: i64, text: ImmutableString, size: i64, tint: i64| {
+            b.lock()
+                .expect("bridge mutex")
+                .ui_text_tint(x, y, text.as_str(), size, tint);
+        },
+    );
+    let b = bridge.clone();
+    engine.register_fn(
         "ui_text_wrap",
         move |x: i64, y: i64, text: ImmutableString, size: i64, width: i64, color: i64| {
             b.lock()

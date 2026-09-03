@@ -1599,7 +1599,14 @@ impl App {
                     text,
                     size,
                     scale,
+                    tint,
                 } => {
+                    let col = egui::Color32::from_rgba_unmultiplied(
+                        (tint >> 16) as u8,
+                        (tint >> 8) as u8,
+                        *tint as u8,
+                        (tint >> 24) as u8,
+                    );
                     Self::ui_area(ctx, i, *x, *y, |ui| {
                         // Never wrap — a HUD number like "20" must stay on one
                         // line (the default wraps it to "2" / "0" near an edge).
@@ -1608,7 +1615,7 @@ impl App {
                                 egui::RichText::new(text)
                                     .size(*size * *scale)
                                     .strong()
-                                    .color(egui::Color32::WHITE),
+                                    .color(col),
                             )
                             .wrap_mode(egui::TextWrapMode::Extend),
                         );

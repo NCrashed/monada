@@ -1522,6 +1522,14 @@ pub trait HostBridge: Send {
     fn ui_image_clip(&mut self, _tex: i64, _x: i64, _y: i64, _frac: Fixed) {}
     /// Draw `text` (white, `size`-pt) with its top-left at `(x, y)`.
     fn ui_text(&mut self, _x: i64, _y: i64, _text: &str, _size: i64) {}
+    /// …and the same line in `tint` (`0xAARRGGBB`), alpha and all.
+    ///
+    /// The colour is for text that means something by being that colour —
+    /// a word over a body says which element turned a blow — and the
+    /// alpha is what lets one fade out instead of blinking off. One line:
+    /// [`ui_text_wrap`](Self::ui_text_wrap) is the paragraph, and a word
+    /// that wrapped mid-flight would be a word nobody can read.
+    fn ui_text_tint(&mut self, _x: i64, _y: i64, _text: &str, _size: i64, _tint: i64) {}
     /// Draw word-wrapped `text` within `width` points, in `0xRRGGBB` `color`
     /// (dialogue paragraphs).
     #[allow(clippy::too_many_arguments)]

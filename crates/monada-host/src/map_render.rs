@@ -334,6 +334,10 @@ pub enum UiWidget {
         text: String,
         size: f32,
         scale: f32,
+        /// `0xAARRGGBB`. Opaque white for an ordinary label; a word that
+        /// means something by its colour carries it here, and fades on
+        /// the alpha.
+        tint: u32,
     },
     /// Word-wrapped text within `width` points, `0x00RR_GGBB` (dialogue).
     TextWrap {
@@ -5933,6 +5937,20 @@ impl HostBridge for MapRender {
             text: text.to_string(),
             size: size.max(1) as f32,
             scale: self.ui_scale,
+            tint: WHITE_MARK,
+        });
+    }
+
+    fn ui_text_tint(&mut self, x: i64, y: i64, text: &str, size: i64, tint: i64) {
+        self.stack(UiWidget::Text {
+            x: x as i32,
+            y: y as i32,
+            text: text.to_string(),
+            size: size.max(1) as f32,
+            scale: self.ui_scale,
+            // Anything that does not fit a colour word is drawn plain,
+            // which is what a caller that passed rubbish wanted to see.
+            tint: u32::try_from(tint).unwrap_or(WHITE_MARK),
         });
     }
 
