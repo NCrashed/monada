@@ -167,10 +167,23 @@ pub trait WorldRead {
     /// A deterministic A\* path as cell-centre waypoints; `[]` when
     /// unreachable (docs/plans/rts-demo.md §1a).
     fn nav_path(&self, from: (i64, i64), to: (i64, i64), max_step: i64) -> Vec<FixedVec3> {
+        self.nav_path_drop(from, to, max_step, max_step)
+    }
+
+    /// …and the same for a walker that may drop further than it climbs,
+    /// which makes a ledge one-way: off it the short way, back round the
+    /// long way.
+    fn nav_path_drop(
+        &self,
+        from: (i64, i64),
+        to: (i64, i64),
+        max_step: i64,
+        max_drop: i64,
+    ) -> Vec<FixedVec3> {
         self.terrain().map_or_else(Vec::new, |t| {
             t.lock()
                 .expect("terrain mutex")
-                .nav_path(from.0, from.1, to.0, to.1, max_step)
+                .nav_path_drop(from.0, from.1, to.0, to.1, max_step, max_drop)
         })
     }
 

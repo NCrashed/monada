@@ -1666,6 +1666,26 @@ impl VoxelStore {
     /// error). Searches inside the painted world's bounding box.
     #[must_use]
     pub fn nav_path(&self, x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64) -> Vec<FixedVec3> {
+        self.nav_path_drop(x0, y0, x1, y1, max_step, max_step)
+    }
+
+    /// …and the same for a walker that may **drop** further than it can
+    /// climb.
+    ///
+    /// One-way ground: a route comes off a ledge the short way and goes
+    /// back round the long way, which is what a player expects of a step
+    /// down and what one number cannot say. `max_drop` equal to
+    /// `max_step` is [`nav_path`](Self::nav_path).
+    #[must_use]
+    pub fn nav_path_drop(
+        &self,
+        x0: i64,
+        y0: i64,
+        x1: i64,
+        y1: i64,
+        max_step: i64,
+        max_drop: i64,
+    ) -> Vec<FixedVec3> {
         let mut keys = self.tops.keys().chain(self.nav_blocked.iter());
         let Some(&first) = keys.next() else {
             return Vec::new(); // nothing painted, nowhere to walk
@@ -1675,6 +1695,7 @@ impl VoxelStore {
         });
         let limits = monada_nav::NavLimits {
             max_step,
+            max_drop,
             bounds,
             // Generous for RTS-scale maps (a 96×96 field is ~9k cells) yet
             // a hard ceiling on a sim tick's worst case.

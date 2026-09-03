@@ -684,6 +684,18 @@ fn register_terrain_queries(engine: &mut Engine, terrain: &SharedTerrain) {
                 .collect()
         },
     );
+    let t = terrain.clone();
+    engine.register_fn(
+        "nav_path_drop",
+        move |x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64, max_drop: i64| -> Array {
+            t.lock()
+                .expect("terrain mutex")
+                .nav_path_drop(x0, y0, x1, y1, max_step, max_drop)
+                .into_iter()
+                .map(Dynamic::from)
+                .collect()
+        },
+    );
 }
 
 /// Register the host's render / input / command API (DESIGN.md §3.3),

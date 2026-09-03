@@ -43,13 +43,35 @@ pub trait NavWorld {
 /// bounds the search may explore, and the node budget.
 #[derive(Clone, Copy, Debug)]
 pub struct NavLimits {
-    /// Maximum |height delta| a single step may climb or drop.
+    /// Maximum height a single step may **climb**.
     pub max_step: i64,
+    /// …and how far one may **drop**, which is not the same number.
+    ///
+    /// A walker that can jump down further than it can climb up makes
+    /// one-way ground: a route comes off a plateau the short way and goes
+    /// back round the long way, which is what a player expects of a ledge
+    /// and what a symmetric rule cannot express. Equal to `max_step` is
+    /// the old behaviour, and is what [`same`](NavLimits::same) is for.
+    pub max_drop: i64,
     /// Inclusive search bounds `(x0, y0, x1, y1)` — typically the painted
     /// world's bounding box. Keeps the search off an infinite plain.
     pub bounds: (i64, i64, i64, i64),
     /// Maximum nodes to pop before giving up with a partial path.
     pub budget: usize,
+}
+
+impl NavLimits {
+    /// Limits for a walker that climbs and drops the same amount, which
+    /// is what every caller meant before the two could differ.
+    #[must_use]
+    pub fn same(max_step: i64, bounds: (i64, i64, i64, i64), budget: usize) -> NavLimits {
+        NavLimits {
+            max_step,
+            max_drop: max_step,
+            bounds,
+            budget,
+        }
+    }
 }
 
 /// Fixed neighbour order (E, N, W, S, NE, NW, SW, SE): orthogonals first,
@@ -81,12 +103,12 @@ fn octile(ax: i64, ay: i64, bx: i64, by: i64) -> i64 {
 /// budget runs dry), the path leads to the reachable cell closest to the
 /// goal (octile), tie-broken toward the cheapest to reach — never an error.
 ///
-/// The walk rule per step: the target cell is in bounds, not blocked, and
-/// |Δheight| ≤ `max_step`. A diagonal additionally requires BOTH flanking
-/// orthogonal cells to pass the same rule (no cutting a corner past a
-/// cliff edge or a blocker). `from` itself is exempt from the blocked
-/// check, so a unit standing where a footprint just landed can still walk
-/// out.
+/// The walk rule per step: the target cell is in bounds, not blocked, a
+/// rise of at most `max_step` and a fall of at most `max_drop`. A diagonal
+/// additionally requires BOTH flanking orthogonal cells to pass the same
+/// rule (no cutting a corner past a cliff edge or a blocker). `from`
+/// itself is exempt from the blocked check, so a unit standing where a
+/// footprint just landed can still walk out.
 pub fn astar(
     world: &impl NavWorld,
     from: (i64, i64),
@@ -102,11 +124,14 @@ pub fn astar(
         return Vec::new();
     }
 
-    // A step from height `hz` onto `(x, y)` under the walk rule.
+    // A step from height `hz` onto `(x, y)` under the walk rule. Climbing
+    // and dropping are asked separately: a ledge is one-way ground.
     let passable = |hz: i64, x: i64, y: i64| {
-        in_bounds(x, y)
-            && !world.blocked(x, y)
-            && (world.height(x, y) - hz).abs() <= limits.max_step
+        if !in_bounds(x, y) || world.blocked(x, y) {
+            return false;
+        }
+        let rise = world.height(x, y) - hz;
+        rise <= limits.max_step && -rise <= limits.max_drop
     };
 
     // g-cost + parent per visited cell.
@@ -227,11 +252,7 @@ mod tests {
             )
         }
         fn limits(&self, max_step: i64) -> NavLimits {
-            NavLimits {
-                max_step,
-                bounds: self.bounds(),
-                budget: 10_000,
-            }
+            NavLimits::same(max_step, self.bounds(), 10_000)
         }
     }
 
@@ -349,14 +370,43 @@ mod tests {
         steps_are_adjacent_and_legal(&w, (0, 0), &path, 1);
     }
 
+    /// **A ledge is one-way ground.** A walker that drops further than it
+    /// climbs comes off a plateau where it stands; the same walker cannot
+    /// get back up there, and its route round says so.
+    #[test]
+    fn a_walker_that_drops_further_than_it_climbs_comes_off_the_ledge() {
+        // A shelf three high along the top row, ground below it, and a
+        // ramp at the far right that is the only way between them for a
+        // walker that climbs one.
+        let w = Ascii::new(&["3333333", "0000012", "0000000"]);
+        let off = NavLimits {
+            max_step: 1,
+            max_drop: 3,
+            bounds: w.bounds(),
+            budget: 10_000,
+        };
+
+        // Straight off the shelf: two steps south, not seven east.
+        let path = astar(&w, (0, 0), (0, 2), &off);
+        assert_eq!(path, vec![(0, 1), (0, 2)]);
+
+        // The same walker climbing back has to go round by the ramp.
+        let back = astar(&w, (0, 2), (0, 0), &off);
+        assert!(
+            back.len() > 3,
+            "it climbed a shelf three high: {back:?}",
+        );
+
+        // …and one that drops as little as it climbs never leaves at all
+        // except by the ramp.
+        let stuck = astar(&w, (0, 0), (0, 2), &NavLimits::same(1, w.bounds(), 10_000));
+        assert!(stuck.len() > 3, "it fell off a cliff it could not climb");
+    }
+
     #[test]
     fn budget_exhaustion_yields_partial_progress() {
         let w = Ascii::new(&["0000000000", "0000000000", "0000000000"]);
-        let tight = NavLimits {
-            max_step: 1,
-            bounds: w.bounds(),
-            budget: 3,
-        };
+        let tight = NavLimits::same(1, w.bounds(), 3);
         let path = astar(&w, (0, 1), (9, 1), &tight);
         assert!(!path.is_empty(), "made some progress");
         let end = path.last().unwrap();
