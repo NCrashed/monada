@@ -607,6 +607,12 @@ pub trait WorldRead {
         })
     }
 
+    /// …and an animated one's. See [`HostBridge::ui_gif_size`].
+    fn ui_gif_size(&self, gif: i64) -> (i64, i64) {
+        self.bridge()
+            .map_or((0, 0), |b| b.lock().expect("bridge mutex").ui_gif_size(gif))
+    }
+
     /// Scatter a one-shot burst of particles at `at` — a spell going off,
     /// something breaking.
     ///

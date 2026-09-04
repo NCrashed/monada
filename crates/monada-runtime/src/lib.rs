@@ -1313,6 +1313,13 @@ pub trait HostBridge: Send {
         (0, 0)
     }
 
+    /// …and the same for an animated one ([`ui_gif`](Self::ui_gif)), which
+    /// a map has to know to place it, and now to be told when it is
+    /// clicked on.
+    fn ui_gif_size(&mut self, _gif: i64) -> (i64, i64) {
+        (0, 0)
+    }
+
     /// Scatter a one-shot burst of particles at `at`: `count` pieces
     /// leaving at `speed` cells per second, each lasting about `life`
     /// seconds, tinted `0xRRGGBB`.
