@@ -760,6 +760,20 @@ pub trait WorldRead {
         }
     }
 
+    /// Reserve a HUD texture the map paints itself, `w`×`h` pixels.
+    /// See [`HostBridge::ui_canvas`].
+    fn ui_canvas(&self, w: i64, h: i64) -> i64 {
+        self.bridge()
+            .map_or(-1, |b| b.lock().expect("bridge mutex").ui_canvas(w, h))
+    }
+
+    /// …and hand it its pixels, `0xAARRGGBB` each.
+    fn ui_paint(&self, tex: i64, pixels: &[u32]) {
+        if let Some(b) = self.bridge() {
+            b.lock().expect("bridge mutex").ui_paint(tex, pixels);
+        }
+    }
+
     /// Draw texture `tex` with its top-left at `(x, y)`.
     fn ui_image(&self, tex: i64, x: i64, y: i64) {
         if let Some(b) = self.bridge() {

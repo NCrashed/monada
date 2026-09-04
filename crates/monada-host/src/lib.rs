@@ -920,7 +920,7 @@ struct App {
     egui_state: Option<egui_winit::State>,
     /// egui texture handles for the map's HUD images, indexed by the id
     /// `ui_texture` returned to the script (uploaded lazily, once each).
-    ui_tex_cache: Vec<Option<egui::TextureHandle>>,
+    ui_tex_cache: Vec<Option<(egui::TextureHandle, u64)>>,
     /// egui texture handles for animated HUD images (`ui_gif`): `[gif][frame]`,
     /// each frame uploaded lazily the first time it is shown.
     ui_gif_cache: Vec<Vec<Option<egui::TextureHandle>>>,
@@ -1719,19 +1719,33 @@ impl App {
         if id >= self.ui_tex_cache.len() {
             self.ui_tex_cache.resize(id + 1, None);
         }
-        if self.ui_tex_cache[id].is_none() {
+        // A loaded texture is uploaded once; one the map PAINTS changes
+        // under this cache, so the upload it came from is stamped and a
+        // newer stamp means upload again. `set` reuses the GPU texture --
+        // a minimap re-loaded every frame would be a new texture every
+        // frame and a registry that grows all session.
+        let stamp = render.lock().expect("render mutex").ui_texture_stamp(id);
+        let stale = self.ui_tex_cache[id]
+            .as_ref()
+            .map_or(true, |&(_, was)| was != stamp);
+        if stale {
             let r = render.lock().expect("render mutex");
             let (pixels, w, h) = r.ui_texture_data(id)?;
             let image =
                 egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], pixels);
-            let handle = ctx.load_texture(
-                format!("monada_ui_{id}"),
-                image,
-                egui::TextureOptions::NEAREST,
-            );
-            self.ui_tex_cache[id] = Some(handle);
+            if let Some((handle, was)) = self.ui_tex_cache[id].as_mut() {
+                handle.set(image, egui::TextureOptions::NEAREST);
+                *was = stamp;
+            } else {
+                let handle = ctx.load_texture(
+                    format!("monada_ui_{id}"),
+                    image,
+                    egui::TextureOptions::NEAREST,
+                );
+                self.ui_tex_cache[id] = Some((handle, stamp));
+            }
         }
-        self.ui_tex_cache[id].clone()
+        self.ui_tex_cache[id].as_ref().map(|(h, _)| h.clone())
     }
 
     /// The egui handle for an animated HUD image's frame at this instant: pick

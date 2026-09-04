@@ -1500,6 +1500,34 @@ pub trait HostBridge: Send {
     /// the widgets after it. The map cannot project the point itself -- it
     /// never sees the camera the renderer settles on.
     fn ui_pin(&mut self, _at: FixedVec3) {}
+    /// Reserve a HUD texture the map fills in itself, `w`×`h` pixels.
+    /// Returns its id, or `-1`.
+    ///
+    /// **The one thing the HUD could not do.** Every other picture comes
+    /// out of the archive: an artist drew it and [`ui_texture`] loads it.
+    /// A minimap is the opposite — what it shows is worked out while the
+    /// game runs, and there is no drawing of it to ship. So the map hands
+    /// over pixels ([`ui_paint`]) and this is where they go.
+    ///
+    /// Reserved once and repainted, rather than made afresh: a texture per
+    /// frame is a texture upload per frame and a registry that grows until
+    /// the session ends.
+    ///
+    /// [`ui_texture`]: Self::ui_texture
+    /// [`ui_paint`]: Self::ui_paint
+    fn ui_canvas(&mut self, _w: i64, _h: i64) -> i64 {
+        -1
+    }
+    /// …and its pixels, `0xAARRGGBB` each, row by row from the top left.
+    ///
+    /// Anything shorter than the canvas leaves the rest as it was, and
+    /// anything longer is cut: a caller that has miscounted should draw a
+    /// wrong picture rather than lose the frame.
+    ///
+    /// **Not a script verb.** A buffer of pixels has no useful form in a
+    /// map script, and a script that built one a value at a time would be
+    /// slower than the picture is worth. Compiled rules only.
+    fn ui_paint(&mut self, _tex: i64, _pixels: &[u32]) {}
     /// Draw texture `tex` with its top-left at `(x, y)`.
     fn ui_image(&mut self, _tex: i64, _x: i64, _y: i64) {}
     /// …and the same picture with the two things a **marker** needs and a

@@ -1947,6 +1947,13 @@ pub struct MapRender {
     /// HUD textures the map loaded via `ui_texture` (RGBA8 + dims), indexed by
     /// the id returned to the script. Render-side, never hashed.
     ui_textures: Vec<(Vec<u8>, u32, u32)>,
+    /// How many times each of those has been repainted (`ui_paint`).
+    ///
+    /// **What tells the painter its copy is stale.** A loaded texture is
+    /// uploaded to the GPU once and cached by id; one the map paints changes
+    /// under that cache, and without a stamp to compare the minimap would be
+    /// the first frame of the game for the rest of it.
+    ui_stamps: Vec<u64>,
     /// The HUD widget list the map rebuilt this tick (immediate mode: cleared
     /// by `ui_clear`, appended by `ui_image`/`ui_text`/`ui_button`). The host
     /// paints it via egui each frame and reports button clicks back.
@@ -2145,6 +2152,7 @@ impl MapRender {
             sky_uploaded: false,
             sprites_uploaded: false,
             ui_textures: Vec::new(),
+            ui_stamps: Vec::new(),
             ui_widgets: Vec::new(),
             ui_pin: None,
             ui_viewport: (0, 0),
@@ -3941,6 +3949,13 @@ impl MapRender {
     #[must_use]
     pub fn ui_texture_data(&self, id: usize) -> Option<&(Vec<u8>, u32, u32)> {
         self.ui_textures.get(id)
+    }
+
+    /// …and how many times the map has repainted it, so a painter that
+    /// caches the upload can tell its copy is stale.
+    #[must_use]
+    pub fn ui_texture_stamp(&self, id: usize) -> u64 {
+        self.ui_stamps.get(id).copied().unwrap_or(0)
     }
 
     /// A HUD animation's decoded frames, by the id `ui_gif` returned to the map.
@@ -5815,7 +5830,44 @@ impl HostBridge for MapRender {
         };
         let (w, h) = img.dimensions();
         self.ui_textures.push((img.into_raw(), w, h));
+        self.ui_stamps.push(0);
         (self.ui_textures.len() - 1) as i64
+    }
+
+    fn ui_canvas(&mut self, w: i64, h: i64) -> i64 {
+        let (Ok(w), Ok(h)) = (u32::try_from(w), u32::try_from(h)) else {
+            return -1;
+        };
+        if w == 0 || h == 0 {
+            return -1;
+        }
+        // Transparent until the map paints it: a canvas nobody has filled
+        // in yet should show nothing rather than a black square.
+        let pixels = vec![0u8; (w as usize) * (h as usize) * 4];
+        self.ui_textures.push((pixels, w, h));
+        self.ui_stamps.push(0);
+        (self.ui_textures.len() - 1) as i64
+    }
+
+    fn ui_paint(&mut self, tex: i64, pixels: &[u32]) {
+        let Ok(tex) = usize::try_from(tex) else { return };
+        let Some((into, w, h)) = self.ui_textures.get_mut(tex) else {
+            return;
+        };
+        // As many as both sides agree on: a caller that has miscounted
+        // draws a wrong picture rather than losing the frame.
+        let room = (*w as usize) * (*h as usize);
+        for (i, &argb) in pixels.iter().take(room).enumerate() {
+            // `0xAARRGGBB` in, RGBA8 out -- the packing every other colour
+            // on the HUD surface uses, unpacked once here.
+            into[i * 4] = (argb >> 16) as u8;
+            into[i * 4 + 1] = (argb >> 8) as u8;
+            into[i * 4 + 2] = argb as u8;
+            into[i * 4 + 3] = (argb >> 24) as u8;
+        }
+        if let Some(stamp) = self.ui_stamps.get_mut(tex) {
+            *stamp = stamp.wrapping_add(1);
+        }
     }
 
     fn ui_gif(&mut self, asset_path: &str) -> i64 {
