@@ -22,9 +22,11 @@
 
 use std::collections::{BTreeMap, BinaryHeap};
 
+pub mod field;
 pub mod portal;
 pub mod volume;
 
+pub use field::FieldGraph;
 pub use portal::{PortalGraph, BLOCK};
 pub use volume::{MoverProfile, NavVolume, Stand, VolumeLimits, VolumeWorld};
 

@@ -1615,6 +1615,16 @@ pub struct VoxelStore {
     /// state by the same argument as `tops`: fed only by command-driven
     /// script calls, so every peer holds the same set.
     nav_blocked: BTreeSet<(i64, i64)>,
+    /// The coarse graph a long route is planned over
+    /// ([`monada_nav::FieldGraph`]), built as it is needed and dropped
+    /// wherever the ground moves.
+    ///
+    /// **A cache, and deliberately not carried.** It is a function of the
+    /// two fields above, so a snapshot that carried it would be carrying a
+    /// second account of the same ground — and a peer that happens to have
+    /// built more of it gets the same answers, only faster.
+    #[serde(skip)]
+    coarse: monada_nav::FieldGraph,
 }
 
 impl VoxelStore {
@@ -1629,6 +1639,7 @@ impl VoxelStore {
     pub fn fill(&mut self, x0: i64, y0: i64, z0: i64, x1: i64, y1: i64, z1: i64) {
         let (xa, xb) = (x0.min(x1), x0.max(x1));
         let (ya, yb) = (y0.min(y1), y0.max(y1));
+        self.coarse.invalidate((xa, ya), (xb, yb));
         let top = z0.max(z1);
         for x in xa..=xb {
             for y in ya..=yb {
@@ -1651,6 +1662,7 @@ impl VoxelStore {
 
     /// Raise a single column to at least `z`.
     pub fn set(&mut self, x: i64, y: i64, z: i64) {
+        self.coarse.invalidate((x, y), (x, y));
         let e = self.tops.entry((x, y)).or_insert(i64::MIN);
         *e = (*e).max(z);
     }
@@ -1662,6 +1674,7 @@ impl VoxelStore {
     /// clear exactly the span that was solid, or `None` if the column was
     /// never painted.
     pub fn clear_above(&mut self, x: i64, y: i64, z: i64) -> Option<i64> {
+        self.coarse.invalidate((x, y), (x, y));
         let prev = self.tops.get(&(x, y)).copied();
         if let Some(top) = prev {
             let new_top = top.min(z - 1);
@@ -1689,6 +1702,7 @@ impl VoxelStore {
     /// Mark / clear cell `(x, y)` as explicitly impassable for navigation
     /// (building footprint, prop) regardless of its height.
     pub fn nav_block(&mut self, x: i64, y: i64, on: bool) {
+        self.coarse.invalidate((x, y), (x, y));
         if on {
             self.nav_blocked.insert((x, y));
         } else {
@@ -1704,7 +1718,7 @@ impl VoxelStore {
     /// best-effort path toward the closest reachable cell (never an
     /// error). Searches inside the painted world's bounding box.
     #[must_use]
-    pub fn nav_path(&self, x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64) -> Vec<FixedVec3> {
+    pub fn nav_path(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, max_step: i64) -> Vec<FixedVec3> {
         self.nav_path_drop(x0, y0, x1, y1, max_step, max_step)
     }
 
@@ -1717,7 +1731,7 @@ impl VoxelStore {
     /// `max_step` is [`nav_path`](Self::nav_path).
     #[must_use]
     pub fn nav_path_drop(
-        &self,
+        &mut self,
         x0: i64,
         y0: i64,
         x1: i64,
@@ -1740,7 +1754,17 @@ impl VoxelStore {
             // a hard ceiling on a sim tick's worst case.
             budget: 20_000,
         };
-        monada_nav::astar(self, (x0, y0), (x1, y1), &limits)
+        // **Through the coarse graph, which tries the flat search first.**
+        // An open route never touches the hierarchy (`monada_nav::field`);
+        // one round a long barrier is where a flat search spends tens of
+        // milliseconds and then gives up anyway.
+        //
+        // Taken out and put back because the graph plans against the very
+        // store it lives in, and a cache cannot borrow its own owner.
+        let mut coarse = std::mem::take(&mut self.coarse);
+        let route = coarse.path(self, (x0, y0), (x1, y1), &limits);
+        self.coarse = coarse;
+        route
             .into_iter()
             .map(|(x, y)| {
                 FixedVec3::new(
