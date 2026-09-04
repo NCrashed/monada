@@ -44,7 +44,7 @@ use roxlap_render::{
     ViewCutout, VoxelClipId,
 };
 use roxlap_scene::fow::{DeckBand, FogOfWar, FowObserver, FowTwin, VisionConfig};
-use roxlap_scene::{addr, GridId, GridTransform, RayHit, Scene};
+use roxlap_scene::{addr, ColumnSpan, GridId, GridTransform, RayHit, Scene};
 
 /// World voxels per sim unit (x/y). The board's 8 squares span 8·SCALE.
 const SCALE: f64 = 16.0;
@@ -5691,6 +5691,14 @@ impl HostBridge for MapRender {
         let Some(grid) = self.scene.grid_mut(world) else {
             return;
         };
+        // One batch for the cell, not a call per sub-column. A sub-column
+        // is a single colour by construction, so each is one span — but
+        // every `set_rect` opens its own edit context, and opening one
+        // allocates and zeroes a row cache as wide as the chunk. Two
+        // hundred and fifty-six of those per cell was the whole of a map's
+        // load: twenty-five seconds on a 128-cell map, against half of one
+        // through `set_columns`.
+        let mut batch: Vec<ColumnSpan> = Vec::with_capacity((span * span) as usize);
         for ly in 0..span {
             for lx in 0..span {
                 let slot = (ly * span + lx) as usize;
@@ -5702,23 +5710,18 @@ impl HostBridge for MapRender {
                 let Some(Some(cells)) = palette.get(slot).or_else(|| palette.first()) else {
                     continue;
                 };
-                let color = cells[slot];
                 // World X is mirrored (see `world_of`); tile column `lx`
                 // maps across the cell'span mirrored X span, row `ly` along Y.
-                let wx = (-x * span - 1 - lx) as i32;
-                let wy = (y * span + ly) as i32;
-                // One span, not one call per voxel. A sub-column is a
-                // single colour by construction, and `set_rect` decomposes
-                // per chunk — the per-voxel loop this replaces was tens of
-                // millions of calls on a map of any size, which is minutes
-                // of startup.
-                grid.set_rect(
-                    IVec3::new(wx, wy, (base - top) as i32),
-                    IVec3::new(wx, wy, (base - floor) as i32),
-                    Some(VoxColor(color)),
-                );
+                batch.push(ColumnSpan {
+                    x: (-x * span - 1 - lx) as i32,
+                    y: (y * span + ly) as i32,
+                    z0: (base - top) as i32,
+                    z1: (base - floor) as i32,
+                    color: VoxColor(cells[slot]),
+                });
             }
         }
+        grid.set_columns(&batch);
     }
 
     fn bake_ao(&mut self, strength: i64, radius: i64) {
@@ -5850,7 +5853,9 @@ impl HostBridge for MapRender {
     }
 
     fn ui_read(&mut self, tex: i64, pixels: &mut [u32]) -> i64 {
-        let Ok(tex) = usize::try_from(tex) else { return 0 };
+        let Ok(tex) = usize::try_from(tex) else {
+            return 0;
+        };
         let Some((from, w, h)) = self.ui_textures.get(tex) else {
             return 0;
         };
@@ -5870,7 +5875,9 @@ impl HostBridge for MapRender {
     }
 
     fn ui_paint(&mut self, tex: i64, pixels: &[u32]) {
-        let Ok(tex) = usize::try_from(tex) else { return };
+        let Ok(tex) = usize::try_from(tex) else {
+            return;
+        };
         let Some((into, w, h)) = self.ui_textures.get_mut(tex) else {
             return;
         };
@@ -9833,10 +9840,7 @@ mod tests {
     fn a_relief_leaves_nothing_of_the_shape_before_it() {
         let mut png = Vec::new();
         image::RgbaImage::from_pixel(1, 1, image::Rgba([200, 100, 50, 255]))
-            .write_to(
-                &mut std::io::Cursor::new(&mut png),
-                image::ImageFormat::Png,
-            )
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("encode a tile");
         let mut assets = BTreeMap::new();
         assets.insert("t.png".to_string(), png);
@@ -9853,7 +9857,10 @@ mod tests {
         let column = |r: &MapRender, z: i64| {
             let world = r.world_grid.expect("a grid was painted");
             let (lo, _) = sim_box_to_world(4, 4, z, 4, 4, z);
-            r.scene.grid(world).and_then(|g| g.voxel_color(lo)).is_some()
+            r.scene
+                .grid(world)
+                .and_then(|g| g.voxel_color(lo))
+                .is_some()
         };
         assert!(column(&r, tall), "the tall version was painted");
 
