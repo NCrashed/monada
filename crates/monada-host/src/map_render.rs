@@ -5849,6 +5849,26 @@ impl HostBridge for MapRender {
         (self.ui_textures.len() - 1) as i64
     }
 
+    fn ui_read(&mut self, tex: i64, pixels: &mut [u32]) -> i64 {
+        let Ok(tex) = usize::try_from(tex) else { return 0 };
+        let Some((from, w, h)) = self.ui_textures.get(tex) else {
+            return 0;
+        };
+        let room = (*w as usize) * (*h as usize);
+        let mut wrote = 0;
+        for (i, out) in pixels.iter_mut().take(room).enumerate() {
+            // RGBA8 in, `0xAARRGGBB` out -- the packing the rest of the
+            // HUD surface speaks, so a map reads back what it would have
+            // written.
+            *out = (u32::from(from[i * 4 + 3]) << 24)
+                | (u32::from(from[i * 4]) << 16)
+                | (u32::from(from[i * 4 + 1]) << 8)
+                | u32::from(from[i * 4 + 2]);
+            wrote += 1;
+        }
+        wrote
+    }
+
     fn ui_paint(&mut self, tex: i64, pixels: &[u32]) {
         let Ok(tex) = usize::try_from(tex) else { return };
         let Some((into, w, h)) = self.ui_textures.get_mut(tex) else {

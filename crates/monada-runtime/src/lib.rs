@@ -1518,6 +1518,17 @@ pub trait HostBridge: Send {
     fn ui_canvas(&mut self, _w: i64, _h: i64) -> i64 {
         -1
     }
+    /// Read a HUD texture's pixels back, `0xAARRGGBB` each, row by row.
+    /// Answers how many were written.
+    ///
+    /// **What a map needs to composite rather than stack.** Stacking is
+    /// two widgets and the one on top hides the one beneath; compositing
+    /// is one picture the map worked out from both -- and a map that
+    /// wants to turn, mask or shade a loaded texture has to be able to
+    /// read it first. Loaded once and kept, not asked for every frame.
+    fn ui_read(&mut self, _tex: i64, _pixels: &mut [u32]) -> i64 {
+        0
+    }
     /// …and its pixels, `0xAARRGGBB` each, row by row from the top left.
     ///
     /// Anything shorter than the canvas leaves the rest as it was, and

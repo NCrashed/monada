@@ -774,6 +774,13 @@ pub trait WorldRead {
         }
     }
 
+    /// …and read a texture back, for a map that composites rather than
+    /// stacks. See [`HostBridge::ui_read`].
+    fn ui_read(&self, tex: i64, pixels: &mut [u32]) -> i64 {
+        self.bridge()
+            .map_or(0, |b| b.lock().expect("bridge mutex").ui_read(tex, pixels))
+    }
+
     /// Draw texture `tex` with its top-left at `(x, y)`.
     fn ui_image(&self, tex: i64, x: i64, y: i64) {
         if let Some(b) = self.bridge() {
