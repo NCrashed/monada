@@ -1113,6 +1113,21 @@ pub trait HostBridge: Send {
     fn ui_clicks(&mut self) -> i64 {
         0
     }
+    /// Where the cursor is, in the same screen points the HUD is laid out
+    /// in — or `None` when it is outside the window.
+    ///
+    /// **What a HUD widget that is not a button needs.** A button answers
+    /// "was I pressed"; a map, a chart or a portrait has to answer "where
+    /// was I pressed", and the map is the only one that knows what its own
+    /// pixels mean. So the host reports the cursor and the map does the
+    /// arithmetic — which is also the only shape that works for a widget
+    /// whose contents move, like a minimap that turns with the camera.
+    ///
+    /// The buttons themselves arrive as declared actions, as they do over
+    /// the world: this says *where*, and the manifest says *what*.
+    fn ui_cursor(&self) -> Option<(i64, i64)> {
+        None
+    }
 
     /// Declare the map's directional "sun": `dir` is the direction the
     /// light travels, `intensity` its strength. The host shades the map's

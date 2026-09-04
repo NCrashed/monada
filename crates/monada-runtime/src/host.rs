@@ -697,6 +697,13 @@ pub trait WorldRead {
         })
     }
 
+    /// Where the cursor is, in the same points the HUD is laid out in, or
+    /// `None` off the window. See [`HostBridge::ui_cursor`].
+    fn ui_cursor(&self) -> Option<(i64, i64)> {
+        self.bridge()
+            .and_then(|b| b.lock().expect("bridge mutex").ui_cursor())
+    }
+
     /// Start a frame's HUD: everything drawn before this is gone.
     fn ui_clear(&self) {
         if let Some(b) = self.bridge() {

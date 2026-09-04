@@ -1504,6 +1504,13 @@ impl App {
         let (mut widgets, camera) = {
             let mut r = render.lock().expect("render mutex");
             r.set_ui_viewport(size.x as i64, size.y as i64);
+            // From the same context that lays the widgets out, so a map
+            // comparing the two is comparing like with like — the window's
+            // own pixels are a different number under any scale factor.
+            r.set_ui_cursor(
+                ctx.input(|i| i.pointer.latest_pos())
+                    .map(|p| (p.x as i64, p.y as i64)),
+            );
             (r.ui_widgets().to_vec(), r.camera())
         };
         if widgets.is_empty() {
