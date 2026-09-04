@@ -1964,8 +1964,11 @@ pub struct MapRender {
     /// The viewport size (screen points) the host last rendered at, so the map
     /// can lay the HUD out relative to the window (`ui_width`/`ui_height`).
     ui_viewport: (i64, i64),
-    /// Where the cursor is, in those same points. `None` off the window.
-    ui_cursor: Option<(i64, i64)>,
+    /// The last click on the HUD -- `(button, x, y)` in those same points
+    /// -- until the map takes it (`ui_click`). Latched by the egui pass,
+    /// which is the only thing that sees it: a click over the overlay
+    /// never reaches the window's own dispatch.
+    ui_click: Option<(i64, i64, i64)>,
     /// Uniform scale applied to every HUD texture + text (`ui_scale`); the map
     /// lays out at scaled sizes, the host multiplies each drawn size by this.
     ui_scale: f32,
@@ -2158,7 +2161,7 @@ impl MapRender {
             ui_widgets: Vec::new(),
             ui_pin: None,
             ui_viewport: (0, 0),
-            ui_cursor: None,
+            ui_click: None,
             ui_scale: 1.0,
             sounds_pending: Vec::new(),
             blips_pending: Vec::new(),
@@ -3973,10 +3976,15 @@ impl MapRender {
         self.ui_viewport = (width, height);
     }
 
-    /// …and where the cursor is in them, so a map can tell a click on its
-    /// chart from a click on the ground behind it.
-    pub fn set_ui_cursor(&mut self, at: Option<(i64, i64)>) {
-        self.ui_cursor = at;
+    /// …and a click on the HUD in them, so a map can tell a click on its
+    /// own chart from a click on the ground behind it.
+    ///
+    /// Latched rather than dispatched: the overlay consumes any click over
+    /// itself, so this is the only path from that click back to the map.
+    pub fn set_ui_click(&mut self, click: Option<(i64, i64, i64)>) {
+        if click.is_some() {
+            self.ui_click = click;
+        }
     }
 
     /// Take the audio the map queued since the last call: the de-duplicated
@@ -5953,9 +5961,6 @@ impl HostBridge for MapRender {
     fn ui_width(&self) -> i64 {
         self.ui_viewport.0
     }
-    fn ui_cursor(&self) -> Option<(i64, i64)> {
-        self.ui_cursor
-    }
     fn ui_height(&self) -> i64 {
         self.ui_viewport.1
     }
@@ -6505,6 +6510,10 @@ impl HostBridge for MapRender {
 
     fn ui_clicks(&mut self) -> i64 {
         std::mem::take(&mut self.ui_click_bits)
+    }
+
+    fn ui_click(&mut self) -> Option<(i64, i64, i64)> {
+        self.ui_click.take()
     }
 
     fn set_light(&mut self, dir: FixedVec3, intensity: Fixed) {

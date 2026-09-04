@@ -697,11 +697,11 @@ pub trait WorldRead {
         })
     }
 
-    /// Where the cursor is, in the same points the HUD is laid out in, or
-    /// `None` off the window. See [`HostBridge::ui_cursor`].
-    fn ui_cursor(&self) -> Option<(i64, i64)> {
+    /// Take the last click on the HUD: which button and where, in the same
+    /// points the HUD is laid out in. See [`HostBridge::ui_click`].
+    fn ui_click(&self) -> Option<(i64, i64, i64)> {
         self.bridge()
-            .and_then(|b| b.lock().expect("bridge mutex").ui_cursor())
+            .and_then(|b| b.lock().expect("bridge mutex").ui_click())
     }
 
     /// Start a frame's HUD: everything drawn before this is gone.

@@ -1507,10 +1507,23 @@ impl App {
             // From the same context that lays the widgets out, so a map
             // comparing the two is comparing like with like — the window's
             // own pixels are a different number under any scale factor.
-            r.set_ui_cursor(
-                ctx.input(|i| i.pointer.latest_pos())
-                    .map(|p| (p.x as i64, p.y as i64)),
-            );
+            //
+            // And from here rather than from the window's own dispatch,
+            // because a click over the overlay never gets there: egui
+            // reports every mouse press over one of its areas as consumed,
+            // which is right for a button and fatal for a map drawn as a
+            // picture. What it swallows, this hands back.
+            r.set_ui_click(ctx.input(|i| {
+                let at = i.pointer.interact_pos()?;
+                let button = if i.pointer.button_clicked(egui::PointerButton::Primary) {
+                    monada_runtime::CLICK_LEFT
+                } else if i.pointer.button_clicked(egui::PointerButton::Secondary) {
+                    monada_runtime::CLICK_RIGHT
+                } else {
+                    return None;
+                };
+                Some((button, at.x as i64, at.y as i64))
+            }));
             (r.ui_widgets().to_vec(), r.camera())
         };
         if widgets.is_empty() {

@@ -347,7 +347,16 @@ pub use volume::VolumeStore;
 /// smoothly behind it, so a map easing toward a hero has to ease toward
 /// the hero on screen. Local only: the answer depends on where in a tick
 /// this client's frame fell, so peers disagree by design.
-pub const HOST_API_VERSION: u32 = 47;
+/// …and 48 is the HUD growing a canvas a map paints itself
+/// ([`HostBridge::ui_canvas`], [`HostBridge::ui_paint`]), a way to read a
+/// picture back ([`HostBridge::ui_read`]) and a click reported with its
+/// point ([`HostBridge::ui_click`]) -- between them, a widget that is a
+/// map rather than a button.
+pub const HOST_API_VERSION: u32 = 48;
+
+/// Which mouse button a [`HostBridge::ui_click`] came from.
+pub const CLICK_LEFT: i64 = 0;
+pub const CLICK_RIGHT: i64 = 1;
 
 /// The oldest declared `host_api` requirement this build still fully
 /// honors. Trails [`HOST_API_VERSION`] while growth stays additive; a
@@ -1113,19 +1122,22 @@ pub trait HostBridge: Send {
     fn ui_clicks(&mut self) -> i64 {
         0
     }
-    /// Where the cursor is, in the same screen points the HUD is laid out
-    /// in — or `None` when it is outside the window.
+    /// Take (return **and clear**) the last click on the HUD: which button
+    /// ([`CLICK_LEFT`] or [`CLICK_RIGHT`]) and where, in the same screen
+    /// points the HUD is laid out in.
     ///
     /// **What a HUD widget that is not a button needs.** A button answers
     /// "was I pressed"; a map, a chart or a portrait has to answer "where
     /// was I pressed", and the map is the only one that knows what its own
-    /// pixels mean. So the host reports the cursor and the map does the
+    /// pixels mean. So the host reports the click and the map does the
     /// arithmetic — which is also the only shape that works for a widget
     /// whose contents move, like a minimap that turns with the camera.
     ///
-    /// The buttons themselves arrive as declared actions, as they do over
-    /// the world: this says *where*, and the manifest says *what*.
-    fn ui_cursor(&self) -> Option<(i64, i64)> {
+    /// **It cannot arrive as a declared action.** A click anywhere over
+    /// the HUD is consumed by the overlay before the window dispatches it,
+    /// so a map waiting for its own `order` action over a widget waits for
+    /// ever. What the overlay swallows it has to hand back.
+    fn ui_click(&mut self) -> Option<(i64, i64, i64)> {
         None
     }
 
